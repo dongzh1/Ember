@@ -800,6 +800,18 @@ impl PluginManager {
             return (entry.approved, std::time::Duration::ZERO);
         }
 
+        // EMBER start - auto_approve_permissions
+        if let Some(server) = self.server.read().await.as_ref()
+            && server.advanced_config.plugins.auto_approve_permissions
+        {
+            info!(
+                "Auto-approving permissions for plugin \"{}\"",
+                metadata.name
+            );
+            return (true, std::time::Duration::ZERO);
+        }
+        // EMBER end
+
         let (allowed, wait_time) = Self::ask_permission_confirmation(metadata);
         cache.entries.insert(
             hash,
