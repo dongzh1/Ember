@@ -23,6 +23,12 @@ Pumpkin 是南瓜，Ember 是把它点亮的那团火。
 
 ## 同步上游（建议每周一次，小步高频）
 
+**首选：双击仓库根目录的 `sync-upstream.bat`。**
+它会自动完成下面的全部步骤并推送云端；有冲突时会打印冲突报告
+（标注哪些文件含 EMBER 标记块）并保留合并现场，按提示处理即可。
+
+脚本不可用时的手工流程：
+
 ```bash
 git fetch upstream
 git checkout master && git merge --ff-only upstream/master && git push origin master
@@ -85,6 +91,7 @@ git push origin main
 | 功能 | 涉及文件 | 说明 |
 |---|---|---|
 | `auto_approve_permissions` | `pumpkin-config/src/plugins.rs`、`pumpkin/src/plugin/mod.rs` | 配置开启后插件权限请求自动批准，适合无人值守服务器 |
+| 一键上游同步脚本 | `sync-upstream.bat`、`scripts/sync-upstream.ps1` | 双击同步上游并推送云端，冲突时输出报告 |
 
 （新增功能时更新此表。）
 
