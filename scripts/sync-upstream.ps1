@@ -85,7 +85,10 @@ if ($LASTEXITCODE -ne 0) { Fail "推送 master 到 origin 失败。" }
 if ($newCount -eq 0) {
     git checkout -q main
     Write-Host ""
-    Write-Host "上游没有新提交, 已经是最新。main 未变动。" -ForegroundColor Green
+    Write-Host "上游没有新提交。同步 main 到云端..." -ForegroundColor Green
+    git push -u origin main
+    if ($LASTEXITCODE -ne 0) { Fail "推送 main 到 origin 失败。" }
+    Write-Host "=== 同步完成: 上游无更新, main 已同步到云端 ===" -ForegroundColor Green
     exit 0
 }
 
