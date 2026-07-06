@@ -17,6 +17,7 @@ on:
       - 'pumpkin-world/src/level.rs'
       - 'pumpkin-world/Cargo.toml'
       - 'Cargo.toml'
+      - '.github/workflows/easyworld-ci.yml'
   pull_request:
     paths:
       - 'pumpkin-world/src/chunk/format/easy.rs'
@@ -25,7 +26,13 @@ on:
       - 'pumpkin-world/src/level.rs'
       - 'pumpkin-world/Cargo.toml'
       - 'Cargo.toml'
+      - '.github/workflows/easyworld-ci.yml'
   workflow_dispatch:
+
+# 同分支只保留最新一次运行,避免连续推送时旧构建白烧 Actions 时长
+concurrency:
+  group: easyworld-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -36,7 +43,8 @@ jobs:
   file-mode:
     name: EasyWorld File Mode
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 无缓存的全量 release 构建需要 30-60 分钟,15 分钟会被 GitHub 掐死(表现为 cancelled)
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
         with:
@@ -99,7 +107,7 @@ jobs:
   mysql-mode:
     name: EasyWorld MySQL Mode
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 75
     services:
       mysql:
         image: mysql:8
@@ -179,7 +187,7 @@ jobs:
   clippy-check:
     name: Clippy (easyworld crates only)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
