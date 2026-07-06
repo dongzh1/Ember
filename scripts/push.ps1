@@ -66,7 +66,27 @@ if ($dirty) {
     Write-Host "工作区干净,没有新改动,只同步已有提交到云端。" -ForegroundColor Yellow
 }
 
-# 4. 推送
+# 4. 先同步远程改动 (dependabot 合并 / 别处推送等),避免非快进被拒
+Write-Host ""
+Write-Host "同步远程改动..." -ForegroundColor Cyan
+git fetch origin $branch 2>&1 | Out-Null
+git rev-parse --verify --quiet "origin/$branch" *> $null
+if ($LASTEXITCODE -eq 0) {
+    $behind = [int](git rev-list --count "$branch..origin/$branch" 2>$null)
+    if ($behind -gt 0) {
+        Write-Host "远程领先 $behind 个提交,rebase 本地提交到其之上..." -ForegroundColor Yellow
+        git rebase "origin/$branch"
+        if ($LASTEXITCODE -ne 0) {
+            git rebase --abort 2>$null
+            Fail "远程改动与本地冲突,已取消 rebase 保留现场。请手动解决:`n  git pull --rebase origin $branch`n(或到 Claude Code 里说: 帮我处理 push 冲突)"
+        }
+        Write-Host "[已同步] 本地已 rebase 到最新远程" -ForegroundColor Green
+    } else {
+        Write-Host "[已是最新] 远程无新提交" -ForegroundColor Green
+    }
+}
+
+# 5. 推送
 Write-Host ""
 Write-Host "推送 $branch 到 origin..." -ForegroundColor Cyan
 git push -u origin $branch
