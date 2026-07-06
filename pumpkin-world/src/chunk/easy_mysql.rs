@@ -12,26 +12,32 @@
 //       PRIMARY KEY (world_key, region_x, region_z)
 //   );
 //
-// Concurrency: region writes are read-modify-write cycles serialized by a
-// per-region async lock, so concurrent saves within one server are safe.
-// A database must NOT be shared by multiple server instances at once —
-// there is no cross-process locking.
+// Concurrency (SlimeWorld-style one-writer/many-readers):
+//   - Within one server, region writes are read-modify-write cycles
+//     serialized by a per-region async lock.
+//   - Across servers, a world may be loaded read_only by any number of
+//     servers, but only ONE server at a time may hold it read_write.
+//     The writer registers in `easyworld_locks` and refreshes a heartbeat;
+//     a lock whose heartbeat expired (crashed server) can be taken over.
+//     A second read_write server degrades to read-only with a loud error.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures::future::join_all;
 use pumpkin_util::math::vector2::Vector2;
 use tokio::sync::{RwLock, mpsc};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::chunk::format::anvil::SingleChunkDataSerializer;
 use crate::chunk::format::easy::EasyRegionData;
 use crate::chunk::io::{BoxFuture, Dirtiable};
 use crate::chunk::{ChunkReadingError, ChunkWritingError};
 use crate::level::LevelFolder;
-use pumpkin_config::chunk::EasyMysqlConfig;
+use pumpkin_config::chunk::{EasyMysqlConfig, EasyWorldMode};
 
 use super::io::{FileIO, LoadedData};
 
@@ -54,6 +60,51 @@ const UPSERT_REGION: &str = concat!(
     "VALUES (?, ?, ?, ?) ",
     "ON DUPLICATE KEY UPDATE data = VALUES(data)"
 );
+
+// ─── World write lock (one writer, many readers) ───────────────────────
+
+/// A writer whose heartbeat is older than this is considered crashed and
+/// its lock may be taken over.
+const LOCK_TTL_SECS: i64 = 60;
+/// How often the heartbeat task refreshes held locks (and retries denied ones).
+const LOCK_HEARTBEAT_SECS: u64 = 20;
+
+const CREATE_LOCK_TABLE: &str = concat!(
+    "CREATE TABLE IF NOT EXISTS easyworld_locks (",
+    "world_key VARCHAR(512) NOT NULL,",
+    "owner VARCHAR(128) NOT NULL,",
+    "heartbeat BIGINT NOT NULL,",
+    "PRIMARY KEY (world_key)",
+    ")"
+);
+
+/// Atomically takes the lock when the row is already ours or the previous
+/// holder's heartbeat expired; a live foreign row is left untouched.
+/// (`MySQL` evaluates the assignments left to right, so the heartbeat IF
+/// already sees the updated owner.)
+const ACQUIRE_LOCK: &str = concat!(
+    "INSERT INTO easyworld_locks (world_key, owner, heartbeat) VALUES (?, ?, ?) ",
+    "ON DUPLICATE KEY UPDATE ",
+    "owner = IF(owner = VALUES(owner) OR heartbeat < ?, VALUES(owner), owner), ",
+    "heartbeat = IF(owner = VALUES(owner), VALUES(heartbeat), heartbeat)"
+);
+
+const SELECT_LOCK_OWNER: &str = "SELECT owner FROM easyworld_locks WHERE world_key = ?";
+
+const REFRESH_LOCK: &str =
+    "UPDATE easyworld_locks SET heartbeat = ? WHERE world_key = ? AND owner = ?";
+
+const RELEASE_LOCK: &str = "DELETE FROM easyworld_locks WHERE world_key = ? AND owner = ?";
+
+fn read_err(e: impl std::fmt::Display) -> ChunkReadingError {
+    ChunkReadingError::IoError(std::io::Error::other(e.to_string()))
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
 
 // ─── Serialization helpers ─────────────────────────────────────────────
 
@@ -111,7 +162,11 @@ impl MysqlPool {
         sqlx::query(CREATE_TABLE)
             .execute(&self.pool)
             .await
-            .map_err(|e| ChunkReadingError::IoError(std::io::Error::other(e.to_string())))?;
+            .map_err(read_err)?;
+        sqlx::query(CREATE_LOCK_TABLE)
+            .execute(&self.pool)
+            .await
+            .map_err(read_err)?;
 
         // Upgrade tables created by older versions: MEDIUMBLOB caps a region
         // at 16 MiB, which a densely built full region can exceed.
@@ -133,6 +188,65 @@ impl MysqlPool {
             info!("EasyWorld MySQL: upgraded data column MEDIUMBLOB -> LONGBLOB");
         }
         Ok(())
+    }
+
+    /// Whether the region table exists (read-only servers must not create it).
+    async fn table_exists(&self) -> Result<bool, ChunkReadingError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT TABLE_NAME FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'easyworld_regions'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(read_err)?;
+        Ok(row.is_some())
+    }
+
+    /// Try to take (or keep) the write lock for `world_key`.
+    /// Returns `true` when this `owner` now holds the lock.
+    async fn try_acquire_lock(
+        &self,
+        world_key: &str,
+        owner: &str,
+    ) -> Result<bool, ChunkReadingError> {
+        let now = unix_now();
+        sqlx::query(ACQUIRE_LOCK)
+            .bind(world_key)
+            .bind(owner)
+            .bind(now)
+            .bind(now - LOCK_TTL_SECS)
+            .execute(&self.pool)
+            .await
+            .map_err(read_err)?;
+        let row: Option<(String,)> = sqlx::query_as(SELECT_LOCK_OWNER)
+            .bind(world_key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(read_err)?;
+        Ok(row.is_some_and(|(o,)| o == owner))
+    }
+
+    /// Refresh the heartbeat of a held lock. Returns `false` if the lock
+    /// is no longer ours (expired and taken over).
+    async fn refresh_lock(&self, world_key: &str, owner: &str) -> Result<bool, ChunkReadingError> {
+        let res = sqlx::query(REFRESH_LOCK)
+            .bind(unix_now())
+            .bind(world_key)
+            .bind(owner)
+            .execute(&self.pool)
+            .await
+            .map_err(read_err)?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Best-effort lock release on graceful shutdown; heartbeat expiry
+    /// covers crashes.
+    async fn release_lock(&self, world_key: &str, owner: &str) {
+        let _ = sqlx::query(RELEASE_LOCK)
+            .bind(world_key)
+            .bind(owner)
+            .execute(&self.pool)
+            .await;
     }
 
     async fn load_region(
@@ -190,40 +304,174 @@ pub struct EasyMysqlStorage {
     /// Serializes the read-modify-write save cycle per region so concurrent
     /// saves of the same region cannot overwrite each other's chunks.
     region_locks: RwLock<BTreeMap<RegionKey, Arc<tokio::sync::Mutex<()>>>>,
+    /// Identity of this server process in `easyworld_locks`.
+    owner_id: String,
+    /// Write-lock state per world key: `true` = held, `false` = denied
+    /// (another live server is the writer).
+    world_write_locks: Arc<RwLock<BTreeMap<String, bool>>>,
+    /// Set on drop; stops the heartbeat task.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl EasyMysqlStorage {
     #[must_use]
     pub fn new(config: &EasyMysqlConfig) -> Self {
+        let owner_id = format!(
+            "pid{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos())
+        );
         let storage = Self {
             config: config.clone(),
             pool: Arc::new(tokio::sync::OnceCell::new()),
             region_cache: RwLock::new(BTreeMap::new()),
             watchers: RwLock::new(BTreeMap::new()),
             region_locks: RwLock::new(BTreeMap::new()),
+            owner_id,
+            world_write_locks: Arc::new(RwLock::new(BTreeMap::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
         };
 
-        // Eagerly connect in the background so a bad URL or unreachable
-        // database fails loudly at startup instead of on the first chunk IO
-        // (which without players may never happen).
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // Eagerly connect in the background so a bad URL or unreachable
+            // database fails loudly at startup instead of on the first chunk
+            // IO (which without players may never happen).
             let pool_cell = storage.pool.clone();
             let url = storage.config.url.clone();
+            let mode = storage.config.mode;
             handle.spawn(async move {
-                if let Err(e) = pool_cell.get_or_try_init(|| Self::init_pool(&url)).await {
+                if let Err(e) = pool_cell
+                    .get_or_try_init(|| Self::init_pool(&url, mode))
+                    .await
+                {
                     error!("EasyWorld MySQL eager init failed (check [world.chunk] url): {e}");
                 }
             });
+
+            // Heartbeat task: keeps held world locks alive and retries denied
+            // ones, so a reader-degraded server takes over automatically once
+            // the previous writer shuts down or crashes.
+            if storage.config.mode == EasyWorldMode::ReadWrite {
+                let pool_cell = storage.pool.clone();
+                let locks = storage.world_write_locks.clone();
+                let owner = storage.owner_id.clone();
+                let shutdown = storage.shutdown.clone();
+                handle.spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(Duration::from_secs(LOCK_HEARTBEAT_SECS));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        interval.tick().await;
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let snapshot: Vec<(String, bool)> = locks
+                            .read()
+                            .await
+                            .iter()
+                            .map(|(k, &v)| (k.clone(), v))
+                            .collect();
+                        if snapshot.is_empty() {
+                            continue;
+                        }
+                        let Some(pool) = pool_cell.get().cloned() else {
+                            continue;
+                        };
+                        for (key, held) in snapshot {
+                            if held {
+                                match pool.refresh_lock(&key, &owner).await {
+                                    Ok(true) => {}
+                                    Ok(false) => {
+                                        error!(
+                                            "EasyWorld: lost write lock for {key} — writes are now rejected"
+                                        );
+                                        locks.write().await.insert(key, false);
+                                    }
+                                    Err(e) => {
+                                        warn!("EasyWorld: heartbeat for {key} failed: {e}");
+                                    }
+                                }
+                            } else if matches!(
+                                pool.try_acquire_lock(&key, &owner).await,
+                                Ok(true)
+                            ) {
+                                info!(
+                                    "EasyWorld: took over write lock for {key} (previous writer gone)"
+                                );
+                                locks.write().await.insert(key, true);
+                            }
+                        }
+                    }
+                });
+            }
         }
 
         storage
     }
 
-    async fn init_pool(url: &str) -> Result<Arc<MysqlPool>, ChunkReadingError> {
+    async fn init_pool(
+        url: &str,
+        mode: EasyWorldMode,
+    ) -> Result<Arc<MysqlPool>, ChunkReadingError> {
         let p = MysqlPool::new(url).await?;
-        p.ensure_table().await?;
-        info!("EasyWorld MySQL pool initialized (table: easyworld_regions)");
+        match mode {
+            EasyWorldMode::ReadWrite => {
+                p.ensure_table().await?;
+                info!("EasyWorld MySQL pool initialized (read_write)");
+            }
+            EasyWorldMode::ReadOnly => {
+                if !p.table_exists().await? {
+                    return Err(read_err(
+                        "read_only mode but table easyworld_regions does not exist — \
+                         start a read_write server against this database first",
+                    ));
+                }
+                info!("EasyWorld MySQL pool initialized (read_only)");
+            }
+        }
         Ok(Arc::new(p))
+    }
+
+    /// Whether this server holds the write lock for `world_key`.
+    /// In `read_write` mode the lock is acquired on first use; a failed
+    /// acquisition (another live writer) is cached and retried by the
+    /// heartbeat task.
+    async fn ensure_write_lock(&self, world_key: &str) -> bool {
+        if self.config.mode == EasyWorldMode::ReadOnly {
+            return false;
+        }
+        if let Some(&held) = self.world_write_locks.read().await.get(world_key) {
+            return held;
+        }
+        let pool = match self.ensure_pool().await {
+            Ok(p) => p.clone(),
+            Err(e) => {
+                warn!("EasyWorld: cannot reach database to lock {world_key}: {e}");
+                return false;
+            }
+        };
+        let acquired = match pool.try_acquire_lock(world_key, &self.owner_id).await {
+            Ok(a) => a,
+            Err(e) => {
+                warn!("EasyWorld: write lock query failed for {world_key}: {e}");
+                return false;
+            }
+        };
+        if acquired {
+            info!("EasyWorld: acquired write lock for {world_key}");
+        } else {
+            error!(
+                "EasyWorld: world {world_key} is write-locked by another server — \
+                 running as READ-ONLY until the writer releases it"
+            );
+        }
+        self.world_write_locks
+            .write()
+            .await
+            .insert(world_key.to_string(), acquired);
+        acquired
     }
 
     async fn region_lock(&self, world_key: &str, rx: i32, rz: i32) -> Arc<tokio::sync::Mutex<()>> {
@@ -237,7 +485,7 @@ impl EasyMysqlStorage {
 
     async fn ensure_pool(&self) -> Result<&Arc<MysqlPool>, ChunkReadingError> {
         self.pool
-            .get_or_try_init(|| Self::init_pool(&self.config.url))
+            .get_or_try_init(|| Self::init_pool(&self.config.url, self.config.mode))
             .await
     }
 
@@ -301,6 +549,11 @@ impl FileIO for EasyMysqlStorage {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let world_key = Self::world_key(folder);
+            // Claim (or verify) the write lock as soon as the world is used,
+            // so a locked world is reported at load time, not at first save.
+            if self.config.mode == EasyWorldMode::ReadWrite {
+                let _ = self.ensure_write_lock(&world_key).await;
+            }
             let mut regions_chunks: BTreeMap<(i32, i32), Vec<Vector2<i32>>> = BTreeMap::new();
             for coord in chunk_coords {
                 regions_chunks
@@ -368,6 +621,25 @@ impl FileIO for EasyMysqlStorage {
     ) -> BoxFuture<'a, Result<(), ChunkWritingError>> {
         Box::pin(async move {
             let world_key = Self::world_key(folder);
+
+            if !self.ensure_write_lock(&world_key).await {
+                if self.config.mode == EasyWorldMode::ReadOnly {
+                    // Read-only servers intentionally discard saves.
+                    for (_, chunk) in &chunks_data {
+                        chunk.mark_dirty(false);
+                    }
+                    debug!(
+                        "EasyWorld read_only: discarded {} chunk saves for {world_key}",
+                        chunks_data.len()
+                    );
+                    return Ok(());
+                }
+                // read_write but another server holds the lock: keep the
+                // chunks dirty so they persist once the lock is taken over.
+                return Err(ChunkWritingError::IoError(std::io::Error::other(format!(
+                    "world {world_key} is write-locked by another server"
+                ))));
+            }
 
             // Group chunks by region, keeping the chunk handle so the dirty
             // flag is cleared only after the region is actually persisted.
@@ -493,5 +765,37 @@ impl FileIO for EasyMysqlStorage {
         Box::pin(async move {
             trace!("EasyMysqlStorage: block_and_await_ongoing_tasks (no-op)");
         })
+    }
+}
+
+impl Drop for EasyMysqlStorage {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        // Best-effort release of held world locks so another server can take
+        // over immediately; heartbeat expiry covers crashes.
+        let Some(pool) = self.pool.get().cloned() else {
+            return;
+        };
+        let held: Vec<String> = self.world_write_locks.try_read().map_or_else(
+            |_| Vec::new(),
+            |map| {
+                map.iter()
+                    .filter(|&(_, &h)| h)
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            },
+        );
+        if held.is_empty() {
+            return;
+        }
+        let owner = self.owner_id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                for key in held {
+                    pool.release_lock(&key, &owner).await;
+                    info!("EasyWorld: released write lock for {key}");
+                }
+            });
+        }
     }
 }

@@ -42,13 +42,32 @@ pub struct AnvilChunkConfig {
 // EMBER start - easyworld mysql config
 /// Configuration for `EasyWorld` `MySQL` storage.
 ///
-/// One database must be used by exactly one server instance at a time;
-/// there is no cross-process locking, concurrent writers would overwrite
-/// each other's regions.
+/// Like `SlimeWorldManager`: any number of servers may load a world in
+/// `read_only` mode, but only one server at a time may hold it in
+/// `read_write` mode. The writer is protected by a heartbeat lock in the
+/// database; a second writer automatically degrades to read-only.
 #[derive(Deserialize, Serialize, Clone)]
 pub struct EasyMysqlConfig {
     /// `MySQL` connection URL, e.g. `mysql://user:pass@localhost:3306/ember`
     pub url: String,
+    /// Access mode: `read_write` (default, takes the world lock) or
+    /// `read_only` (never writes; safe on any number of servers).
+    #[serde(default)]
+    pub mode: EasyWorldMode,
+}
+
+/// Access mode for a shared `EasyWorld` database.
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EasyWorldMode {
+    /// Full access: loads, generates, and saves chunks. Requires the
+    /// world lock; only one `read_write` server per database at a time.
+    #[default]
+    #[serde(rename = "read_write")]
+    ReadWrite,
+    /// Never writes to the database. Chunks missing from storage are
+    /// generated in memory and discarded on unload/shutdown.
+    #[serde(rename = "read_only")]
+    ReadOnly,
 }
 // EMBER end
 

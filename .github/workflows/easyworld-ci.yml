@@ -184,6 +184,31 @@ jobs:
             exit 1
           fi
 
+          echo ""
+          echo "=== read_only mode check (SlimeWorld-style reader) ==="
+          RO_DIR=$(mktemp -d)
+          cd "$RO_DIR"
+          cat > pumpkin.toml << 'TOML'
+          java_edition_address = "0.0.0.0:25568"
+          bedrock_edition = false
+
+          [world.chunk]
+          type = "easy_mysql"
+          url = "mysql://root:ember_test@127.0.0.1:3306/ember"
+          mode = "read_only"
+
+          [plugins]
+          auto_approve_permissions = true
+          TOML
+          timeout -s INT 20 "$GITHUB_WORKSPACE/target/release/pumpkin" > /tmp/server-ro.log 2>&1 || true
+          if grep -q "pool initialized (read_only)" /tmp/server-ro.log; then
+            echo ">> read_only mode OK — pool initialized read-only against the shared database"
+          else
+            echo ">> FAIL: read_only init marker not found. Log tail:"
+            tail -50 /tmp/server-ro.log 2>/dev/null || true
+            exit 1
+          fi
+
   # ─── Clippy quick check ───────────────────────────────────────────────
   clippy-check:
     name: Clippy (easyworld crates only)
