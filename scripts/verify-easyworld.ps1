@@ -58,22 +58,21 @@ function Verify-FileMode {
     Write-Info "=== File mode (type=easy) ==="
     Push-Location $worldDir
 
-    New-Item -ItemType Directory -Force "config" | Out-Null
-
+    # 服务端从当前目录的 pumpkin.toml 读配置,区块格式在 [world.chunk]
     $configContent = @'
-[java_edition]
-address = "0.0.0.0:25566"
+java_edition_address = "0.0.0.0:25566"
+bedrock_edition = false
 
-[chunk]
+[world.chunk]
 type = "easy"
 
-[plugin]
+[plugins]
 auto_approve_permissions = true
 '@
-    Set-Content -Path "config\configuration.toml" -Value $configContent
+    Set-Content -Path "pumpkin.toml" -Value $configContent
 
     Write-Info "Config:"
-    Get-Content "config\configuration.toml"
+    Get-Content "pumpkin.toml"
     Write-Host ""
 
     $logFile = Join-Path $TempDir "server-file.log"
@@ -159,20 +158,19 @@ function Verify-MysqlMode {
     }
 
     Push-Location $worldDir
-    New-Item -ItemType Directory -Force "config" | Out-Null
 
     $configContent = @'
-[java_edition]
-address = "0.0.0.0:25567"
+java_edition_address = "0.0.0.0:25567"
+bedrock_edition = false
 
-[chunk]
+[world.chunk]
 type = "easy_mysql"
 url = "mysql://root:ember_test@127.0.0.1:3307/ember"
 
-[plugin]
+[plugins]
 auto_approve_permissions = true
 '@
-    Set-Content -Path "config\configuration.toml" -Value $configContent
+    Set-Content -Path "pumpkin.toml" -Value $configContent
 
     $logFile = Join-Path $TempDir "server-mysql.log"
     Write-Info "Starting server (auto-stop after 10s)..."

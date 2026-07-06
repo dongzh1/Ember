@@ -61,24 +61,25 @@ jobs:
           set -e
           TEMP_DIR=$(mktemp -d)
           cd "$TEMP_DIR"
-          mkdir -p config
 
-          cat > config/configuration.toml << 'TOML'
-          [java_edition]
-          address = "0.0.0.0:25566"
+          # 服务端从当前目录的 pumpkin.toml 读配置 (PumpkinConfig::load(current_dir))
+          # 区块格式在 [world.chunk],java_edition_address 是顶层键
+          cat > pumpkin.toml << 'TOML'
+          java_edition_address = "0.0.0.0:25566"
+          bedrock_edition = false
 
-          [chunk]
+          [world.chunk]
           type = "easy"
 
-          [plugin]
+          [plugins]
           auto_approve_permissions = true
           TOML
 
           echo "=== Config ==="
-          cat config/configuration.toml
+          cat pumpkin.toml
 
-          echo "=== Starting Ember (15s) ==="
-          timeout 15 "$GITHUB_WORKSPACE/target/release/pumpkin" > /tmp/server.log 2>&1 || true
+          echo "=== Starting Ember (30s, SIGINT for graceful save) ==="
+          timeout -s INT 30 "$GITHUB_WORKSPACE/target/release/pumpkin" > /tmp/server.log 2>&1 || true
 
           echo ""
           echo "=== Checking .easy files ==="
@@ -138,25 +139,25 @@ jobs:
           set -e
           TEMP_DIR=$(mktemp -d)
           cd "$TEMP_DIR"
-          mkdir -p config
 
-          cat > config/configuration.toml << 'TOML'
-          [java_edition]
-          address = "0.0.0.0:25567"
+          # 配置说明见 file-mode;MySQL 变体在 [world.chunk] 里带 url
+          cat > pumpkin.toml << 'TOML'
+          java_edition_address = "0.0.0.0:25567"
+          bedrock_edition = false
 
-          [chunk]
+          [world.chunk]
           type = "easy_mysql"
           url = "mysql://root:ember_test@127.0.0.1:3306/ember"
 
-          [plugin]
+          [plugins]
           auto_approve_permissions = true
           TOML
 
           echo "=== Config ==="
-          cat config/configuration.toml
+          cat pumpkin.toml
 
-          echo "=== Starting Ember (15s) ==="
-          timeout 15 "$GITHUB_WORKSPACE/target/release/pumpkin" > /tmp/server-mysql.log 2>&1 || true
+          echo "=== Starting Ember (30s, SIGINT for graceful save) ==="
+          timeout -s INT 30 "$GITHUB_WORKSPACE/target/release/pumpkin" > /tmp/server-mysql.log 2>&1 || true
 
           echo ""
           echo "=== MySQL check ==="

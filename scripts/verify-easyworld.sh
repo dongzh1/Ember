@@ -68,21 +68,6 @@ build_server() {
   echo -e "${PASS} 编译完成: $SERVER_BIN"
 }
 
-# ─── 步骤 2: 生成默认配置 ──────────────────────────────────────────────
-generate_config() {
-  local world_dir="$1"
-  mkdir -p "$world_dir"
-
-  echo -e "\n${INFO} 生成默认配置..."
-  timeout 3 "$SERVER_BIN" 2>/dev/null || true
-
-  # Pumpkin 在当前目录生成 config/
-  # 如果没生成，手动创建
-  if [ ! -f "config/configuration.toml" ]; then
-    mkdir -p config
-  fi
-}
-
 # ─── 步骤 3: 写入 easy 配置并验证 ──────────────────────────────────────
 verify_file_mode() {
   local world_dir="$TEMP_DIR/easyworld_file"
@@ -91,29 +76,25 @@ verify_file_mode() {
   echo -e "\n${INFO} === 验证文件模式 (type=easy) ==="
 
   cd "$world_dir"
-  generate_config "$world_dir"
 
-  # 确保配置目录存在
-  mkdir -p config
+  # 服务端从当前目录的 pumpkin.toml 读配置,区块格式在 [world.chunk]
+  cat > pumpkin.toml << 'TOML'
+java_edition_address = "0.0.0.0:25566"
+bedrock_edition = false
 
-  # 创建/覆盖 configuration.toml
-  cat > config/configuration.toml << 'TOML'
-[java_edition]
-address = "0.0.0.0:25566"
-
-[chunk]
+[world.chunk]
 type = "easy"
 
-[plugin]
+[plugins]
 auto_approve_permissions = true
 TOML
 
   echo -e "${INFO} 配置内容:"
-  cat config/configuration.toml
+  cat pumpkin.toml
   echo ""
 
-  echo -e "${INFO} Starting server (auto-stop after 10s)..."
-  timeout 10 "$SERVER_BIN" > /tmp/ember-easyworld-server.log 2>&1 || true
+  echo -e "${INFO} Starting server (30s, SIGINT 优雅停服触发存盘)..."
+  timeout -s INT 30 "$SERVER_BIN" > /tmp/ember-easyworld-server.log 2>&1 || true
 
   echo -e "${INFO} Checking results..."
 
@@ -173,26 +154,25 @@ verify_mysql_mode() {
   done
 
   cd "$world_dir"
-  mkdir -p config
 
-  cat > config/configuration.toml << 'TOML'
-[java_edition]
-address = "0.0.0.0:25567"
+  cat > pumpkin.toml << 'TOML'
+java_edition_address = "0.0.0.0:25567"
+bedrock_edition = false
 
-[chunk]
+[world.chunk]
 type = "easy_mysql"
 url = "mysql://root:ember_test@127.0.0.1:3307/ember"
 
-[plugin]
+[plugins]
 auto_approve_permissions = true
 TOML
 
   echo -e "${INFO} 配置内容:"
-  cat config/configuration.toml
+  cat pumpkin.toml
   echo ""
 
-  echo -e "${INFO} Starting server (auto-stop after 10s)..."
-  timeout 10 "$SERVER_BIN" > /tmp/ember-easyworld-mysql.log 2>&1 || true
+  echo -e "${INFO} Starting server (30s, SIGINT 优雅停服触发存盘)..."
+  timeout -s INT 30 "$SERVER_BIN" > /tmp/ember-easyworld-mysql.log 2>&1 || true
 
   echo -e "${INFO} Querying MySQL..."
 
