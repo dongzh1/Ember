@@ -1,5 +1,9 @@
 use crate::chunk::format::linear::LinearV2File;
 use crate::chunk::format::pump::PumpFile;
+// EMBER start - easyworld imports
+use crate::chunk::format::easy::EasyWorldFile;
+use crate::chunk::easy_mysql::EasyMysqlStorage;
+// EMBER end
 use crate::chunk_system::{ChunkListener, ChunkLoading, GenerationSchedule, LevelChannel};
 use crate::generation::generator::VanillaGenerator;
 use crate::lighting::DynamicLightEngine;
@@ -163,6 +167,10 @@ impl Level {
                 ChunkFileManager::<AnvilChunkFile<ChunkData>>::new(config.clone()),
             ),
             ChunkConfig::Pump => Arc::new(ChunkFileManager::<PumpFile<ChunkData>>::new(())),
+            // EMBER start - easyworld format
+            ChunkConfig::Easy => Arc::new(ChunkFileManager::<EasyWorldFile<ChunkData>>::new(())),
+            ChunkConfig::EasyMysql(config) => Arc::new(EasyMysqlStorage::new(config)),
+            // EMBER end
         };
         let entity_saver: Arc<dyn FileIO<Data = SyncEntityChunk>> = match &level_config.chunk {
             ChunkConfig::Linear => {
@@ -172,6 +180,12 @@ impl Level {
                 AnvilChunkFile<ChunkEntityData>,
             >::new(config.clone())),
             ChunkConfig::Pump => Arc::new(ChunkFileManager::<PumpFile<ChunkEntityData>>::new(())),
+            // EMBER start - easyworld format
+            ChunkConfig::Easy | ChunkConfig::EasyMysql(_) => {
+                // Entity data uses file-based .easy storage even in MySQL mode.
+                Arc::new(ChunkFileManager::<EasyWorldFile<ChunkEntityData>>::new(()))
+            }
+            // EMBER end
         };
 
         let pending_entity_generations = Arc::new(DashMap::new());

@@ -22,7 +22,9 @@ pub fn has_random_ticking_fluid(id: BlockStateId) -> bool {
 #[derive(Clone)]
 pub struct HeterogeneousPaletteData<V: Hash + Eq + Copy, const DIM: usize> {
     storage: PaletteStorage<V, DIM>,
-    palette: Vec<V>,
+    // EMBER start - easyworld ChunkPruner
+    pub(crate) palette: Vec<V>,
+    // EMBER end
     counts: Vec<u16>,
 }
 

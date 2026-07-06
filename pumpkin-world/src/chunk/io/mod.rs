@@ -38,7 +38,9 @@ pub trait Dirtiable {
     fn mark_dirty(&self, flag: bool);
 }
 
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+// EMBER start - easyworld: made visible to easy_mysql
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+// EMBER end
 
 /// Trait to handle the IO of chunks
 /// for loading and saving chunks data

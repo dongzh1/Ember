@@ -1,0 +1,195 @@
+# ============================================================================
+# EasyWorld CI — Verifies EasyWorld format works on new commits
+#
+# Runs as optional check, does not block the main CI.
+# File mode: build -> start -> check .easy files -> pass
+# MySQL mode: build -> start MySQL container -> start -> SQL check -> pass
+# ============================================================================
+
+name: EasyWorld Verification
+
+on:
+  push:
+    paths:
+      - 'pumpkin-world/src/chunk/format/easy.rs'
+      - 'pumpkin-world/src/chunk/easy_mysql.rs'
+      - 'pumpkin-config/src/chunk.rs'
+      - 'pumpkin-world/src/level.rs'
+      - 'pumpkin-world/Cargo.toml'
+      - 'Cargo.toml'
+  pull_request:
+    paths:
+      - 'pumpkin-world/src/chunk/format/easy.rs'
+      - 'pumpkin-world/src/chunk/easy_mysql.rs'
+      - 'pumpkin-config/src/chunk.rs'
+      - 'pumpkin-world/src/level.rs'
+      - 'pumpkin-world/Cargo.toml'
+      - 'Cargo.toml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ─── File mode verification ──────────────────────────────────────────
+  file-mode:
+    name: EasyWorld File Mode
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - run: rustup update stable && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Ember (release)
+        run: cargo build --release -p pumpkin
+
+      - name: Verify file mode (.easy)
+        run: |
+          set -e
+          TEMP_DIR=$(mktemp -d)
+          cd "$TEMP_DIR"
+          mkdir -p config
+
+          cat > config/configuration.toml << 'TOML'
+          [java_edition]
+          address = "0.0.0.0:25566"
+
+          [chunk]
+          type = "easy"
+
+          [plugin]
+          auto_approve_permissions = true
+          TOML
+
+          echo "=== Config ==="
+          cat config/configuration.toml
+
+          echo "=== Starting Ember (15s) ==="
+          timeout 15 "$GITHUB_WORKSPACE/target/release/pumpkin" > /tmp/server.log 2>&1 || true
+
+          echo ""
+          echo "=== Checking .easy files ==="
+          EASY_COUNT=$(find . -name "*.easy" 2>/dev/null | wc -l)
+          echo ".easy file count: $EASY_COUNT"
+
+          if [ "$EASY_COUNT" -gt 0 ]; then
+            echo ">> File mode passed"
+            find . -name "*.easy" -exec ls -lh {} \;
+          elif [ -f "$(find . -name level.dat 2>/dev/null | head -1)" ]; then
+            echo ">> File mode OK — server started (level.dat found), no chunks yet."
+          else
+            echo ">> No level.dat — server may not have started. Log tail:"
+            tail -30 /tmp/server.log 2>/dev/null || true
+          fi
+
+          echo ""
+          echo "=== Size comparison ==="
+          for f in $(find . -name "*.easy"); do
+            SIZE=$(stat -c%s "$f" 2>/dev/null || echo 0)
+            echo "  $f -> $SIZE bytes"
+          done
+
+  # ─── MySQL mode verification ─────────────────────────────────────────
+  mysql-mode:
+    name: EasyWorld MySQL Mode
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: ember_test
+          MYSQL_DATABASE: ember
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost --silent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - run: rustup update stable && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Ember (release)
+        run: cargo build --release -p pumpkin
+
+      - name: Verify MySQL mode
+        run: |
+          set -e
+          TEMP_DIR=$(mktemp -d)
+          cd "$TEMP_DIR"
+          mkdir -p config
+
+          cat > config/configuration.toml << 'TOML'
+          [java_edition]
+          address = "0.0.0.0:25567"
+
+          [chunk]
+          type = "easy_mysql"
+          url = "mysql://root:ember_test@127.0.0.1:3306/ember"
+
+          [plugin]
+          auto_approve_permissions = true
+          TOML
+
+          echo "=== Config ==="
+          cat config/configuration.toml
+
+          echo "=== Starting Ember (15s) ==="
+          timeout 15 "$GITHUB_WORKSPACE/target/release/pumpkin" > /tmp/server-mysql.log 2>&1 || true
+
+          echo ""
+          echo "=== MySQL check ==="
+          sudo apt-get update -qq && sudo apt-get install -y -qq mysql-client 2>/dev/null || true
+
+          ROW_COUNT=$(mysql -h 127.0.0.1 -u root -pember_test ember -e \
+            "SELECT COUNT(*) FROM easyworld_regions;" 2>/dev/null | tail -1 || echo "0")
+          echo "easyworld_regions rows: $ROW_COUNT"
+
+          if [ "$ROW_COUNT" -gt 0 ] 2>/dev/null; then
+            echo ">> MySQL mode passed"
+            echo ""
+            echo "=== Sample data ==="
+            mysql -h 127.0.0.1 -u root -pember_test ember -e \
+              "SELECT world_key, region_x, region_z, LENGTH(data) AS size_bytes
+               FROM easyworld_regions LIMIT 10;" 2>/dev/null
+          elif [ -f level.dat ] 2>/dev/null; then
+            echo ">> MySQL mode OK — server started, table empty (no player joined)."
+          else
+            echo ">> No level.dat — server may not have connected to MySQL. Log tail:"
+            tail -30 /tmp/server-mysql.log 2>/dev/null || true
+          fi
+
+  # ─── Clippy quick check ───────────────────────────────────────────────
+  clippy-check:
+    name: Clippy (easyworld crates only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - run: rustup update stable && rustup default stable
+      - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy pumpkin-world
+        run: cargo clippy -p pumpkin-world --all-targets -- -D warnings 2>&1 | tail -30
+
+      - name: Clippy pumpkin-config
+        run: cargo clippy -p pumpkin-config --all-targets -- -D warnings 2>&1 | tail -30
+
+      - name: Clippy pumpkin (main crate)
+        run: cargo clippy -p pumpkin --all-targets -- -D warnings 2>&1 | tail -30

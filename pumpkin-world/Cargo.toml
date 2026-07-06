@@ -58,6 +58,11 @@ rustc-hash.workspace = true
 slotmap.workspace = true
 crossfire.workspace = true
 
+# EMBER start - easyworld dependencies
+postcard.workspace = true
+sqlx.workspace = true
+# EMBER end
+
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports", "async_tokio"] }
 temp-dir.workspace = true

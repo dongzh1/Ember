@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for chunk storage format.
 ///
-/// Supports multiple chunk formats, currently `Anvil` and `Linear`.
+/// Supports multiple chunk formats, currently `Anvil`, `Linear`, `Pump`, 
+/// `Easy`, and `EasyMysql`.
 #[derive(Deserialize, Default, Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum ChunkConfig {
@@ -18,6 +19,14 @@ pub enum ChunkConfig {
     #[serde(rename = "pump")]
     #[default]
     Pump,
+    // EMBER start - easyworld format
+    /// EasyWorld region-level zstd compressed format (.easy files).
+    #[serde(rename = "easy")]
+    Easy,
+    /// EasyWorld format stored in MySQL database.
+    #[serde(rename = "easy_mysql")]
+    EasyMysql(EasyMysqlConfig),
+    // EMBER end
 }
 
 /// Configuration for Anvil chunk storage.
@@ -29,6 +38,15 @@ pub struct AnvilChunkConfig {
     /// Whether chunks should be written in place.
     pub write_in_place: bool,
 }
+
+// EMBER start - easyworld mysql config
+/// Configuration for EasyWorld MySQL storage.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct EasyMysqlConfig {
+    /// MySQL connection URL, e.g. "mysql://user:pass@localhost:3306/ember"
+    pub url: String,
+}
+// EMBER end
 
 /// Compression settings for chunk data.
 #[derive(Deserialize, Serialize, Clone)]
