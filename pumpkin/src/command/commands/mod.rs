@@ -57,6 +57,9 @@ mod tps;
 mod transfer;
 mod weather;
 mod whitelist;
+// EMBER start - /world command
+mod world;
+// EMBER end
 mod worldborder;
 
 #[must_use]
@@ -157,6 +160,9 @@ pub async fn default_dispatcher(
     stop::register(&mut dispatcher, registry);
     tick::register(&mut dispatcher, registry);
     advancement::register(&mut dispatcher, registry);
+    // EMBER start - /world command
+    world::register(&mut dispatcher, registry);
+    // EMBER end
     dispatcher
 }
 

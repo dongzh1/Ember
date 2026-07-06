@@ -490,13 +490,19 @@ impl EasyMysqlStorage {
             .await
     }
 
-    fn world_key(folder: &LevelFolder) -> String {
-        folder
+    fn world_key(&self, folder: &LevelFolder) -> String {
+        let path = folder
             .root_folder
             .to_string_lossy()
             .replace('\\', "/")
             .trim_end_matches('/')
-            .to_string()
+            .to_string();
+        let prefix = self.config.key_prefix.trim_matches('/');
+        if prefix.is_empty() {
+            path
+        } else {
+            format!("{prefix}/{path}")
+        }
     }
 
     const fn region_for(chunk: Vector2<i32>) -> (i32, i32) {
@@ -549,7 +555,7 @@ impl FileIO for EasyMysqlStorage {
         stream: mpsc::Sender<LoadedData<Self::Data, ChunkReadingError>>,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            let world_key = Self::world_key(folder);
+            let world_key = self.world_key(folder);
             // Claim (or verify) the write lock as soon as the world is used,
             // so a locked world is reported at load time, not at first save.
             if self.config.mode == EasyWorldMode::ReadWrite {
@@ -621,7 +627,7 @@ impl FileIO for EasyMysqlStorage {
         chunks_data: Vec<(Vector2<i32>, Self::Data)>,
     ) -> BoxFuture<'a, Result<(), ChunkWritingError>> {
         Box::pin(async move {
-            let world_key = Self::world_key(folder);
+            let world_key = self.world_key(folder);
 
             if !self.ensure_write_lock(&world_key).await {
                 if self.config.mode == EasyWorldMode::ReadOnly {
@@ -723,7 +729,7 @@ impl FileIO for EasyMysqlStorage {
         chunks: &'a [Vector2<i32>],
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            let world_key = Self::world_key(folder);
+            let world_key = self.world_key(folder);
             let mut watchers = self.watchers.write().await;
             for chunk in chunks {
                 let key = (world_key.clone(), chunk.x >> 5, chunk.y >> 5);
@@ -738,7 +744,7 @@ impl FileIO for EasyMysqlStorage {
         chunks: &'a [Vector2<i32>],
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            let world_key = Self::world_key(folder);
+            let world_key = self.world_key(folder);
             let mut watchers = self.watchers.write().await;
             for chunk in chunks {
                 let key = (world_key.clone(), chunk.x >> 5, chunk.y >> 5);

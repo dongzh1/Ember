@@ -54,6 +54,12 @@ pub struct EasyMysqlConfig {
     /// `read_only` (never writes; safe on any number of servers).
     #[serde(default)]
     pub mode: EasyWorldMode,
+    /// Optional namespace prepended to every database world key
+    /// (`<key_prefix>/<world folder path>`). Servers sharing one database
+    /// must use the same prefix and the same relative world folder layout
+    /// (the default `world` layout qualifies).
+    #[serde(default)]
+    pub key_prefix: String,
 }
 
 /// Access mode for a shared `EasyWorld` database.

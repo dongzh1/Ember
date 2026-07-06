@@ -434,6 +434,76 @@ impl Server {
         .expect("World creation panicked")
     }
 
+    // EMBER start - dynamic world unload
+    /// Unloads a world at runtime: evacuates its players to `fallback`,
+    /// removes it from the tick loop, then saves and stops it.
+    ///
+    /// The default world (first in the list) cannot be unloaded.
+    pub async fn unload_world(
+        self: &Arc<Self>,
+        world: &Arc<World>,
+        fallback: &Arc<World>,
+    ) -> Result<(), String> {
+        if world.uuid == fallback.uuid {
+            return Err("fallback world must differ from the world being unloaded".to_string());
+        }
+        {
+            let worlds = self.worlds.load();
+            let Some(first) = worlds.first() else {
+                return Err("no worlds loaded".to_string());
+            };
+            if first.uuid == world.uuid {
+                return Err("cannot unload the default world".to_string());
+            }
+            if !worlds.iter().any(|w| w.uuid == world.uuid) {
+                return Err("world is not loaded".to_string());
+            }
+            if !worlds.iter().any(|w| w.uuid == fallback.uuid) {
+                return Err("fallback world is not loaded".to_string());
+            }
+        }
+
+        // Evacuate players to the fallback world's spawn.
+        let spawn = {
+            let info = fallback.level_info.load();
+            pumpkin_util::math::vector3::Vector3::new(
+                f64::from(info.spawn_x) + 0.5,
+                f64::from(info.spawn_y),
+                f64::from(info.spawn_z) + 0.5,
+            )
+        };
+        let players: Vec<_> = world.players.load().iter().cloned().collect();
+        for player in players {
+            player
+                .teleport_world(fallback.clone(), spawn, None, None)
+                .await;
+        }
+        // A plugin may cancel PlayerChangeWorldEvent; never pull a live
+        // world out from under a player.
+        if !world.players.load().is_empty() {
+            return Err("players could not be moved out of the world".to_string());
+        }
+
+        // Leave the tick loop first so no new work starts...
+        self.worlds.rcu(|worlds| {
+            worlds
+                .iter()
+                .filter(|w| w.uuid != world.uuid)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+
+        // ...then save everything and stop the chunk system.
+        world.shutdown().await;
+
+        // Break the Level -> World back-reference so the World can drop.
+        world.level.world_portal.store(Arc::new(None));
+
+        info!("Unloaded world '{}'", world.get_world_name());
+        Ok(())
+    }
+    // EMBER end
+
     /// Adds a new player to the server.
     ///
     /// This function takes an `Arc<Client>` representing the connected client and performs the following actions:
