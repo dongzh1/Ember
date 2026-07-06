@@ -86,12 +86,26 @@ git push origin main
 
 - 攒出的通用修复尽量给上游发 PR，合入后下次同步自动消掉我们的补丁。
 
+## 日常脚本
+
+根目录四个双击入口（详见 `scripts/README.md`）：
+
+| 入口 | 作用 |
+|---|---|
+| `check.bat` | 代码检查（fmt + clippy） |
+| `build.bat` | 构建打包：本地 Windows 包 / 云端 Linux+Windows 包 |
+| `push.bat` | 提交并推送到 GitHub（推送前自动格式检查，master 上拒绝提交） |
+| `sync-upstream.bat` | 同步上游（见上节） |
+
 ## 当前 Ember 自有改动清单
 
 | 功能 | 涉及文件 | 说明 |
 |---|---|---|
 | `auto_approve_permissions` | `pumpkin-config/src/plugins.rs`、`pumpkin/src/plugin/mod.rs` | 配置开启后插件权限请求自动批准，适合无人值守服务器 |
 | 一键上游同步脚本 | `sync-upstream.bat`、`scripts/sync-upstream.ps1` | 双击同步上游并推送云端，冲突时输出报告 |
+| EasyWorld 存储格式 | `pumpkin-world/src/chunk/format/easy.rs`、`pumpkin-world/src/chunk/easy_mysql.rs`、`pumpkin-config/src/chunk.rs`、`pumpkin-world/src/level.rs`、`pumpkin-world/src/chunk/palette.rs`、`pumpkin-world/src/chunk/io/mod.rs` | 区块存储新格式：`easy`（区域级 zstd + 空区块修剪的 .easy 文件）和 `easy_mysql`（存 MySQL）。配置 `[chunk] type = "easy"` 或 `type = "easy_mysql"` + `url` |
+| EasyWorld 验证 | `scripts/verify-easyworld.*`、`.github/workflows/easyworld-ci.yml` | 本地/CI 启动服务端验证 .easy 文件与 MySQL 表落盘 |
+| 构建打包脚本 | `build.bat`、`check.bat`、`push.bat`、`scripts/check.ps1`、`scripts/build-windows.ps1`、`scripts/build-remote.ps1`、`scripts/push.ps1`、`.github/workflows/build-release.yml` | 本地 Windows 打包、云端 Linux+Windows 打包（`ember-*` 标签自动发 Release）、代码检查、一键推送 |
 
 （新增功能时更新此表。）
 

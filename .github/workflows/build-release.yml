@@ -1,0 +1,105 @@
+# ============================================================================
+# EMBER - Build Release
+#
+# Ember 专用打包工作流:在云端构建 Linux x64 + Windows x64 服务端。
+#
+# 触发方式:
+#   1. 手动: 本地跑 scripts/build-remote.ps1 (或 GitHub 网页 Run workflow)
+#   2. 推送 ember-* 标签: 自动构建并创建 GitHub Release
+#
+# 与上游 rust.yml 的 nightly 构建区别:
+#   - rust.yml 只在 master(上游镜像)触发,不含 Ember 的 main 分支改动
+#   - 本工作流针对 main 分支,只构建实际部署需要的两个平台,省 Actions 时长
+# ============================================================================
+
+name: Ember Build Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "ember-*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: ember-linux-x86_64
+            binary: pumpkin
+          - os: windows-latest
+            artifact: ember-windows-x86_64
+            binary: pumpkin.exe
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - run: rustup update stable && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release -p pumpkin
+
+      - name: Stamp build info
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "target/release/${{ matrix.binary }}" out/
+          {
+            echo "Ember build"
+            echo "commit:  $(git rev-parse --short HEAD)"
+            echo "ref:     ${GITHUB_REF_NAME}"
+            echo "date:    $(date -u +"%Y-%m-%d %H:%M") UTC"
+            echo "target:  ${{ matrix.artifact }}"
+          } > out/BUILD-INFO.txt
+          cat out/BUILD-INFO.txt
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar -czf "${{ matrix.artifact }}.tar.gz" -C out pumpkin BUILD-INFO.txt
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path out\pumpkin.exe, out\BUILD-INFO.txt -DestinationPath "${{ matrix.artifact }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          compression-level: 0
+          path: |
+            *.tar.gz
+            *.zip
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/ember-')
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
