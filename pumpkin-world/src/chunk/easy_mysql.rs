@@ -170,21 +170,22 @@ impl MysqlPool {
 
         // Upgrade tables created by older versions: MEDIUMBLOB caps a region
         // at 16 MiB, which a densely built full region can exceed.
-        let col: Option<(String,)> = sqlx::query_as(
-            "SELECT DATA_TYPE FROM information_schema.COLUMNS \
+        // NOTE: compare inside SQL — sqlx returns information_schema string
+        // columns as VARBINARY, which does not decode into Rust String.
+        let (mediumblob,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() \
-             AND TABLE_NAME = 'easyworld_regions' AND COLUMN_NAME = 'data'",
+             AND TABLE_NAME = 'easyworld_regions' AND COLUMN_NAME = 'data' \
+             AND DATA_TYPE = 'mediumblob'",
         )
-        .fetch_optional(&self.pool)
+        .fetch_one(&self.pool)
         .await
-        .map_err(|e| ChunkReadingError::IoError(std::io::Error::other(e.to_string())))?;
-        if let Some((data_type,)) = col
-            && data_type.eq_ignore_ascii_case("mediumblob")
-        {
+        .map_err(read_err)?;
+        if mediumblob > 0 {
             sqlx::query("ALTER TABLE easyworld_regions MODIFY data LONGBLOB NOT NULL")
                 .execute(&self.pool)
                 .await
-                .map_err(|e| ChunkReadingError::IoError(std::io::Error::other(e.to_string())))?;
+                .map_err(read_err)?;
             info!("EasyWorld MySQL: upgraded data column MEDIUMBLOB -> LONGBLOB");
         }
         Ok(())
@@ -192,14 +193,14 @@ impl MysqlPool {
 
     /// Whether the region table exists (read-only servers must not create it).
     async fn table_exists(&self) -> Result<bool, ChunkReadingError> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT TABLE_NAME FROM information_schema.TABLES \
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM information_schema.TABLES \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'easyworld_regions'",
         )
-        .fetch_optional(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .map_err(read_err)?;
-        Ok(row.is_some())
+        Ok(count > 0)
     }
 
     /// Try to take (or keep) the write lock for `world_key`.

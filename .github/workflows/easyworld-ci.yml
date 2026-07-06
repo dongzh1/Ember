@@ -184,6 +184,16 @@ jobs:
             exit 1
           fi
 
+          # 表存在还不够 —— 预热在建表之后还可能出错(比如迁移查询失败),
+          # 必须看到成功标记且没有 eager init 报错
+          if ! grep -q "pool initialized (read_write)" /tmp/server-mysql.log \
+             || grep -q "eager init failed" /tmp/server-mysql.log; then
+            echo ">> FAIL: read_write pool init did not complete cleanly. Log tail:"
+            tail -50 /tmp/server-mysql.log 2>/dev/null || true
+            exit 1
+          fi
+          echo ">> read_write pool init marker OK"
+
           echo ""
           echo "=== read_only mode check (SlimeWorld-style reader) ==="
           RO_DIR=$(mktemp -d)
