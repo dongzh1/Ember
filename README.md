@@ -1,114 +1,121 @@
 <div align="center">
 
-# Pumpkin
+# Ember
 
-![CI](https://github.com/Pumpkin-MC/Pumpkin/actions/workflows/rust.yml/badge.svg)
-[![Discord](https://img.shields.io/discord/1268592337445978193.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://discord.gg/wT8XjrjKkf)
-[![License: GPL](https://img.shields.io/badge/License-GPLv3-yellow.svg)](https://opensource.org/licenses/gpl-3-0)
+[![CI](https://github.com/dongzh1/Ember/actions/workflows/rust.yml/badge.svg)](https://github.com/dongzh1/Ember/actions)
+[![License: GPLv3](https://img.shields.io/badge/License-GPLv3-yellow.svg)](https://opensource.org/licenses/gpl-3-0)
 
 </div>
 
-[Pumpkin](https://pumpkinmc.org/) is a Minecraft server built entirely in Rust, offering a fast, efficient,
-and customizable experience. It prioritizes performance and player enjoyment while adhering to the core mechanics of the game.
+**Ember** is a long-term soft fork of [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin), a Minecraft
+server built entirely in Rust. Pumpkin is the pumpkin — Ember is the fire that lights it.
+
+Ember follows Pumpkin upstream weekly while adding features for real-world server operation:
+custom world formats, MySQL-backed storage, dynamic world management, and one-click build &
+deploy tooling. All Pumpkin features (dual Java/Bedrock protocol, entity AI, world generation,
+plugin system) are inherited and kept up to date.
+
 <div align="center">
 
-![chunk loading](/assets/pumpkin_chunk_loading.webp)
+![chunk loading](assets/pumpkin_chunk_loading.webp)
 
 </div>
 
-## Goals
+## Why Ember over Pumpkin
 
-- **Performance**: Leveraging multi-threading for maximum speed and efficiency.
-- **Compatibility**: Supports the latest Java & Bedrock Minecraft server version while adhering to Vanilla game mechanics.
-- **Security**: Prioritizes security by preventing known security exploits.
-- **Flexibility**: Highly configurable, with the ability to disable unnecessary features.
-- **Extensibility**: Provides a foundation for plugin development.
+| Feature | Pumpkin | Ember |
+|---|---|---|
+| World formats | Anvil, Linear, Pump | + **Easy** (region-level zstd + chunk pruning) |
+| Database storage | — | + **MySQL** (multi-server read/write, heartbeat locking) |
+| World file size (500×500 map) | ~18 MB (Pump) | **~2-5 MB** (Easy) |
+| Empty-chunk pruning | — | + ChunkPruner (skips all-air chunks) |
+| Runtime world management | — | + `/world load/unload/tp` with permission system |
+| Auto-approve plugin permissions | — | + `auto_approve_permissions` config |
+| One-click build & push | — | + `build.bat`, `push.bat`, `sync-upstream.bat` |
+| CI artifacts | Nightly source builds | + Cross-platform releases (`ember-windows`, `ember-linux`) |
 
-> [!IMPORTANT]
-> Pumpkin is currently under heavy development.
->
-> [See what needs to be done before the 1.0.0 Release](https://github.com/Pumpkin-MC/Pumpkin/issues/449)
+## Quick Start
 
-## Features
+### Download a pre-built binary
 
-- [x] Configuration (toml)
-- [Tracking: Protocol](https://github.com/Pumpkin-MC/Pumpkin/issues/1401)
-  - [x] Server Status/Ping
-  - [x] Encryption
-  - [x] Packet Compression
-  - [x] Java/Bedrock
-  - ...
-- [Tracking: World](https://github.com/Pumpkin-MC/Pumpkin/issues/1403)
-  - [x] Player Tab-list
-  - [x] Scoreboard
-  - [x] World Loading
-  - [x] World Time
-  - [x] World Borders
-  - [x] World Saving
-  - [x] Lighting
-  - [x] Entity Spawning
-  - [x] Bossbar
-  - [x] Chunk Loading (Vanilla, Linear, Pump)
-  - [Chunk Generation](https://github.com/Pumpkin-MC/Pumpkin/issues/36)
-  - [x] Chunk Saving (Vanilla, Linear, Pump)
-  - [Redstone](https://github.com/Pumpkin-MC/Pumpkin/issues/1402)
-  - [x] Liquid Physics
-  - ...
-- [Tracking: Player](https://github.com/Pumpkin-MC/Pumpkin/issues/1405)
-  - [x] Skins
-  - [x] Teleport
-  - [x] Movement
-  - [x] Animation
-  - [x] Inventory
-  - [Combat](https://github.com/Pumpkin-MC/Pumpkin/issues/1404)
-  - [x] Experience
-  - [x] Hunger
-  - [X] Off Hand
-  - [ ] Advancements
-  - [x] Eating
-  - ...
-- Entities
-  - [x] Non-Living (Minecart, Eggs...) (W.I.P)
-  - [x] Entity Effects
-  - [x] Players
-  - [x] Mobs (W.I.P)
-  - [x] Animals (W.I.P)
-  - [Entity AI](https://github.com/Pumpkin-MC/Pumpkin/issues/1406)
-  - [x] Boss
-  - [ ] Villagers
-  - [X] Entity Saving
-- Server
-  - [Plugins](https://github.com/Pumpkin-MC/Pumpkin/issues/1407)
-  - [x] Query
-  - [x] RCON
-  - [x] Inventories
-  - [x] Particles
-  - [x] Chat
-  - [Commands](https://github.com/Pumpkin-MC/Pumpkin/issues/15)
-  - [x] Permissions
-  - [x] Translations
-- Proxy
-  - [x] Bungeecord
-  - [x] Velocity
+Grab the latest from [GitHub Releases](https://github.com/dongzh1/Ember/releases) (tag `ember-*`).
 
-<!-- Check out our [Github Project](https://github.com/orgs/Pumpkin-MC/projects/3) to see current progress. -->
+### or Build from source
 
-## How to run
+```bash
+git clone https://github.com/dongzh1/Ember.git --recurse-submodules
+cd Ember
 
-See our [Quick Start](https://docs.pumpkinmc.org/#quick-start) guide to get Pumpkin running.
+# Windows: double-click build.bat
+# Linux:
+cargo build --release
+```
 
-## Contributions
+### Run
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md)
+```bash
+./pumpkin   # generates config/ on first launch, then starts
+```
 
-## Docs
+Edit `config/configuration.toml` — see [Configuration](#configuration) below.
 
-Pumpkin's documentation can be found at <https://pumpkinmc.org/>
+## Configuration
 
-## Communication
+### EasyWorld formats
 
-Consider joining [our Discord server](https://discord.gg/wT8XjrjKkf) to stay up-to-date on events, updates, and connect with other members.
+```toml
+# Region-level zstd compression (.easy files) — 60-80% smaller than Pump
+[chunk]
+type = "easy"
 
-## Funding
+# MySQL storage with multi-server read/write
+[chunk]
+type = "easy_mysql"
+url = "mysql://root:password@localhost:3306/ember"
+mode = "read_write"   # or "read_only" for shared access
+key_prefix = "my_cluster"
+max_cached_regions = 32
+```
 
-If you want to fund me and help the project, check out my [GitHub sponsors](https://github.com/sponsors/Pumpkin-MC).
+### Dynamic worlds
+
+```
+/world list                      # list loaded worlds
+/world load <name> [<seed>]      # load or create a world
+/world unload <name>             # unload (evicts players, saves, removes from tick)
+/world tp <name>                 # teleport self to world spawn
+```
+
+Permission: `ember:command.world` (OP level 3 by default).
+
+### Plugin permissions
+
+```toml
+[plugins]
+auto_approve_permissions = true   # skip interactive permission prompts
+```
+
+## Inherited Pumpkin Features
+
+Everything from upstream Pumpkin — Ember syncs weekly and keeps full compatibility:
+
+- **Dual protocol** — Java Edition (TCP) and Bedrock Edition (UDP) on one server
+- **World generation** — vanilla terrain, biomes, structures, lighting
+- **Entities & AI** — mobs, animals, pathfinding, combat
+- **Plugin system** — Native (`.dll`/`.so`) and WASM plugins with rich API
+- **Commands** — 50+ vanilla commands with Brigadier-style dispatch
+- **Proxy support** — BungeeCord and Velocity
+
+## Fork Maintenance
+
+See [EMBER.md](EMBER.md) for the full fork policy:
+
+- `master` branch = upstream mirror (never committed to directly)
+- `main` branch = upstream + Ember changes
+- `sync-upstream.bat` = one-click merge from Pumpkin
+- All changes in upstream files are wrapped in `EMBER start` / `EMBER end` markers
+- grep `EMBER start` to list every deviation from upstream
+
+## License
+
+Upstream is GPLv3. All Ember changes are likewise released under [GPLv3](LICENSE).
