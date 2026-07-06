@@ -1,8 +1,8 @@
 use crate::chunk::format::linear::LinearV2File;
 use crate::chunk::format::pump::PumpFile;
 // EMBER start - easyworld imports
-use crate::chunk::format::easy::EasyWorldFile;
 use crate::chunk::easy_mysql::EasyMysqlStorage;
+use crate::chunk::format::easy::EasyWorldFile;
 // EMBER end
 use crate::chunk_system::{ChunkListener, ChunkLoading, GenerationSchedule, LevelChannel};
 use crate::generation::generator::VanillaGenerator;
@@ -184,8 +184,7 @@ impl Level {
             ChunkConfig::Easy | ChunkConfig::EasyMysql(_) => {
                 // Entity data uses file-based .easy storage even in MySQL mode.
                 Arc::new(ChunkFileManager::<EasyWorldFile<ChunkEntityData>>::new(()))
-            }
-            // EMBER end
+            } // EMBER end
         };
 
         let pending_entity_generations = Arc::new(DashMap::new());

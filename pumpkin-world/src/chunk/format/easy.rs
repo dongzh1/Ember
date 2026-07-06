@@ -26,12 +26,12 @@ use crate::chunk::{
     io::{ChunkSerializer, LoadedData},
 };
 
-/// Magic bytes: "EZW\x02" (EasyWorld v2)
+/// Magic bytes: "EZW\x02" (`EasyWorld` v2)
 const EASY_MAGIC: u32 = 0x45_5a_57_02;
 
 // ─── Serde-compatible region data ─────────────────────────────────────
 
-/// Serializable region data for EasyWorld v2.
+/// Serializable region data for `EasyWorld` v2.
 ///
 /// The bitmap marks which chunk indices (0..1023) are stored.
 /// `chunk_sizes` (one `u32` per stored chunk) allows random access into `chunks_data`.
@@ -93,7 +93,7 @@ impl EasyRegionData {
     }
 
     /// Insert or update a chunk.  Called during `update_chunk`.
-    pub(crate) fn upsert_chunk(&mut self, index: u32, raw_nbt: Vec<u8>) {
+    pub(crate) fn upsert_chunk(&mut self, index: u32, raw_nbt: &[u8]) {
         let new_size = raw_nbt.len() as u32;
 
         // If the chunk already exists, remove its old data.
@@ -104,7 +104,7 @@ impl EasyRegionData {
             let new_data_len = self.chunks_data.len() - old_size as usize + new_size as usize;
             let mut new_data = Vec::with_capacity(new_data_len);
             new_data.extend_from_slice(&self.chunks_data[..old_offset]);
-            new_data.extend_from_slice(&raw_nbt);
+            new_data.extend_from_slice(raw_nbt);
             new_data.extend_from_slice(&self.chunks_data[old_offset + old_size as usize..]);
             self.chunks_data = new_data;
             self.chunk_sizes[stored_idx] = new_size;
@@ -112,11 +112,11 @@ impl EasyRegionData {
             // Append new chunk at the end.
             self.set_chunk(index);
             self.chunk_sizes.push(new_size);
-            self.chunks_data.extend_from_slice(&raw_nbt);
+            self.chunks_data.extend_from_slice(raw_nbt);
         }
     }
 
-    /// Returns (byte_offset, size, stored_index) for an existing chunk.
+    /// Returns (`byte_offset`, `size`, `stored_index`) for an existing chunk.
     fn chunk_info(&self, index: u32) -> (usize, u32, usize) {
         let mut offset: usize = 0;
         let mut stored_idx: usize = 0;
@@ -131,7 +131,7 @@ impl EasyRegionData {
     }
 
     /// Number of chunks currently stored.
-    fn stored_count(&self) -> usize {
+    const fn stored_count(&self) -> usize {
         self.chunk_sizes.len()
     }
 }
@@ -144,9 +144,7 @@ pub(crate) fn is_prunable_chunk(chunk: &crate::chunk::ChunkData) -> bool {
     // Check block palette: every section must be all-air.
     let sections = chunk.section.block_sections.read().unwrap();
     let all_air = sections.iter().all(|section| match section {
-        crate::chunk::palette::PalettedContainer::Homogeneous(state_id) => {
-            is_air(*state_id)
-        }
+        crate::chunk::palette::PalettedContainer::Homogeneous(state_id) => is_air(*state_id),
         crate::chunk::palette::PalettedContainer::Heterogeneous(data) => {
             data.palette.iter().all(|&state_id| is_air(state_id))
         }
@@ -215,12 +213,11 @@ where
     }
 
     fn read(r: Bytes) -> Result<Self, ChunkReadingError> {
-        let mut decoder = StreamingDecoder::new(&r[..])
-            .map_err(|e| {
-                ChunkReadingError::Compression(crate::chunk::CompressionError::ZstdError(
-                    std::io::Error::other(e.to_string()),
-                ))
-            })?;
+        let mut decoder = StreamingDecoder::new(&r[..]).map_err(|e| {
+            ChunkReadingError::Compression(crate::chunk::CompressionError::ZstdError(
+                std::io::Error::other(e.to_string()),
+            ))
+        })?;
         let mut decompressed = Vec::new();
         std::io::Read::read_to_end(&mut decoder, &mut decompressed)
             .map_err(ChunkReadingError::IoError)?;
@@ -270,7 +267,7 @@ where
             .await
             .map_err(|e| ChunkWritingError::ChunkSerializingError(e.to_string()))?;
 
-        self.data.upsert_chunk(index, bytes.to_vec());
+        self.data.upsert_chunk(index, &bytes);
 
         Ok(())
     }

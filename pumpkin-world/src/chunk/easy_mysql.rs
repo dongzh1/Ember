@@ -71,9 +71,9 @@ fn deserialize_region(data: &[u8]) -> Result<EasyRegionData, ChunkReadingError> 
     std::io::Read::read_to_end(&mut decoder, &mut decompressed)
         .map_err(ChunkReadingError::IoError)?;
     postcard::from_bytes(&decompressed).map_err(|e| {
-        ChunkReadingError::ParsingError(
-            crate::chunk::ChunkParsingError::ErrorDeserializingChunk(e.to_string()),
-        )
+        ChunkReadingError::ParsingError(crate::chunk::ChunkParsingError::ErrorDeserializingChunk(
+            e.to_string(),
+        ))
     })
 }
 
@@ -141,6 +141,9 @@ impl MysqlPool {
 
 // ─── FileIO implementation ─────────────────────────────────────────────
 
+/// Pending chunk updates for one region: (chunk index, raw NBT bytes).
+type RegionUpdates = Vec<(u32, Vec<u8>)>;
+
 pub struct EasyMysqlStorage {
     config: EasyMysqlConfig,
     pool: tokio::sync::OnceCell<Arc<MysqlPool>>,
@@ -149,6 +152,7 @@ pub struct EasyMysqlStorage {
 }
 
 impl EasyMysqlStorage {
+    #[must_use]
     pub fn new(config: &EasyMysqlConfig) -> Self {
         Self {
             config: config.clone(),
@@ -178,12 +182,12 @@ impl EasyMysqlStorage {
             .to_string()
     }
 
-    fn region_for(chunk: &Vector2<i32>) -> (i32, i32) {
+    const fn region_for(chunk: Vector2<i32>) -> (i32, i32) {
         (chunk.x >> 5, chunk.y >> 5)
     }
 
     /// Compute the region-relative chunk index (0..1023).
-    fn chunk_index(pos: &Vector2<i32>) -> u32 {
+    const fn chunk_index(pos: Vector2<i32>) -> u32 {
         let rx = pos.x.rem_euclid(32);
         let rz = pos.y.rem_euclid(32);
         (rx + rz * 32) as u32
@@ -203,10 +207,10 @@ impl EasyMysqlStorage {
             }
         }
         let pool = self.ensure_pool().await?;
-        let region = match pool.load_region(world_key, rx, rz).await? {
-            Some(r) => r,
-            None => EasyRegionData::new(rx, rz),
-        };
+        let region = pool
+            .load_region(world_key, rx, rz)
+            .await?
+            .unwrap_or_else(|| EasyRegionData::new(rx, rz));
         let mut cache = self.region_cache.write().await;
         cache.insert(key, region.clone());
         Ok(region)
@@ -227,7 +231,7 @@ impl FileIO for EasyMysqlStorage {
             let mut regions_chunks: BTreeMap<(i32, i32), Vec<Vector2<i32>>> = BTreeMap::new();
             for coord in chunk_coords {
                 regions_chunks
-                    .entry(Self::region_for(coord))
+                    .entry(Self::region_for(*coord))
                     .or_default()
                     .push(*coord);
             }
@@ -245,7 +249,7 @@ impl FileIO for EasyMysqlStorage {
                     };
 
                     for pos in coords {
-                        let index = Self::chunk_index(&pos);
+                        let index = Self::chunk_index(pos);
                         match region.get_chunk_bytes(index) {
                             Some(raw_bytes) => {
                                 let bytes = Bytes::from(raw_bytes);
@@ -284,18 +288,15 @@ impl FileIO for EasyMysqlStorage {
         Box::pin(async move {
             let world_key = Self::world_key(folder);
 
-            let mut region_dirty: BTreeMap<(i32, i32), Vec<(u32, Vec<u8>)>> = BTreeMap::new();
+            let mut region_dirty: BTreeMap<(i32, i32), RegionUpdates> = BTreeMap::new();
             for (pos, chunk) in &chunks_data {
                 if !chunk.is_dirty() {
                     continue;
                 }
                 // ChunkPruner: skip empty chunks.
-                let any = &**chunk as &dyn std::any::Any;
-                if let Some(c) = any.downcast_ref::<crate::chunk::ChunkData>() {
-                    if crate::chunk::format::easy::is_prunable_chunk(c) {
-                        chunk.mark_dirty(false);
-                        continue;
-                    }
+                if crate::chunk::format::easy::is_prunable_chunk(chunk) {
+                    chunk.mark_dirty(false);
+                    continue;
                 }
 
                 chunk.mark_dirty(false);
@@ -303,9 +304,9 @@ impl FileIO for EasyMysqlStorage {
                     .to_bytes()
                     .await
                     .map_err(|e| ChunkWritingError::ChunkSerializingError(e.to_string()))?;
-                let index = Self::chunk_index(pos);
+                let index = Self::chunk_index(*pos);
                 region_dirty
-                    .entry(Self::region_for(pos))
+                    .entry(Self::region_for(*pos))
                     .or_default()
                     .push((index, bytes.to_vec()));
             }
@@ -324,7 +325,7 @@ impl FileIO for EasyMysqlStorage {
                     };
 
                     for (index, raw_nbt) in updates {
-                        region.upsert_chunk(index, raw_nbt);
+                        region.upsert_chunk(index, &raw_nbt);
                     }
 
                     let pool = self.ensure_pool().await.map_err(|e| {
