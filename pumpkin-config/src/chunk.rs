@@ -60,6 +60,15 @@ pub struct EasyMysqlConfig {
     /// (the default `world` layout qualifies).
     #[serde(default)]
     pub key_prefix: String,
+    /// Maximum number of decompressed regions kept resident per world
+    /// (LRU). A dense region can take tens of MB of memory; lower this on
+    /// small servers, raise it for many concurrent players. Default 32.
+    #[serde(default = "default_max_cached_regions")]
+    pub max_cached_regions: usize,
+}
+
+const fn default_max_cached_regions() -> usize {
+    32
 }
 
 /// Access mode for a shared `EasyWorld` database.

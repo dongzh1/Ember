@@ -101,6 +101,12 @@ pub struct Server {
     pub item_registry: Arc<ItemRegistry>,
     /// Manages multiple worlds within the server.
     pub worlds: ArcSwap<Vec<Arc<World>>>,
+    // EMBER start - dynamic world unload
+    /// Names of worlds whose background save+stop is still running after
+    /// removal from the tick loop; reloading such a name must wait, or two
+    /// `Level`s would write the same data concurrently.
+    pub pending_world_unloads: std::sync::Mutex<std::collections::HashSet<String>>,
+    // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
     /// Assigns unique IDs to containers.
@@ -258,6 +264,9 @@ impl Server {
             recipe_manager: Arc::new(recipe::RecipeManager::new()),
             map_id: level_info.load().map_id.into(),
             worlds: ArcSwap::from_pointee(vec![]),
+            // EMBER start - dynamic world unload
+            pending_world_unloads: std::sync::Mutex::new(std::collections::HashSet::new()),
+            // EMBER end
             dimensions,
             command_dispatcher,
             block_registry: block_registry.clone(),
@@ -493,14 +502,33 @@ impl Server {
                 .collect::<Vec<_>>()
         });
 
-        // ...then save everything and stop the chunk system.
-        world.shutdown().await;
-
-        // Break the Level -> World back-reference so the World can drop.
-        world.level.world_portal.store(Arc::new(None));
-
-        info!("Unloaded world '{}'", world.get_world_name());
+        // ...then save and stop it in the background: a world flush can
+        // take seconds and must never stall the tick loop. The name stays
+        // in `pending_world_unloads` until the flush finishes so the same
+        // world cannot be reloaded while its old Level is still writing.
+        let name = world.get_world_name().to_string();
+        if let Ok(mut pending) = self.pending_world_unloads.lock() {
+            pending.insert(name.clone());
+        }
+        let world = world.clone();
+        let server = self.clone();
+        tokio::spawn(async move {
+            world.shutdown().await;
+            // Break the Level -> World back-reference so the World can drop.
+            world.level.world_portal.store(Arc::new(None));
+            if let Ok(mut pending) = server.pending_world_unloads.lock() {
+                pending.remove(&name);
+            }
+            info!("Unloaded world '{name}'");
+        });
         Ok(())
+    }
+
+    /// Whether a world of this name is still flushing after an unload.
+    pub fn is_world_unloading(&self, name: &str) -> bool {
+        self.pending_world_unloads
+            .lock()
+            .is_ok_and(|pending| pending.contains(name))
     }
     // EMBER end
 

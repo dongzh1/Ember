@@ -239,12 +239,18 @@ where
     async fn write(&self, backend: &Self::WriteBackend) -> Result<(), std::io::Error> {
         let serialized = postcard::to_allocvec(&self.data)
             .map_err(|e| std::io::Error::other(format!("postcard serialize: {e}")))?;
+        let raw_len = serialized.len();
 
-        let compressed = compress_to_vec(&*serialized, CompressionLevel::Default);
+        // Region compression is CPU-bound — keep it off the async workers.
+        let compressed = tokio::task::spawn_blocking(move || {
+            compress_to_vec(&*serialized, CompressionLevel::Default)
+        })
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
         debug!(
             "EasyWorld v2: {} chunks → {} B raw → {} B zstd for {}",
             self.data.stored_count(),
-            serialized.len(),
+            raw_len,
             compressed.len(),
             backend.display(),
         );

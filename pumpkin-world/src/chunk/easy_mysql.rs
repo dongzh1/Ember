@@ -265,7 +265,14 @@ impl MysqlPool {
             .map_err(|e| ChunkReadingError::IoError(std::io::Error::other(e.to_string())))?;
 
         match row {
-            Some((data,)) => deserialize_region(&data).map(Some),
+            Some((data,)) => {
+                // Decompression of a multi-MB region blob is CPU-bound —
+                // keep it off the async workers so ticking never stalls.
+                let region = tokio::task::spawn_blocking(move || deserialize_region(&data))
+                    .await
+                    .map_err(read_err)??;
+                Ok(Some(region))
+            }
             None => Ok(None),
         }
     }
@@ -275,7 +282,12 @@ impl MysqlPool {
         world_key: &str,
         region: &EasyRegionData,
     ) -> Result<(), ChunkWritingError> {
-        let blob = serialize_region(region)?;
+        // Region compression is the expensive part of a save — run it on
+        // the blocking pool so the tick loop is unaffected.
+        let to_compress = region.clone();
+        let blob = tokio::task::spawn_blocking(move || serialize_region(&to_compress))
+            .await
+            .map_err(|e| ChunkWritingError::IoError(std::io::Error::other(e.to_string())))??;
         sqlx::query(UPSERT_REGION)
             .bind(world_key)
             .bind(region.region_x)
@@ -288,6 +300,83 @@ impl MysqlPool {
     }
 }
 
+// ─── World cloning (SlimeWorld-style) ──────────────────────────────────
+
+/// Copies every region row of one world (and its dimension sub-worlds)
+/// to a new key, in-database via INSERT..SELECT — no data leaves `MySQL`.
+const CLONE_REGIONS: &str = concat!(
+    "INSERT INTO easyworld_regions (world_key, region_x, region_z, data) ",
+    "SELECT CONCAT(?, SUBSTRING(world_key, CHAR_LENGTH(?) + 1)), region_x, region_z, data ",
+    "FROM easyworld_regions WHERE world_key = ? OR world_key LIKE CONCAT(?, '/%')"
+);
+
+/// Compute the database key for a world folder path.
+#[must_use]
+pub fn world_key_for(config: &EasyMysqlConfig, folder_path: &std::path::Path) -> String {
+    let path = folder_path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+    let prefix = config.key_prefix.trim_matches('/');
+    if prefix.is_empty() {
+        path
+    } else {
+        format!("{prefix}/{path}")
+    }
+}
+
+/// Clone all stored region data of `src_folder` to `dst_folder`
+/// (SlimeWorld-style world clone). Returns the number of copied regions.
+///
+/// # Errors
+/// Fails when the keys are identical, the destination already has data,
+/// or the database is unreachable.
+pub async fn clone_world_data(
+    config: &EasyMysqlConfig,
+    src_folder: &std::path::Path,
+    dst_folder: &std::path::Path,
+) -> Result<u64, String> {
+    let src_key = world_key_for(config, src_folder);
+    let dst_key = world_key_for(config, dst_folder);
+    if src_key == dst_key {
+        return Err("source and destination keys are identical".to_string());
+    }
+
+    let pool = sqlx::mysql::MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&config.url)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let (existing,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM easyworld_regions WHERE world_key = ?")
+            .bind(&dst_key)
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    if existing > 0 {
+        pool.close().await;
+        return Err(format!("destination key '{dst_key}' already has data"));
+    }
+
+    let res = sqlx::query(CLONE_REGIONS)
+        .bind(&dst_key)
+        .bind(&src_key)
+        .bind(&src_key)
+        .bind(&src_key)
+        .execute(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    pool.close().await;
+
+    info!(
+        "EasyWorld: cloned {} regions from '{src_key}' to '{dst_key}'",
+        res.rows_affected()
+    );
+    Ok(res.rows_affected())
+}
+
 // ─── FileIO implementation ─────────────────────────────────────────────
 
 /// (world key, region x, region z)
@@ -297,10 +386,90 @@ type RegionKey = (String, i32, i32);
 /// can be cleared after a successful write.
 type RegionSaveBatch = Vec<(Vector2<i32>, Arc<crate::chunk::ChunkData>)>;
 
+/// A requested chunk this close to its region border triggers a background
+/// prefetch of the adjacent region, so crossing the border never waits on
+/// a full region load ("void wall").
+const PREFETCH_MARGIN: i32 = 4;
+
+/// Bounded LRU of decompressed regions. A dense region's raw NBT buffer
+/// can take tens of MB, so residency must be capped — eviction drops the
+/// least recently touched region (it reloads from the database on demand).
+///
+/// Regions are held behind `Arc` so a cache hit shares the buffer instead
+/// of deep-copying it on every fetch.
+struct RegionCache {
+    map: BTreeMap<RegionKey, (Arc<EasyRegionData>, u64)>,
+    tick: u64,
+    cap: usize,
+}
+
+impl RegionCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            map: BTreeMap::new(),
+            tick: 0,
+            cap: cap.max(4),
+        }
+    }
+
+    fn get(&mut self, key: &RegionKey) -> Option<Arc<EasyRegionData>> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.map.get_mut(key).map(|(region, last)| {
+            *last = tick;
+            region.clone()
+        })
+    }
+
+    fn contains(&self, key: &RegionKey) -> bool {
+        self.map.contains_key(key)
+    }
+
+    fn evict_to_cap(&mut self) {
+        while self.map.len() > self.cap {
+            let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, last))| *last)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            self.map.remove(&oldest);
+        }
+    }
+
+    /// Authoritative insert (post-save): always replaces the entry.
+    fn put(&mut self, key: RegionKey, region: Arc<EasyRegionData>) {
+        self.tick += 1;
+        self.map.insert(key, (region, self.tick));
+        self.evict_to_cap();
+    }
+
+    /// Non-authoritative insert (loaded/prefetched from the DB): only fills
+    /// an empty slot, so it can never clobber a fresher post-save entry.
+    fn put_if_absent(&mut self, key: RegionKey, region: Arc<EasyRegionData>) {
+        if self.map.contains_key(&key) {
+            return;
+        }
+        self.tick += 1;
+        self.map.insert(key, (region, self.tick));
+        self.evict_to_cap();
+    }
+
+    fn remove(&mut self, key: &RegionKey) {
+        self.map.remove(key);
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+    }
+}
+
 pub struct EasyMysqlStorage {
     config: EasyMysqlConfig,
     pool: Arc<tokio::sync::OnceCell<Arc<MysqlPool>>>,
-    region_cache: RwLock<BTreeMap<RegionKey, EasyRegionData>>,
+    region_cache: Arc<RwLock<RegionCache>>,
     watchers: RwLock<BTreeMap<RegionKey, usize>>,
     /// Serializes the read-modify-write save cycle per region so concurrent
     /// saves of the same region cannot overwrite each other's chunks.
@@ -327,7 +496,7 @@ impl EasyMysqlStorage {
         let storage = Self {
             config: config.clone(),
             pool: Arc::new(tokio::sync::OnceCell::new()),
-            region_cache: RwLock::new(BTreeMap::new()),
+            region_cache: Arc::new(RwLock::new(RegionCache::new(config.max_cached_regions))),
             watchers: RwLock::new(BTreeMap::new()),
             region_locks: RwLock::new(BTreeMap::new()),
             owner_id,
@@ -491,18 +660,7 @@ impl EasyMysqlStorage {
     }
 
     fn world_key(&self, folder: &LevelFolder) -> String {
-        let path = folder
-            .root_folder
-            .to_string_lossy()
-            .replace('\\', "/")
-            .trim_end_matches('/')
-            .to_string();
-        let prefix = self.config.key_prefix.trim_matches('/');
-        if prefix.is_empty() {
-            path
-        } else {
-            format!("{prefix}/{path}")
-        }
+        world_key_for(&self.config, &folder.root_folder)
     }
 
     const fn region_for(chunk: Vector2<i32>) -> (i32, i32) {
@@ -521,27 +679,53 @@ impl EasyMysqlStorage {
         world_key: &str,
         rx: i32,
         rz: i32,
-    ) -> Result<EasyRegionData, ChunkReadingError> {
+    ) -> Result<Arc<EasyRegionData>, ChunkReadingError> {
         let key = (world_key.to_string(), rx, rz);
-        {
-            let cache = self.region_cache.read().await;
-            if let Some(region) = cache.get(&key) {
-                return Ok(region.clone());
-            }
+        let cached = self.region_cache.write().await.get(&key);
+        if let Some(region) = cached {
+            return Ok(region);
         }
         let pool = self.ensure_pool().await?;
-        let region = pool
-            .load_region(world_key, rx, rz)
-            .await?
-            .unwrap_or_else(|| EasyRegionData::new(rx, rz));
-        // Cache only watched regions, otherwise one-off fetches would leak
-        // cache entries that no unwatch ever cleans up.
-        let watched = self.watchers.read().await.contains_key(&key);
-        if watched {
-            let mut cache = self.region_cache.write().await;
-            cache.insert(key, region.clone());
-        }
+        let region = Arc::new(
+            pool.load_region(world_key, rx, rz)
+                .await?
+                .unwrap_or_else(|| EasyRegionData::new(rx, rz)),
+        );
+        // `put_if_absent`: a concurrent save may have inserted a fresher
+        // post-save region while we were loading — never clobber it.
+        self.region_cache
+            .write()
+            .await
+            .put_if_absent(key, region.clone());
         Ok(region)
+    }
+
+    /// Background-prefetch a region into the LRU cache (no-op when already
+    /// cached or when the pool is not connected yet). Keeps players from
+    /// staring into the void while a neighbouring region decompresses.
+    fn spawn_prefetch(&self, world_key: &str, rx: i32, rz: i32) {
+        let key = (world_key.to_string(), rx, rz);
+        let cache = self.region_cache.clone();
+        let pool_cell = self.pool.clone();
+        let world_key = world_key.to_string();
+        tokio::spawn(async move {
+            if cache.read().await.contains(&key) {
+                return;
+            }
+            let Some(pool) = pool_cell.get().cloned() else {
+                return;
+            };
+            match pool.load_region(&world_key, rx, rz).await {
+                Ok(Some(region)) => {
+                    trace!("EasyWorld: prefetched region ({rx},{rz}) of {world_key}");
+                    // Never clobber a fresher post-save entry that landed
+                    // while this prefetch was loading.
+                    cache.write().await.put_if_absent(key, Arc::new(region));
+                }
+                Ok(None) => {}
+                Err(e) => debug!("EasyWorld: prefetch of ({rx},{rz}) failed: {e}"),
+            }
+        });
     }
 }
 
@@ -567,6 +751,35 @@ impl FileIO for EasyMysqlStorage {
                     .entry(Self::region_for(*coord))
                     .or_default()
                     .push(*coord);
+            }
+
+            // Read-ahead: a requested chunk close to its region border means
+            // the player is about to cross into the neighbouring region —
+            // warm it in the background before it is needed.
+            let mut prefetch: std::collections::BTreeSet<(i32, i32)> =
+                std::collections::BTreeSet::new();
+            for ((rx, rz), coords) in &regions_chunks {
+                for pos in coords {
+                    let rel_x = pos.x - (rx << 5);
+                    let rel_z = pos.y - (rz << 5);
+                    if rel_x < PREFETCH_MARGIN {
+                        prefetch.insert((rx - 1, *rz));
+                    }
+                    if rel_x >= 32 - PREFETCH_MARGIN {
+                        prefetch.insert((rx + 1, *rz));
+                    }
+                    if rel_z < PREFETCH_MARGIN {
+                        prefetch.insert((*rx, rz - 1));
+                    }
+                    if rel_z >= 32 - PREFETCH_MARGIN {
+                        prefetch.insert((*rx, rz + 1));
+                    }
+                }
+            }
+            for (rx, rz) in prefetch {
+                if !regions_chunks.contains_key(&(rx, rz)) {
+                    self.spawn_prefetch(&world_key, rx, rz);
+                }
             }
 
             let tasks = regions_chunks.into_iter().map(|((rx, rz), coords)| {
@@ -668,10 +881,12 @@ impl FileIO for EasyMysqlStorage {
                     let lock = self.region_lock(&world_key, rx, rz).await;
                     let _guard = lock.lock().await;
 
-                    let mut region = self.get_region(&world_key, rx, rz).await.map_err(|e| {
+                    let cached = self.get_region(&world_key, rx, rz).await.map_err(|e| {
                         error!("Failed to load region ({rx},{rz}) for write: {e}");
                         ChunkWritingError::IoError(std::io::Error::other(e.to_string()))
                     })?;
+                    // Copy-on-write: mutate an owned copy, then re-share it.
+                    let mut region = (*cached).clone();
 
                     let mut changed = false;
                     for (pos, chunk) in &entries {
@@ -703,15 +918,11 @@ impl FileIO for EasyMysqlStorage {
                         chunk.mark_dirty(false);
                     }
 
+                    // Authoritative `put`: this holds the region lock and has
+                    // the definitive post-save state, so it must win over any
+                    // concurrent load/prefetch of the same region.
                     let key = (world_key.clone(), rx, rz);
-                    let watched = self.watchers.read().await.contains_key(&key);
-                    let mut cache = self.region_cache.write().await;
-                    if watched {
-                        cache.insert(key, region);
-                    } else {
-                        cache.remove(&key);
-                    }
-                    drop(cache);
+                    self.region_cache.write().await.put(key, Arc::new(region));
 
                     debug!("Saved region ({rx},{rz}) for world {world_key}");
                     Ok(())

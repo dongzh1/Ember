@@ -1,12 +1,16 @@
 // EMBER - /world command: runtime world management
 //
-//   /world list           - list loaded worlds with player counts
-//   /world load <name>    - load (or create) a world at runtime
-//   /world unload <name>  - evacuate players, save and unload a world
-//   /world tp <name>      - teleport yourself to a world's spawn
+//   /world list                - list loaded worlds with player counts
+//   /world load <name>         - load (or create) a world at runtime
+//   /world unload <name>       - evacuate players, save and unload a world
+//   /world tp <name>           - teleport yourself to a world's spawn
+//   /world clone <src> <dst>   - SlimeWorld-style clone: copy a world's
+//                                data under a new name and load it
 
+use std::path::Path;
 use std::sync::Arc;
 
+use pumpkin_config::chunk::ChunkConfig;
 use pumpkin_data::dimension::Dimension;
 use pumpkin_util::PermissionLvl;
 use pumpkin_util::math::vector3::Vector3;
@@ -21,9 +25,11 @@ use crate::command::node::{CommandExecutor, CommandExecutorResult};
 use crate::server::Server;
 use crate::world::World;
 
-const DESCRIPTION: &str = "Manage worlds at runtime: list, load, unload, teleport.";
+const DESCRIPTION: &str = "Manage worlds at runtime: list, load, unload, teleport, clone.";
 const PERMISSION: &str = "ember:command.world";
 const ARG_NAME: &str = "name";
+const ARG_SRC: &str = "source";
+const ARG_DST: &str = "destination";
 
 fn find_world(server: &Server, name: &str) -> Option<Arc<World>> {
     server
@@ -89,6 +95,14 @@ impl CommandExecutor for WorldLoadExecutor {
                 .await;
                 return Ok(0);
             }
+            if server.is_world_unloading(&name) {
+                feedback(
+                    context,
+                    err_text(format!("World '{name}' is still unloading, retry shortly.")),
+                )
+                .await;
+                return Ok(0);
+            }
 
             let world = server
                 .create_world(name.clone(), Dimension::OVERWORLD)
@@ -144,6 +158,117 @@ impl CommandExecutor for WorldUnloadExecutor {
     }
 }
 
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+struct WorldCloneExecutor;
+
+impl CommandExecutor for WorldCloneExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let src = StringArgumentType::get(context, ARG_SRC)?.to_string();
+            let dst = StringArgumentType::get(context, ARG_DST)?.to_string();
+            let server = context.server().clone();
+
+            let Some(src_world) = find_world(&server, &src) else {
+                feedback(context, err_text(format!("World '{src}' is not loaded."))).await;
+                return Ok(0);
+            };
+            if find_world(&server, &dst).is_some() {
+                feedback(
+                    context,
+                    err_text(format!("World '{dst}' is already loaded.")),
+                )
+                .await;
+                return Ok(0);
+            }
+            if server.is_world_unloading(&dst) {
+                feedback(
+                    context,
+                    err_text(format!("World '{dst}' is still unloading, retry shortly.")),
+                )
+                .await;
+                return Ok(0);
+            }
+
+            let src_dir = src_world.level.level_folder.root_folder.clone();
+            let dst_dir = server.basic_config.get_world_path().join(&dst);
+            if dst_dir.exists() {
+                feedback(
+                    context,
+                    err_text(format!("Folder '{}' already exists.", dst_dir.display())),
+                )
+                .await;
+                return Ok(0);
+            }
+
+            // Copy any on-disk data (region files, level.dat, entities).
+            if src_dir.exists() {
+                let (src_copy, dst_copy) = (src_dir.clone(), dst_dir.clone());
+                let copied =
+                    tokio::task::spawn_blocking(move || copy_dir_recursive(&src_copy, &dst_copy))
+                        .await;
+                match copied {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        feedback(context, err_text(format!("File copy failed: {e}"))).await;
+                        return Ok(0);
+                    }
+                    Err(e) => {
+                        feedback(context, err_text(format!("File copy panicked: {e}"))).await;
+                        return Ok(0);
+                    }
+                }
+            }
+
+            // easy_mysql keeps region data in the database — clone the rows
+            // to the new key as well (in-database, no data transfer).
+            if let ChunkConfig::EasyMysql(cfg) = &server.advanced_config.world.chunk {
+                match pumpkin_world::chunk::easy_mysql::clone_world_data(cfg, &src_dir, &dst_dir)
+                    .await
+                {
+                    Ok(regions) => {
+                        feedback(
+                            context,
+                            TextComponent::text(format!("Cloned {regions} database regions.")),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        feedback(context, err_text(format!("Database clone failed: {e}"))).await;
+                        return Ok(0);
+                    }
+                }
+            }
+
+            let world = server
+                .create_world(dst.clone(), src_world.dimension.clone())
+                .await;
+            feedback(
+                context,
+                TextComponent::text(format!(
+                    "World '{src}' cloned to '{}' and loaded.",
+                    world.get_world_name(),
+                ))
+                .color_named(NamedColor::Green),
+            )
+            .await;
+            Ok(1)
+        })
+    }
+}
+
 struct WorldTpExecutor;
 
 impl CommandExecutor for WorldTpExecutor {
@@ -190,8 +315,15 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
             .then(literal("unload").then(
                 argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldUnloadExecutor),
             ))
-            .then(literal("tp").then(
-                argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldTpExecutor),
-            )),
+            .then(
+                literal("tp").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldTpExecutor),
+                ),
+            )
+            .then(
+                literal("clone").then(argument(ARG_SRC, StringArgumentType::SingleWord).then(
+                    argument(ARG_DST, StringArgumentType::SingleWord).executes(WorldCloneExecutor),
+                )),
+            ),
     );
 }
