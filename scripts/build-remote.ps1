@@ -26,6 +26,9 @@ function Fail($msg) {
 }
 
 $workflow = "build-release.yml"
+# 显式指定仓库,避免仓库有多个远程(origin/upstream)时 gh 报
+# "No default remote repository has been set" 要求先 gh repo set-default
+$repoSlug = "dongzh1/Ember"
 
 Write-Host "=== Ember 云端构建 (Linux + Windows) ===" -ForegroundColor Cyan
 
@@ -44,13 +47,13 @@ if ($LASTEXITCODE -eq 0 -and [int]$unpushed -gt 0) {
 }
 
 # 1. 记录触发前最新的 run id,用于识别新触发的 run
-$prevId = gh run list --workflow $workflow --limit 1 --json databaseId --jq '.[0].databaseId' 2>$null
+$prevId = gh run list -R $repoSlug --workflow $workflow --limit 1 --json databaseId --jq '.[0].databaseId' 2>$null
 if (-not $prevId) { $prevId = "0" }
 
 # 2. 触发工作流
 Write-Host ""
 Write-Host "[1/3] 触发工作流 $workflow (ref: $Ref)..." -ForegroundColor Cyan
-gh workflow run $workflow --ref $Ref
+gh workflow run $workflow -R $repoSlug --ref $Ref
 if ($LASTEXITCODE -ne 0) { Fail "触发失败。首次使用需先把 .github/workflows/build-release.yml 推送到 GitHub。" }
 
 # 3. 等待新 run 出现
@@ -58,7 +61,7 @@ Write-Host "等待 GitHub 创建构建任务..."
 $runId = $null
 foreach ($i in 1..12) {
     Start-Sleep -Seconds 5
-    $latest = gh run list --workflow $workflow --limit 1 --json databaseId --jq '.[0].databaseId' 2>$null
+    $latest = gh run list -R $repoSlug --workflow $workflow --limit 1 --json databaseId --jq '.[0].databaseId' 2>$null
     if ($latest -and $latest -ne $prevId) { $runId = $latest; break }
 }
 if (-not $runId) { Fail "60 秒内没等到新构建任务,请到 GitHub Actions 页面查看。" }
@@ -68,9 +71,9 @@ Write-Host "构建任务: https://github.com/dongzh1/Ember/actions/runs/$runId" 
 # 4. 等待构建完成 (Linux+Windows 全量 release 构建,无缓存时可能要 30-60 分钟)
 Write-Host ""
 Write-Host "[2/3] 等待云端构建完成 (Ctrl+C 可退出,之后可手动: gh run download $runId)..." -ForegroundColor Cyan
-gh run watch $runId --exit-status --interval 30
+gh run watch $runId -R $repoSlug --exit-status --interval 30
 if ($LASTEXITCODE -ne 0) {
-    Fail "云端构建失败,查看日志: gh run view $runId --log-failed"
+    Fail "云端构建失败,查看日志: gh run view $runId -R $repoSlug --log-failed"
 }
 
 # 5. 下载产物
@@ -78,8 +81,8 @@ Write-Host ""
 Write-Host "[3/3] 下载构建产物..." -ForegroundColor Cyan
 $dest = Join-Path $repo "dist\remote-$runId"
 New-Item -ItemType Directory -Force $dest | Out-Null
-gh run download $runId --dir $dest
-if ($LASTEXITCODE -ne 0) { Fail "下载失败,可手动重试: gh run download $runId --dir $dest" }
+gh run download $runId -R $repoSlug --dir $dest
+if ($LASTEXITCODE -ne 0) { Fail "下载失败,可手动重试: gh run download $runId -R $repoSlug --dir $dest" }
 
 Write-Host ""
 Write-Host "=== 构建完成,产物在 $dest ===" -ForegroundColor Green
