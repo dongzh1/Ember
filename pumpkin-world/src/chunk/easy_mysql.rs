@@ -3,14 +3,19 @@
 // Stores world region data in MySQL.  Uses the same EasyRegionData format
 // as .easy files, imported from `crate::chunk::format::easy`.
 //
-// Table (auto-created):
+// Table (auto-created; MEDIUMBLOB tables from older versions are upgraded):
 //   CREATE TABLE easyworld_regions (
 //       world_key  VARCHAR(512) NOT NULL,
 //       region_x   INT NOT NULL,
 //       region_z   INT NOT NULL,
-//       data       MEDIUMBLOB NOT NULL,
+//       data       LONGBLOB NOT NULL,
 //       PRIMARY KEY (world_key, region_x, region_z)
 //   );
+//
+// Concurrency: region writes are read-modify-write cycles serialized by a
+// per-region async lock, so concurrent saves within one server are safe.
+// A database must NOT be shared by multiple server instances at once —
+// there is no cross-process locking.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -36,7 +41,7 @@ const CREATE_TABLE: &str = concat!(
     "world_key VARCHAR(512) NOT NULL,",
     "region_x INT NOT NULL,",
     "region_z INT NOT NULL,",
-    "data MEDIUMBLOB NOT NULL,",
+    "data LONGBLOB NOT NULL,",
     "PRIMARY KEY (world_key, region_x, region_z)",
     ")"
 );
@@ -70,11 +75,20 @@ fn deserialize_region(data: &[u8]) -> Result<EasyRegionData, ChunkReadingError> 
     let mut decompressed = Vec::new();
     std::io::Read::read_to_end(&mut decoder, &mut decompressed)
         .map_err(ChunkReadingError::IoError)?;
-    postcard::from_bytes(&decompressed).map_err(|e| {
+    let region: EasyRegionData = postcard::from_bytes(&decompressed).map_err(|e| {
         ChunkReadingError::ParsingError(crate::chunk::ChunkParsingError::ErrorDeserializingChunk(
             e.to_string(),
         ))
-    })
+    })?;
+    // Reject corrupted rows up front instead of panicking on a bad slice later.
+    if !region.is_consistent() {
+        return Err(ChunkReadingError::ParsingError(
+            crate::chunk::ChunkParsingError::ErrorDeserializingChunk(
+                "inconsistent easyworld region data".to_string(),
+            ),
+        ));
+    }
+    Ok(region)
 }
 
 // ─── MySQL pool wrapper ────────────────────────────────────────────────
@@ -98,6 +112,26 @@ impl MysqlPool {
             .execute(&self.pool)
             .await
             .map_err(|e| ChunkReadingError::IoError(std::io::Error::other(e.to_string())))?;
+
+        // Upgrade tables created by older versions: MEDIUMBLOB caps a region
+        // at 16 MiB, which a densely built full region can exceed.
+        let col: Option<(String,)> = sqlx::query_as(
+            "SELECT DATA_TYPE FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() \
+             AND TABLE_NAME = 'easyworld_regions' AND COLUMN_NAME = 'data'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ChunkReadingError::IoError(std::io::Error::other(e.to_string())))?;
+        if let Some((data_type,)) = col
+            && data_type.eq_ignore_ascii_case("mediumblob")
+        {
+            sqlx::query("ALTER TABLE easyworld_regions MODIFY data LONGBLOB NOT NULL")
+                .execute(&self.pool)
+                .await
+                .map_err(|e| ChunkReadingError::IoError(std::io::Error::other(e.to_string())))?;
+            info!("EasyWorld MySQL: upgraded data column MEDIUMBLOB -> LONGBLOB");
+        }
         Ok(())
     }
 
@@ -141,14 +175,21 @@ impl MysqlPool {
 
 // ─── FileIO implementation ─────────────────────────────────────────────
 
-/// Pending chunk updates for one region: (chunk index, raw NBT bytes).
-type RegionUpdates = Vec<(u32, Vec<u8>)>;
+/// (world key, region x, region z)
+type RegionKey = (String, i32, i32);
+
+/// Chunks to persist into one region, with their handles so the dirty flag
+/// can be cleared after a successful write.
+type RegionSaveBatch = Vec<(Vector2<i32>, Arc<crate::chunk::ChunkData>)>;
 
 pub struct EasyMysqlStorage {
     config: EasyMysqlConfig,
     pool: tokio::sync::OnceCell<Arc<MysqlPool>>,
-    region_cache: RwLock<BTreeMap<(String, i32, i32), EasyRegionData>>,
-    watchers: RwLock<BTreeMap<(String, i32, i32), usize>>,
+    region_cache: RwLock<BTreeMap<RegionKey, EasyRegionData>>,
+    watchers: RwLock<BTreeMap<RegionKey, usize>>,
+    /// Serializes the read-modify-write save cycle per region so concurrent
+    /// saves of the same region cannot overwrite each other's chunks.
+    region_locks: RwLock<BTreeMap<RegionKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl EasyMysqlStorage {
@@ -159,7 +200,17 @@ impl EasyMysqlStorage {
             pool: tokio::sync::OnceCell::new(),
             region_cache: RwLock::new(BTreeMap::new()),
             watchers: RwLock::new(BTreeMap::new()),
+            region_locks: RwLock::new(BTreeMap::new()),
         }
+    }
+
+    async fn region_lock(&self, world_key: &str, rx: i32, rz: i32) -> Arc<tokio::sync::Mutex<()>> {
+        let key = (world_key.to_string(), rx, rz);
+        let mut locks = self.region_locks.write().await;
+        locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     async fn ensure_pool(&self) -> Result<&Arc<MysqlPool>, ChunkReadingError> {
@@ -211,8 +262,13 @@ impl EasyMysqlStorage {
             .load_region(world_key, rx, rz)
             .await?
             .unwrap_or_else(|| EasyRegionData::new(rx, rz));
-        let mut cache = self.region_cache.write().await;
-        cache.insert(key, region.clone());
+        // Cache only watched regions, otherwise one-off fetches would leak
+        // cache entries that no unwatch ever cleans up.
+        let watched = self.watchers.read().await.contains_key(&key);
+        if watched {
+            let mut cache = self.region_cache.write().await;
+            cache.insert(key, region.clone());
+        }
         Ok(region)
     }
 }
@@ -243,7 +299,15 @@ impl FileIO for EasyMysqlStorage {
                     let region = match self.get_region(&world_key, rx, rz).await {
                         Ok(r) => r,
                         Err(e) => {
-                            let _ = stream.send(LoadedData::Error((coords[0], e))).await;
+                            // Every requested chunk needs a response, or the
+                            // consumer waits forever for the missing ones.
+                            let msg = e.to_string();
+                            for pos in coords {
+                                let err = ChunkReadingError::IoError(std::io::Error::other(
+                                    msg.clone(),
+                                ));
+                                let _ = stream.send(LoadedData::Error((pos, err))).await;
+                            }
                             return;
                         }
                     };
@@ -288,54 +352,70 @@ impl FileIO for EasyMysqlStorage {
         Box::pin(async move {
             let world_key = Self::world_key(folder);
 
-            let mut region_dirty: BTreeMap<(i32, i32), RegionUpdates> = BTreeMap::new();
-            for (pos, chunk) in &chunks_data {
+            // Group chunks by region, keeping the chunk handle so the dirty
+            // flag is cleared only after the region is actually persisted.
+            let mut by_region: BTreeMap<(i32, i32), RegionSaveBatch> = BTreeMap::new();
+            for (pos, chunk) in chunks_data {
                 if !chunk.is_dirty() {
                     continue;
                 }
-                // ChunkPruner: skip empty chunks.
-                if crate::chunk::format::easy::is_prunable_chunk(chunk) {
-                    chunk.mark_dirty(false);
-                    continue;
-                }
-
-                chunk.mark_dirty(false);
-                let bytes = chunk
-                    .to_bytes()
-                    .await
-                    .map_err(|e| ChunkWritingError::ChunkSerializingError(e.to_string()))?;
-                let index = Self::chunk_index(*pos);
-                region_dirty
-                    .entry(Self::region_for(*pos))
+                by_region
+                    .entry(Self::region_for(pos))
                     .or_default()
-                    .push((index, bytes.to_vec()));
+                    .push((pos, chunk));
             }
 
-            let tasks = region_dirty.into_iter().map(|((rx, rz), updates)| {
+            let tasks = by_region.into_iter().map(|((rx, rz), entries)| {
                 let world_key = world_key.clone();
                 async move {
-                    let mut region = match self.get_region(&world_key, rx, rz).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            error!("Failed to load region ({rx},{rz}) for write: {e}");
-                            return Err(ChunkWritingError::IoError(std::io::Error::other(
-                                e.to_string(),
-                            )));
-                        }
-                    };
+                    // Serialize the read-modify-write cycle per region.
+                    let lock = self.region_lock(&world_key, rx, rz).await;
+                    let _guard = lock.lock().await;
 
-                    for (index, raw_nbt) in updates {
-                        region.upsert_chunk(index, &raw_nbt);
-                    }
-
-                    let pool = self.ensure_pool().await.map_err(|e| {
+                    let mut region = self.get_region(&world_key, rx, rz).await.map_err(|e| {
+                        error!("Failed to load region ({rx},{rz}) for write: {e}");
                         ChunkWritingError::IoError(std::io::Error::other(e.to_string()))
                     })?;
-                    pool.save_region(&world_key, &region).await?;
+
+                    let mut changed = false;
+                    for (pos, chunk) in &entries {
+                        let index = Self::chunk_index(*pos);
+                        // ChunkPruner: an emptied chunk is removed instead of
+                        // stored, so its old contents cannot resurrect.
+                        if crate::chunk::format::easy::is_prunable_chunk(chunk) {
+                            changed |= region.remove_chunk(index);
+                            continue;
+                        }
+                        let bytes = chunk
+                            .to_bytes()
+                            .await
+                            .map_err(|e| ChunkWritingError::ChunkSerializingError(e.to_string()))?;
+                        region.upsert_chunk(index, &bytes);
+                        changed = true;
+                    }
+
+                    if changed {
+                        let pool = self.ensure_pool().await.map_err(|e| {
+                            ChunkWritingError::IoError(std::io::Error::other(e.to_string()))
+                        })?;
+                        pool.save_region(&world_key, &region).await?;
+                    }
+
+                    // Persisted — only now clear the dirty flags, so a failed
+                    // write leaves the chunks dirty for the next save attempt.
+                    for (_, chunk) in &entries {
+                        chunk.mark_dirty(false);
+                    }
 
                     let key = (world_key.clone(), rx, rz);
+                    let watched = self.watchers.read().await.contains_key(&key);
                     let mut cache = self.region_cache.write().await;
-                    cache.insert(key, region);
+                    if watched {
+                        cache.insert(key, region);
+                    } else {
+                        cache.remove(&key);
+                    }
+                    drop(cache);
 
                     debug!("Saved region ({rx},{rz}) for world {world_key}");
                     Ok(())

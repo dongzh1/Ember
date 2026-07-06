@@ -23,9 +23,9 @@ $ProjectDir = Split-Path -Parent $ScriptDir
 $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) "ember-easyworld-verify"
 $ServerBin = Join-Path $ProjectDir "target\release\pumpkin.exe"
 
-function Write-Pass { Write-Host "[PASS]" -ForegroundColor Green -NoNewline; Write-Host " $_" }
-function Write-Fail { Write-Host "[FAIL]" -ForegroundColor Red -NoNewline; Write-Host " $_" }
-function Write-Info { Write-Host "[INFO]" -ForegroundColor Yellow -NoNewline; Write-Host " $_" }
+function Write-Pass { param($msg) Write-Host "[PASS]" -ForegroundColor Green -NoNewline; Write-Host " $msg" }
+function Write-Fail { param($msg) Write-Host "[FAIL]" -ForegroundColor Red -NoNewline; Write-Host " $msg" }
+function Write-Info { param($msg) Write-Host "[INFO]" -ForegroundColor Yellow -NoNewline; Write-Host " $msg" }
 
 if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
 New-Item -ItemType Directory -Force $TempDir | Out-Null
@@ -78,10 +78,13 @@ auto_approve_permissions = true
 
     $logFile = Join-Path $TempDir "server-file.log"
     Write-Info "Starting server (auto-stop after 10s)..."
+    # Start-Job does not inherit the current directory in Windows PowerShell,
+    # so pass it in explicitly — the server reads config\ from its cwd.
     $job = Start-Job -ScriptBlock {
-        param($bin, $log)
+        param($bin, $log, $wd)
+        Set-Location $wd
         & $bin *>&1 | Out-File -FilePath $log
-    } -ArgumentList $ServerBin, $logFile
+    } -ArgumentList $ServerBin, $logFile, $worldDir
 
     Start-Sleep -Seconds 10
     Stop-Job $job -ErrorAction SilentlyContinue
@@ -173,10 +176,12 @@ auto_approve_permissions = true
 
     $logFile = Join-Path $TempDir "server-mysql.log"
     Write-Info "Starting server (auto-stop after 10s)..."
+    # See file-mode note: Start-Job needs the working directory passed in.
     $job = Start-Job -ScriptBlock {
-        param($bin, $log)
+        param($bin, $log, $wd)
+        Set-Location $wd
         & $bin *>&1 | Out-File -FilePath $log
-    } -ArgumentList $ServerBin, $logFile
+    } -ArgumentList $ServerBin, $logFile, $worldDir
 
     Start-Sleep -Seconds 10
     Stop-Job $job -ErrorAction SilentlyContinue

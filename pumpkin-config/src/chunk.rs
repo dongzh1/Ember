@@ -41,6 +41,10 @@ pub struct AnvilChunkConfig {
 
 // EMBER start - easyworld mysql config
 /// Configuration for `EasyWorld` `MySQL` storage.
+///
+/// One database must be used by exactly one server instance at a time;
+/// there is no cross-process locking, concurrent writers would overwrite
+/// each other's regions.
 #[derive(Deserialize, Serialize, Clone)]
 pub struct EasyMysqlConfig {
     /// `MySQL` connection URL, e.g. `mysql://user:pass@localhost:3306/ember`

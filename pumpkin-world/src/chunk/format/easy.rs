@@ -73,66 +73,106 @@ impl EasyRegionData {
         self.chunk_bitmap[(index / 8) as usize] |= 1 << (index % 8);
     }
 
-    /// Get a chunk's raw NBT bytes by its region-relative index.
-    /// Returns `None` if the chunk is not stored (pruned or missing).
-    pub(crate) fn get_chunk_bytes(&self, index: u32) -> Option<Vec<u8>> {
+    /// Clear the bit for chunk `index`.
+    fn clear_chunk(&mut self, index: u32) {
+        self.chunk_bitmap[(index / 8) as usize] &= !(1u8 << (index % 8));
+    }
+
+    /// Number of stored chunks with an index lower than `index`.
+    /// This is the position of chunk `index` inside `chunk_sizes`
+    /// (bitmap order), whether or not it is stored itself.
+    fn stored_before(&self, index: u32) -> usize {
+        (0..index).filter(|&i| self.has_chunk(i)).count()
+    }
+
+    /// Byte offset into `chunks_data` where the chunk at `stored_idx` starts.
+    fn offset_of_stored(&self, stored_idx: usize) -> usize {
+        self.chunk_sizes[..stored_idx]
+            .iter()
+            .map(|&s| s as usize)
+            .sum()
+    }
+
+    /// Returns (`byte_offset`, `size`, `stored_index`) for a stored chunk.
+    /// Returns `None` if the chunk is not stored or the region data is
+    /// internally inconsistent (defensive against corrupted input).
+    fn chunk_info(&self, index: u32) -> Option<(usize, u32, usize)> {
         if !self.has_chunk(index) {
             return None;
         }
-        // Count how many stored chunks come before this one.
-        let mut offset: usize = 0;
-        let mut stored_idx: usize = 0;
-        for i in 0..index {
-            if self.has_chunk(i) {
-                offset += self.chunk_sizes[stored_idx] as usize;
-                stored_idx += 1;
-            }
+        let stored_idx = self.stored_before(index);
+        let size = *self.chunk_sizes.get(stored_idx)?;
+        let offset = self.offset_of_stored(stored_idx);
+        if offset + size as usize > self.chunks_data.len() {
+            return None;
         }
-        let size = self.chunk_sizes[stored_idx] as usize;
-        Some(self.chunks_data[offset..offset + size].to_vec())
+        Some((offset, size, stored_idx))
+    }
+
+    /// Get a chunk's raw NBT bytes by its region-relative index.
+    /// Returns `None` if the chunk is not stored (pruned or missing).
+    pub(crate) fn get_chunk_bytes(&self, index: u32) -> Option<Vec<u8>> {
+        let (offset, size, _) = self.chunk_info(index)?;
+        Some(self.chunks_data[offset..offset + size as usize].to_vec())
     }
 
     /// Insert or update a chunk.  Called during `update_chunk`.
+    ///
+    /// `chunk_sizes`/`chunks_data` are kept in bitmap (index) order, so new
+    /// chunks must be spliced in at their ordered position — appending would
+    /// desync the size table from the bitmap for every later lookup.
     pub(crate) fn upsert_chunk(&mut self, index: u32, raw_nbt: &[u8]) {
         let new_size = raw_nbt.len() as u32;
 
-        // If the chunk already exists, remove its old data.
-        if self.has_chunk(index) {
-            // Find its offset and size, then splice it out.
-            let (old_offset, old_size, stored_idx) = self.chunk_info(index);
-            // Remove old data range.
-            let new_data_len = self.chunks_data.len() - old_size as usize + new_size as usize;
-            let mut new_data = Vec::with_capacity(new_data_len);
-            new_data.extend_from_slice(&self.chunks_data[..old_offset]);
-            new_data.extend_from_slice(raw_nbt);
-            new_data.extend_from_slice(&self.chunks_data[old_offset + old_size as usize..]);
-            self.chunks_data = new_data;
+        if let Some((offset, old_size, stored_idx)) = self.chunk_info(index) {
+            // Replace the existing data range in place.
+            self.chunks_data
+                .splice(offset..offset + old_size as usize, raw_nbt.iter().copied());
             self.chunk_sizes[stored_idx] = new_size;
         } else {
-            // Append new chunk at the end.
+            // Insert at the bitmap-ordered position.
+            let stored_idx = self.stored_before(index);
+            let offset = self.offset_of_stored(stored_idx);
             self.set_chunk(index);
-            self.chunk_sizes.push(new_size);
-            self.chunks_data.extend_from_slice(raw_nbt);
+            self.chunk_sizes.insert(stored_idx, new_size);
+            self.chunks_data
+                .splice(offset..offset, raw_nbt.iter().copied());
         }
     }
 
-    /// Returns (`byte_offset`, `size`, `stored_index`) for an existing chunk.
-    fn chunk_info(&self, index: u32) -> (usize, u32, usize) {
-        let mut offset: usize = 0;
-        let mut stored_idx: usize = 0;
-        for i in 0..index {
-            if self.has_chunk(i) {
-                offset += self.chunk_sizes[stored_idx] as usize;
-                stored_idx += 1;
+    /// Remove a stored chunk (used by the `ChunkPruner` so an emptied chunk
+    /// does not resurrect its old contents on the next load).
+    /// Returns `true` if the chunk existed.
+    pub(crate) fn remove_chunk(&mut self, index: u32) -> bool {
+        match self.chunk_info(index) {
+            Some((offset, size, stored_idx)) => {
+                self.chunks_data.drain(offset..offset + size as usize);
+                self.chunk_sizes.remove(stored_idx);
+                self.clear_chunk(index);
+                true
             }
+            None => false,
         }
-        let size = self.chunk_sizes[stored_idx];
-        (offset, size, stored_idx)
     }
 
     /// Number of chunks currently stored.
     const fn stored_count(&self) -> usize {
         self.chunk_sizes.len()
+    }
+
+    /// Structural consistency check for data loaded from disk or database.
+    /// Guards every later slice/index operation against corrupted input.
+    pub(crate) fn is_consistent(&self) -> bool {
+        if self.magic != EASY_MAGIC || self.chunk_bitmap.len() != 128 {
+            return false;
+        }
+        let stored: usize = self
+            .chunk_bitmap
+            .iter()
+            .map(|b| b.count_ones() as usize)
+            .sum();
+        let total: usize = self.chunk_sizes.iter().map(|&s| s as usize).sum();
+        stored == self.chunk_sizes.len() && total == self.chunks_data.len()
     }
 }
 
@@ -228,7 +268,7 @@ where
             )
         })?;
 
-        if data.magic != EASY_MAGIC {
+        if !data.is_consistent() {
             return Err(ChunkReadingError::InvalidHeader);
         }
 
@@ -257,8 +297,9 @@ where
 
         if should_skip {
             trace!("EasyWorld: pruning empty chunk ({x},{z}) index {index}");
-            // Don't store — if it existed before, we leave it.  On next write it'll
-            // disappear because we didn't update it.  For now, just skip.
+            // Remove any previously stored version, otherwise a chunk that was
+            // mined out to all air would resurrect its old contents on reload.
+            self.data.remove_chunk(index);
             return Ok(());
         }
 
@@ -310,5 +351,76 @@ impl<D: 'static> EasyWorldFile<D> {
         }
         // For ChunkEntityData, never prune (entities are always meaningful).
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EasyRegionData;
+
+    #[test]
+    fn upsert_out_of_order_keeps_bitmap_order() {
+        let mut r = EasyRegionData::new(0, 0);
+        // Insert with descending indices: sizes/data must stay in bitmap order.
+        r.upsert_chunk(900, &[9u8; 10]);
+        r.upsert_chunk(300, &[3u8; 7]);
+        r.upsert_chunk(5, &[5u8; 4]);
+        assert!(r.is_consistent());
+        assert_eq!(r.get_chunk_bytes(5).unwrap(), vec![5u8; 4]);
+        assert_eq!(r.get_chunk_bytes(300).unwrap(), vec![3u8; 7]);
+        assert_eq!(r.get_chunk_bytes(900).unwrap(), vec![9u8; 10]);
+        assert!(r.get_chunk_bytes(0).is_none());
+        assert!(r.get_chunk_bytes(1023).is_none());
+    }
+
+    #[test]
+    fn upsert_existing_resizes_in_place() {
+        let mut r = EasyRegionData::new(0, 0);
+        r.upsert_chunk(10, &[1u8; 8]);
+        r.upsert_chunk(20, &[2u8; 8]);
+        // Grow the first chunk, shrink the second: neighbours must survive.
+        r.upsert_chunk(10, &[7u8; 20]);
+        r.upsert_chunk(20, &[8u8; 2]);
+        assert!(r.is_consistent());
+        assert_eq!(r.get_chunk_bytes(10).unwrap(), vec![7u8; 20]);
+        assert_eq!(r.get_chunk_bytes(20).unwrap(), vec![8u8; 2]);
+    }
+
+    #[test]
+    fn remove_chunk_shifts_later_chunks() {
+        let mut r = EasyRegionData::new(0, 0);
+        r.upsert_chunk(1, &[1u8; 3]);
+        r.upsert_chunk(2, &[2u8; 5]);
+        r.upsert_chunk(3, &[3u8; 7]);
+        assert!(r.remove_chunk(2));
+        assert!(!r.remove_chunk(2)); // already gone
+        assert!(r.is_consistent());
+        assert!(r.get_chunk_bytes(2).is_none());
+        assert_eq!(r.get_chunk_bytes(1).unwrap(), vec![1u8; 3]);
+        assert_eq!(r.get_chunk_bytes(3).unwrap(), vec![3u8; 7]);
+    }
+
+    #[test]
+    fn postcard_roundtrip() {
+        let mut r = EasyRegionData::new(-3, 7);
+        r.upsert_chunk(0, &[42u8; 16]);
+        r.upsert_chunk(1023, &[43u8; 32]);
+        let bytes = postcard::to_allocvec(&r).unwrap();
+        let back: EasyRegionData = postcard::from_bytes(&bytes).unwrap();
+        assert!(back.is_consistent());
+        assert_eq!(back.region_x, -3);
+        assert_eq!(back.region_z, 7);
+        assert_eq!(back.get_chunk_bytes(0).unwrap(), vec![42u8; 16]);
+        assert_eq!(back.get_chunk_bytes(1023).unwrap(), vec![43u8; 32]);
+    }
+
+    #[test]
+    fn corrupted_data_is_rejected_not_panicking() {
+        let mut r = EasyRegionData::new(0, 0);
+        r.upsert_chunk(4, &[1u8; 4]);
+        // Corrupt: drop the size table entry while the bit stays set.
+        r.chunk_sizes.clear();
+        assert!(!r.is_consistent());
+        assert!(r.get_chunk_bytes(4).is_none()); // must not panic
     }
 }

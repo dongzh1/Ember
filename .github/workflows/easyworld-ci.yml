@@ -80,11 +80,12 @@ jobs:
           if [ "$EASY_COUNT" -gt 0 ]; then
             echo ">> File mode passed"
             find . -name "*.easy" -exec ls -lh {} \;
-          elif [ -f "$(find . -name level.dat 2>/dev/null | head -1)" ]; then
+          elif [ -n "$(find . -name level.dat 2>/dev/null | head -1)" ]; then
             echo ">> File mode OK — server started (level.dat found), no chunks yet."
           else
-            echo ">> No level.dat — server may not have started. Log tail:"
-            tail -30 /tmp/server.log 2>/dev/null || true
+            echo ">> FAIL: server did not start (no level.dat). Log tail:"
+            tail -50 /tmp/server.log 2>/dev/null || true
+            exit 1
           fi
 
           echo ""
@@ -155,20 +156,23 @@ jobs:
 
           ROW_COUNT=$(mysql -h 127.0.0.1 -u root -pember_test ember -e \
             "SELECT COUNT(*) FROM easyworld_regions;" 2>/dev/null | tail -1 || echo "0")
+          case "$ROW_COUNT" in (''|*[!0-9]*) ROW_COUNT=0;; esac
           echo "easyworld_regions rows: $ROW_COUNT"
 
-          if [ "$ROW_COUNT" -gt 0 ] 2>/dev/null; then
+          if [ "$ROW_COUNT" -gt 0 ]; then
             echo ">> MySQL mode passed"
             echo ""
             echo "=== Sample data ==="
             mysql -h 127.0.0.1 -u root -pember_test ember -e \
               "SELECT world_key, region_x, region_z, LENGTH(data) AS size_bytes
                FROM easyworld_regions LIMIT 10;" 2>/dev/null
-          elif [ -f level.dat ] 2>/dev/null; then
-            echo ">> MySQL mode OK — server started, table empty (no player joined)."
+          elif mysql -h 127.0.0.1 -u root -pember_test ember -e \
+            "SHOW TABLES LIKE 'easyworld_regions';" 2>/dev/null | grep -q easyworld_regions; then
+            echo ">> MySQL mode OK — server connected (table created), no chunks persisted yet."
           else
-            echo ">> No level.dat — server may not have connected to MySQL. Log tail:"
-            tail -30 /tmp/server-mysql.log 2>/dev/null || true
+            echo ">> FAIL: server never connected to MySQL (table missing). Log tail:"
+            tail -50 /tmp/server-mysql.log 2>/dev/null || true
+            exit 1
           fi
 
   # ─── Clippy quick check ───────────────────────────────────────────────
