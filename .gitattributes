@@ -1,0 +1,11 @@
+# EMBER - fork merge policy
+#
+# README.md is Ember's own front page (rebranded, bilingual, community links).
+# Upstream Pumpkin's README lives at PUMPKIN_README.md, auto-refreshed by
+# sync-upstream. Keep OUR README.md on every merge from master so upstream
+# edits to README.md never produce a conflict.
+#
+# The `ours` merge driver is registered by scripts/sync-upstream.ps1
+# (git config merge.ours.driver true). If you merge manually without that
+# script, run that config command once first.
+README.md merge=ours

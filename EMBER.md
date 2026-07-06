@@ -3,8 +3,12 @@
 Ember 是 [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin) 的长期跟随分叉（soft fork）。
 Pumpkin 是南瓜，Ember 是把它点亮的那团火。
 
-本文件是这个仓库唯一的"分叉自有文档"，所有维护规则都在这里。
-**上游的任何文件（包括 README.md）都不承载 Ember 自己的内容。**
+本文件是这个仓库最主要的"分叉自有文档"，维护规则都在这里。
+**除 `README.md` 外，上游的任何文件都不承载 Ember 自己的内容。**
+
+`README.md` 是唯一的例外：它是 Ember 面向 GitHub 的门面（已品牌化、中文说明、社区入口），
+由 `.gitattributes` 的 `merge=ours` 保护——上游对 README 的改动在合并时自动保留我方版本，
+不产生冲突。上游 README 原文镜像在 `PUMPKIN_README.md`，由 `sync-upstream` 每次同步自动刷新。
 
 ---
 
@@ -53,7 +57,7 @@ git push origin main
 
    插入位置尽量选在函数末尾、match 分支末尾等"上游不常动"的地方。
    merge 冲突时，`grep -rn "EMBER start"` 就能列出全部自有改动清单。
-3. **不改名、不移动、不格式化上游的任何东西**。目录名、crate 名、文件名、
+3. **不改名、不移动、不格式化上游的任何东西**（`README.md` 除外，见开头）。目录名、crate 名、文件名、
    import 顺序全部保持上游原样。品牌欲望克制在新文件里。
 
 ## API 撞车处理（上游后来实现了我们已有的功能）
@@ -102,7 +106,8 @@ git push origin main
 | 功能 | 涉及文件 | 说明 |
 |---|---|---|
 | `auto_approve_permissions` | `pumpkin-config/src/plugins.rs`、`pumpkin/src/plugin/mod.rs` | 配置开启后插件权限请求自动批准，适合无人值守服务器 |
-| 一键上游同步脚本 | `sync-upstream.bat`、`scripts/sync-upstream.ps1` | 双击同步上游并推送云端，冲突时输出报告 |
+| 一键上游同步脚本 | `sync-upstream.bat`、`scripts/sync-upstream.ps1` | 双击同步上游并推送云端，冲突时输出报告；同步时刷新上游 README 镜像 |
+| 品牌 README + 上游镜像 | `README.md`、`PUMPKIN_README.md`、`.gitattributes` | README 品牌化 + 中文说明 + QQ 群；`merge=ours` 保护不撞冲突；上游 README 镜像到 `PUMPKIN_README.md` 随同步自动更新 |
 | EasyWorld 存储格式 | `pumpkin-world/src/chunk/format/easy.rs`、`pumpkin-world/src/chunk/easy_mysql.rs`、`pumpkin-config/src/chunk.rs`、`pumpkin-world/src/level.rs`、`pumpkin-world/src/chunk/palette.rs`、`pumpkin-world/src/chunk/io/mod.rs` | 区块存储新格式：`easy`（区域级 zstd + 空区块修剪的 .easy 文件）和 `easy_mysql`（存 MySQL，SlimeWorld 式一写多读：`mode = "read_write"` 独占写锁+心跳，`mode = "read_only"` 任意多服务器只读共享，写者宕机 60 秒后可被接管）。配置 `[world.chunk] type = "easy"` 或 `type = "easy_mysql"` + `url` + 可选 `mode` |
 | EasyWorld 验证 | `scripts/verify-easyworld.*`、`.github/workflows/easyworld-ci.yml` | 本地/CI 启动服务端验证 .easy 文件与 MySQL 表落盘 |
 | 构建打包脚本 | `build.bat`、`check.bat`、`push.bat`、`scripts/check.ps1`、`scripts/build-windows.ps1`、`scripts/build-remote.ps1`、`scripts/push.ps1`、`.github/workflows/build-release.yml` | 本地 Windows 打包、云端 Linux+Windows 打包（`ember-*` 标签自动发 Release）、代码检查、一键推送 |

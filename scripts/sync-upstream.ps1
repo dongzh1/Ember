@@ -42,8 +42,37 @@ function Show-ConflictReport {
     Write-Host "=========================================" -ForegroundColor Red
 }
 
+function Update-UpstreamMirror {
+    # 把上游 README (master 分支) 镜像到 PUMPKIN_README.md, 带自动生成头部
+    $header = @'
+<!--
+  自动生成，请勿手动编辑。
+  AUTO-GENERATED — DO NOT EDIT.
+  本文件是上游 Pumpkin README 的镜像，由 sync-upstream.bat 每次同步时从 `master` 分支自动刷新。
+  This file mirrors upstream Pumpkin's README and is refreshed from the `master`
+  branch on every run of sync-upstream.bat.
+-->
+
+> 📖 **上游 Pumpkin 的 README 镜像 / Upstream Pumpkin README (mirror)**
+> 来源 Source: [Pumpkin-MC/Pumpkin](https://github.com/Pumpkin-MC/Pumpkin/blob/master/README.md)
+> 返回 Ember 说明 / Back to Ember: [README.md](README.md)
+>
+> 下面是上游原文，随每次上游同步自动更新。Ember 自己的说明请看 [README.md](README.md)。
+
+---
+
+'@
+    $upstream = (git show master:README.md) -join "`n"
+    $content = $header + $upstream + "`n"
+    $path = Join-Path $repo "PUMPKIN_README.md"
+    [System.IO.File]::WriteAllText($path, $content, (New-Object System.Text.UTF8Encoding $false))
+}
+
 Write-Host "=== Ember 上游同步 ===" -ForegroundColor Cyan
 Write-Host "仓库: $repo"
+
+# 让上游对 README.md 的改动在合并时自动保留我方版本 (配合 .gitattributes 的 merge=ours)
+git config merge.ours.driver true
 
 # 上次合并没收尾的话, 直接再报一次冲突
 if (Test-Path (Join-Path $repo ".git\MERGE_HEAD")) {
@@ -106,6 +135,15 @@ git merge master --no-edit
 if ($LASTEXITCODE -ne 0) {
     Show-ConflictReport
     exit 1
+}
+
+# 刷新上游 README 镜像 (PUMPKIN_README.md), 让它随上游一起更新
+Update-UpstreamMirror
+git add PUMPKIN_README.md
+git diff --cached --quiet
+if ($LASTEXITCODE -ne 0) {
+    git commit -q -m "[EMBER] docs: refresh upstream Pumpkin README mirror"
+    Write-Host "已刷新上游 README 镜像: PUMPKIN_README.md" -ForegroundColor Green
 }
 
 # 子模块指针可能随上游移动
