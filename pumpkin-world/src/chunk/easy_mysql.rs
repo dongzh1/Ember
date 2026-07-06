@@ -184,7 +184,7 @@ type RegionSaveBatch = Vec<(Vector2<i32>, Arc<crate::chunk::ChunkData>)>;
 
 pub struct EasyMysqlStorage {
     config: EasyMysqlConfig,
-    pool: tokio::sync::OnceCell<Arc<MysqlPool>>,
+    pool: Arc<tokio::sync::OnceCell<Arc<MysqlPool>>>,
     region_cache: RwLock<BTreeMap<RegionKey, EasyRegionData>>,
     watchers: RwLock<BTreeMap<RegionKey, usize>>,
     /// Serializes the read-modify-write save cycle per region so concurrent
@@ -195,13 +195,35 @@ pub struct EasyMysqlStorage {
 impl EasyMysqlStorage {
     #[must_use]
     pub fn new(config: &EasyMysqlConfig) -> Self {
-        Self {
+        let storage = Self {
             config: config.clone(),
-            pool: tokio::sync::OnceCell::new(),
+            pool: Arc::new(tokio::sync::OnceCell::new()),
             region_cache: RwLock::new(BTreeMap::new()),
             watchers: RwLock::new(BTreeMap::new()),
             region_locks: RwLock::new(BTreeMap::new()),
+        };
+
+        // Eagerly connect in the background so a bad URL or unreachable
+        // database fails loudly at startup instead of on the first chunk IO
+        // (which without players may never happen).
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let pool_cell = storage.pool.clone();
+            let url = storage.config.url.clone();
+            handle.spawn(async move {
+                if let Err(e) = pool_cell.get_or_try_init(|| Self::init_pool(&url)).await {
+                    error!("EasyWorld MySQL eager init failed (check [world.chunk] url): {e}");
+                }
+            });
         }
+
+        storage
+    }
+
+    async fn init_pool(url: &str) -> Result<Arc<MysqlPool>, ChunkReadingError> {
+        let p = MysqlPool::new(url).await?;
+        p.ensure_table().await?;
+        info!("EasyWorld MySQL pool initialized (table: easyworld_regions)");
+        Ok(Arc::new(p))
     }
 
     async fn region_lock(&self, world_key: &str, rx: i32, rz: i32) -> Arc<tokio::sync::Mutex<()>> {
@@ -215,12 +237,7 @@ impl EasyMysqlStorage {
 
     async fn ensure_pool(&self) -> Result<&Arc<MysqlPool>, ChunkReadingError> {
         self.pool
-            .get_or_try_init(|| async {
-                let p = MysqlPool::new(&self.config.url).await?;
-                p.ensure_table().await?;
-                info!("EasyWorld MySQL pool initialized (table: easyworld_regions)");
-                Ok(Arc::new(p))
-            })
+            .get_or_try_init(|| Self::init_pool(&self.config.url))
             .await
     }
 
