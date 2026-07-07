@@ -10,6 +10,7 @@ use crate::world::World;
 use crossbeam::atomic::AtomicCell;
 use pumpkin_data::attributes::Attributes;
 use pumpkin_data::damage::DamageType;
+use pumpkin_data::entity::MobCategory;
 use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::meta_data_type::MetaDataType;
 use pumpkin_data::tag::{self, Taggable};
@@ -26,7 +27,7 @@ use rand::RngExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use uuid::Uuid;
 
 pub mod bat;
@@ -76,6 +77,12 @@ pub struct MobEntity {
     pub love_ticks: AtomicI32,
     pub breeding_cooldown: AtomicI32,
     pub breeder: AtomicCell<Option<Uuid>>,
+    /// When set, this mob is exempt from distance despawning (name-tagged,
+    /// tamed, spawned from a spawn egg with persistence, picked up loot, ...).
+    persistence_required: AtomicBool,
+    /// Ticks since a player was last within `NO_DESPAWN_DISTANCE`. Gates the
+    /// random far-away despawn roll, matching vanilla `noActionTime`.
+    no_action_time: AtomicI32,
     mob_flags: AtomicU8,
     last_sent_yaw: AtomicU8,
     last_sent_pitch: AtomicU8,
@@ -112,6 +119,8 @@ impl MobEntity {
             love_ticks: AtomicI32::new(0),
             breeding_cooldown: AtomicI32::new(0),
             breeder: AtomicCell::new(None),
+            persistence_required: AtomicBool::new(false),
+            no_action_time: AtomicI32::new(0),
             mob_flags: AtomicU8::new(0),
             last_sent_yaw: AtomicU8::new(0),
             last_sent_pitch: AtomicU8::new(0),
@@ -155,6 +164,60 @@ impl MobEntity {
 
     pub fn is_no_ai(&self) -> bool {
         (self.mob_flags.load(Relaxed) & Self::AI_DISABLED_FLAG) != 0
+    }
+
+    /// Whether this mob is exempt from distance despawning.
+    pub fn is_persistence_required(&self) -> bool {
+        self.persistence_required.load(Relaxed)
+    }
+
+    /// Marks (or clears) this mob as exempt from distance despawning. Set when
+    /// a mob is name-tagged, tamed, or otherwise made permanent.
+    pub fn set_persistence_required(&self, required: bool) {
+        self.persistence_required.store(required, Relaxed);
+    }
+
+    /// Removes this mob when it is too far from every player, mirroring
+    /// vanilla `Mob.checkDespawn`. Returns `true` when the mob was removed.
+    ///
+    /// Persistent-category mobs (farm animals) and mobs flagged
+    /// `persistence_required` never despawn this way.
+    pub async fn check_despawn(&self) -> bool {
+        let entity = &self.living_entity.entity;
+        let category = entity.entity_type.category;
+        if category.is_persistent || self.persistence_required.load(Relaxed) {
+            return false;
+        }
+
+        let pos = entity.pos.load();
+        let world = entity.world.load();
+        let despawn_distance = f64::from(category.despawn_distance);
+
+        // No player within the despawn distance means the nearest player is
+        // farther than it, so the mob is too far away: remove it.
+        let Some(player) = world.get_closest_player(pos, despawn_distance) else {
+            entity.remove().await;
+            return true;
+        };
+
+        let distance_sq = player.get_entity().pos.load().squared_distance_to_vec(&pos);
+        let no_despawn = f64::from(MobCategory::NO_DESPAWN_DISTANCE);
+        let no_despawn_sq = no_despawn * no_despawn;
+
+        if distance_sq < no_despawn_sq {
+            // A player is close; reset the idle timer.
+            self.no_action_time.store(0, Relaxed);
+            return false;
+        }
+
+        // In the despawn band: after ~30 s of no nearby player, roll for a
+        // random despawn each tick (vanilla 1/800).
+        let idle = self.no_action_time.fetch_add(1, Relaxed) + 1;
+        if idle > 600 && rand::random_range(0..800) == 0 {
+            entity.remove().await;
+            return true;
+        }
+        false
     }
 
     fn set_mob_flag(&self, flag: u8, value: bool) {
@@ -498,6 +561,12 @@ impl<T: Mob + Send + 'static> EntityBase for T {
             let mob_entity = self.get_mob_entity();
             mob_entity.tick_sun_burn().await;
 
+            // Remove mobs that have wandered too far from any player. If this
+            // despawns the mob, skip the rest of the tick.
+            if mob_entity.check_despawn().await {
+                return;
+            }
+
             if mob_entity.breeding_cooldown.load(Relaxed) > 0 {
                 mob_entity.breeding_cooldown.fetch_sub(1, Relaxed);
             }
@@ -508,56 +577,62 @@ impl<T: Mob + Send + 'static> EntityBase for T {
 
             self.mob_tick(caller).await;
 
-            let age = mob_entity.living_entity.entity.age.load(Relaxed);
-            let entity_id = mob_entity.living_entity.entity.entity_id;
+            // A mob with AI disabled (`NoAI`) skips all goal, navigation and
+            // control ticking, but still ticks its living body below.
+            let ai_enabled = !mob_entity.is_no_ai();
 
-            // 1. "Take" selectors out of the mutexes
-            let mut target_selector = {
-                let mut guard = mob_entity.target_selector.lock().unwrap();
-                std::mem::take(&mut *guard)
-            };
-            let mut goals_selector = {
-                let mut guard = mob_entity.goals_selector.lock().unwrap();
-                std::mem::take(&mut *guard)
-            };
+            if ai_enabled {
+                let age = mob_entity.living_entity.entity.age.load(Relaxed);
+                let entity_id = mob_entity.living_entity.entity.entity_id;
 
-            // 2. Perform AI logic (No locks held, so .await is safe!)
-            if (age + entity_id) % 2 != 0 && age > 1 {
-                target_selector.tick_goals(self, false).await;
-                goals_selector.tick_goals(self, false).await;
-            } else {
-                target_selector.tick(self).await;
-                goals_selector.tick(self).await;
+                // 1. "Take" selectors out of the mutexes
+                let mut target_selector = {
+                    let mut guard = mob_entity.target_selector.lock().unwrap();
+                    std::mem::take(&mut *guard)
+                };
+                let mut goals_selector = {
+                    let mut guard = mob_entity.goals_selector.lock().unwrap();
+                    std::mem::take(&mut *guard)
+                };
+
+                // 2. Perform AI logic (No locks held, so .await is safe!)
+                if (age + entity_id) % 2 != 0 && age > 1 {
+                    target_selector.tick_goals(self, false).await;
+                    goals_selector.tick_goals(self, false).await;
+                } else {
+                    target_selector.tick(self).await;
+                    goals_selector.tick(self).await;
+                }
+
+                // 3. "Put back" selectors
+                {
+                    *mob_entity.target_selector.lock().unwrap() = target_selector;
+                    *mob_entity.goals_selector.lock().unwrap() = goals_selector;
+                };
+
+                // 4. Repeat for Navigator
+                let mut navigator = {
+                    let mut guard = mob_entity.navigator.lock().unwrap();
+                    std::mem::take(&mut *guard)
+                };
+
+                navigator.tick(&mob_entity.living_entity).await;
+
+                {
+                    *mob_entity.navigator.lock().unwrap() = navigator;
+                };
+
+                // Controllers are synchronous, so we can just use normal blocks
+                {
+                    let mut look_control = mob_entity.look_control.lock().unwrap();
+                    look_control.tick(self);
+                };
+
+                {
+                    let mut move_control = mob_entity.move_control.lock().unwrap();
+                    move_control.tick(self);
+                };
             }
-
-            // 3. "Put back" selectors
-            {
-                *mob_entity.target_selector.lock().unwrap() = target_selector;
-                *mob_entity.goals_selector.lock().unwrap() = goals_selector;
-            };
-
-            // 4. Repeat for Navigator
-            let mut navigator = {
-                let mut guard = mob_entity.navigator.lock().unwrap();
-                std::mem::take(&mut *guard)
-            };
-
-            navigator.tick(&mob_entity.living_entity).await;
-
-            {
-                *mob_entity.navigator.lock().unwrap() = navigator;
-            };
-
-            // Controllers are synchronous, so we can just use normal blocks
-            {
-                let mut look_control = mob_entity.look_control.lock().unwrap();
-                look_control.tick(self);
-            };
-
-            {
-                let mut move_control = mob_entity.move_control.lock().unwrap();
-                move_control.tick(self);
-            };
 
             mob_entity.living_entity.tick(caller, server).await;
             self.post_tick().await;
