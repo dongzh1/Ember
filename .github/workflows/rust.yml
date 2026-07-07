@@ -19,8 +19,6 @@ jobs:
           - stable
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
       - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
       - run: rustup component add rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -35,8 +33,6 @@ jobs:
           - stable
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
       - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
       - uses: bnjbvr/cargo-machete@main
   clippy_debug:
@@ -49,8 +45,6 @@ jobs:
           - stable
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
       - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
@@ -66,8 +60,6 @@ jobs:
           - stable
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
       - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
@@ -92,8 +84,6 @@ jobs:
           - stable
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
       - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
@@ -120,8 +110,6 @@ jobs:
           - stable
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
 
       - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
@@ -153,8 +141,6 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
       - name: Download prebuilt binary artifacts
         uses: actions/download-artifact@v8
         with:

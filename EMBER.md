@@ -122,6 +122,7 @@ git push origin main
 
 | easyworld 前置插件 | `easyworld/`（新 crate：`Cargo.toml`、`src/lib.rs`+`service.rs`+`commands.rs`+`dialog.rs`）、根 `Cargo.toml` members | 仓库**第一个 native 插件示例**。① `WorldService` 前置库(其他插件 `get_service::<WorldService>("easyworld")` 调 create_or_load/unload/clone/clone_readonly/delete/list);② `/ew list/create/load/unload/clone/clone-ro/delete/menu`(权限 `easyworld:command.manage`);③ `/ew menu` dialog 图形菜单(按钮点击经 `CustomClickActionEvent` 驱动 WorldService,操作后重渲染) |
 | 原生对话框 + 磁盘世界枚举 | `pumpkin/src/entity/player.rs`（`show_dialog`/`clear_dialog`）、`pumpkin/src/server/mod.rs`（`list_world_folders`、`delete_world`）、`pumpkin-world/src/chunk/easy_mysql.rs`（`delete_world_data`） | `Player::show_dialog`/`clear_dialog` 原生发服务端对话框(原来只有 WASM 有);`Server::list_world_folders` 枚举磁盘未加载世界;`delete_world` 删世界(文件夹+库行+锁)。前两者可 PR 上游 |
+| Mannequin NPC 实体 + WASM 控制 API | `pumpkin/src/entity/decoration/mannequin.rs`、`pumpkin-protocol/src/lib.rs`（`ResolvableProfile`）、`pumpkin/src/entity/decoration/mod.rs`、`pumpkin/src/entity/type.rs`、`ember-wit/ember.wit`、`pumpkin-plugin-api/src/lib.rs`、`pumpkin/src/plugin/loader/wasm/wasm_host/wit/v0_1/{entity,mod}.rs` | 上游已有 `MANNEQUIN` 实体类型 id 但无 Rust 实现,Ember 补上装饰实体 + `PROFILE` 元数据(`ResolvableProfile`)。WASM 控制面(`set-skin`/`set-description`/`set-immovable`)首次用**覆盖包技术**扩展 WIT 契约:`ember-wit/ember.wit` 声明独立的 `package ember:plugin`,其 `world` 用 `include` 整体引入上游 `pumpkin:plugin/plugin` 再 `import` 自己的 `mannequin` interface;bindgen 的 `path` 传数组同时读上游目录和 `ember-wit/`,`pumpkin-plugin-wit` 子模块内容保持字节级不变。**易错点**:一旦 `with` 里出现任意一条映射,wit-bindgen 就要求`include`进来的上游 world 触达的**全部** interface(不只是 mannequin 直接用到的)都显式给出 `with` 答案,否则 proc-macro panic;完整清单見两处 bindgen 调用旁的注释 |
 
 （新增功能时更新此表。）
 
@@ -130,7 +131,7 @@ git push origin main
 **服务端负责原语**（存储格式、世界加载/卸载/克隆/实例/预热 API、生命周期事件）;**插件负责业务**（副本准入、排队、经济、消息）。
 
 - **Native 插件**:`Context.server` 是公开的 `Arc<Server>`,今天即可调用全部原语（`create_world_with`/`unload_world`/`clone_world`/`is_world_unloading`/`prewarm_storage`）+ 监听/否决 `WorldLoad`/`WorldUnload` 事件——写业务适配插件无需任何新增 API。
-- **WASM 插件**:世界管理 API 仍缺（只有 `create-world`,无 unload/clone/instance;无生命周期事件)。要让沙箱/热重载的 WASM 插件也能驱动,需扩展 `pumpkin-plugin-wit` 子模块的 WIT 契约（该子模块是独立 git 仓库,需 fork）——尚未做,待决策。
+- **WASM 插件**:世界管理 API 仍缺（只有 `create-world`,无 unload/clone/instance;无生命周期事件)。要让沙箱/热重载的 WASM 插件也能驱动,需扩展 WIT 契约——**不必 fork `pumpkin-plugin-wit`**:参照 mannequin 的先例,在 `ember-wit/` 开一个独立的 `ember:plugin` 包,`world` 用 `include` 叠加上游 `plugin` world 再加自己的 interface,bindgen 的 `path` 传数组同时读两个目录,上游目录保持字节级不变(见下表 mannequin 行)。世界管理 API 的扩展本身**仍未做**,待排期。
 
 ## 许可证
 

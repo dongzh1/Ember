@@ -82,14 +82,11 @@ if (Test-Path (Join-Path $repo ".git\MERGE_HEAD")) {
     exit 1
 }
 
-# 0. 工作区必须干净 (父仓库的已跟踪文件)
-# --ignore-submodules=dirty: 忽略子模块内部未提交的改动 (如 pumpkin-plugin-wit 的
-# mannequin WIT WIP)。上游同步只合并父仓库的 master/main, 子模块内部 WIP 与之无关,
-# 由老大自管, 不该挡同步。gitlink 被提交移动过仍算改动 (dirty 级不忽略 M)。
-$dirty = git status --porcelain --ignore-submodules=dirty
+# 0. 工作区必须干净
+$dirty = git status --porcelain
 if ($dirty) {
-    git status --short --ignore-submodules=dirty
-    Fail "工作区有未提交的改动 (父仓库已跟踪文件), 请先提交或 stash 再同步。"
+    git status --short
+    Fail "工作区有未提交的改动, 请先提交或 stash 再同步。"
 }
 
 # 1. 拉取上游
@@ -148,9 +145,6 @@ if ($LASTEXITCODE -ne 0) {
     git commit -q -m "[EMBER] docs: refresh upstream Pumpkin README mirror"
     Write-Host "已刷新上游 README 镜像: PUMPKIN_README.md" -ForegroundColor Green
 }
-
-# 子模块指针可能随上游移动
-git submodule update --init --recursive
 
 # 4. 推送 main
 Write-Host ""

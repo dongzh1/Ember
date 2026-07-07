@@ -42,8 +42,6 @@ jobs:
             plugin: easyworld.dll
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
 
       - run: rustup update stable && rustup default stable
       - uses: Swatinem/rust-cache@v2

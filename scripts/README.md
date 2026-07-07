@@ -54,10 +54,6 @@
 .\scripts\sync-upstream.ps1
 ```
 
-> `ship.ps1`/`push.ps1`/`sync-upstream.ps1` 的"工作区干净"判断都用 `--ignore-submodules=dirty`,
-> 所以 `pumpkin-plugin-wit` 子模块内部未提交的 WIP(如 mannequin 的 WIT 改动)不会挡住推送/同步;
-> 子模块 gitlink 被真正提交移动过时仍会照常处理。
-
 ## 约定
 
 - 提交信息带 `[EMBER]` 前缀(见 `EMBER.md` 提交规范)。
