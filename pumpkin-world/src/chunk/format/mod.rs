@@ -36,7 +36,6 @@ pub mod linear;
 pub mod pump;
 // EMBER start - easyworld format
 pub mod easy;
-pub mod easy_shard;
 // EMBER end
 
 impl SingleChunkDataSerializer for ChunkData {

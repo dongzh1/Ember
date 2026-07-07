@@ -84,51 +84,39 @@ kept as `*.bak` and the new format is pinned in the world's `ember-world.toml`.
 > in generator-backed worlds. For void/skyblock-style maps use dungeon templates or a
 > non-pruning format (`anvil`/`pump`).
 
+One format, two backends. The loading strategy is chosen automatically by map size — you only
+pick the backend. Full guide: [`docs/easyworld.md`](docs/easyworld.md).
+
 ```toml
-# Region-level zstd compression (.easy files) — much smaller than Pump
+# On-disk .easy files (default)
 [world.chunk]
 type = "easy"
+backend = "file"
 ```
 
 ```toml
-# MySQL storage with SlimeWorld-style shared access
+# Shared MySQL storage (one writer, many read-only replicas)
 [world.chunk]
-type = "easy_mysql"
+type = "easy"
+backend = "mysql"
 url = "mysql://root:password@localhost:3306/ember"
-mode = "read_write"        # "read_write" (default, one writer) or "read_only" (unlimited readers)
-key_prefix = "my_cluster"  # optional: namespace the DB keys when several clusters share one database
-max_cached_regions = 32    # LRU cap on resident decompressed regions (memory bound)
-```
-
-- **read_write** — takes a per-world heartbeat lock; only one live writer per world. A second
-  writer degrades to read-only automatically. A crashed writer is taken over after ~60s.
-- **read_only** — never writes; safe on any number of servers simultaneously. Great for lobby
-  displays, spectator copies, or dungeon templates.
-
-```toml
-# Per-chunk-group zstd (.ezs files) — minimal write cost for write-heavy worlds
-[world.chunk]
-type = "easy_shard"
-group_chunks = 1           # chunks per compression unit (1 = cheapest writes, 1024 = best ratio)
 ```
 
 ### Per-world configuration (`ember-world.toml`)
 
 Drop an `ember-world.toml` into a world's folder to override the global `[world]` settings for
-that world only — hub, resource, personal and dungeon worlds can each use their own storage
-format and residency policy on one server:
+that world only:
 
 ```toml
-archetype = "hub"          # default | personal | hub | resource | dungeon
-residency = "auto"         # auto (small worlds stay fully in RAM) | full | lazy
-autosave_ticks = 24000
-
-[chunk]                    # any [world.chunk] value works here
-type = "easy"
+border   = 512            # max size in blocks; <=512 is loaded whole into RAM (small map)
+generate = "seed"         # seed (default) | void | ocean
+mode     = "read_write"   # read_write (default) | read_only (never persists)
+source   = "arena"        # read-only clone: read another world's data
 ```
 
-With `residency = "auto"`, worlds of one region (512×512) are prewarmed and served entirely
-from memory; `hub`/`dungeon` archetypes stay resident up to four regions (1024×1024).
+A world with a border ≤ 512×512 is prewarmed entirely into memory and clones instantly; larger
+or borderless worlds load region by region. `generate = void`/`ocean` fills ungenerated chunks
+without the terrain generator.
 
 ### Dynamic worlds
 
@@ -137,7 +125,7 @@ from memory; `hub`/`dungeon` archetypes stay resident up to four regions (1024×
 /world load <name>                 # load or create a world at runtime
 /world unload <name>               # evict players to spawn, save, and unload
 /world tp <name>                   # teleport yourself to a world's spawn
-/world clone <source> <dest>       # copy a world to a new name and load it (SlimeWorld-style)
+/world clone <source> <dest> [save|readonly]  # save copy, or read-only in-memory instance
 /world prewarm <name>              # load a world's stored regions into memory
 /world convert <name> <format>     # migrate an unloaded world's storage format
 ```
@@ -266,34 +254,42 @@ cargo build --release
 
 ### EasyWorld 世界格式
 
+一种格式，两个后端；加载方式按地图大小**自动**决定，你只选后端。完整说明见 [`docs/easyworld.md`](docs/easyworld.md)。
+
 ```toml
-# 区域级 zstd 压缩（.easy 文件），比 Pump 小很多
+# 磁盘 .easy 文件（默认）
 [world.chunk]
 type = "easy"
+backend = "file"
 ```
 
 ```toml
-# MySQL 存储，SlimeWorld 式共享访问
+# 共享 MySQL（一台读写，多台只读副本）
 [world.chunk]
-type = "easy_mysql"
+type = "easy"
+backend = "mysql"
 url = "mysql://root:password@localhost:3306/ember"
-mode = "read_write"        # "read_write"（默认，独占写）或 "read_only"（任意多服务器只读共享）
-key_prefix = "my_cluster"  # 可选：多套集群共用一个数据库时给 key 加命名空间
-max_cached_regions = 32    # 常驻的已解压区域数量上限（LRU，控制内存占用）
 ```
 
-- **read_write**：抢占该世界的心跳锁，同一世界同时只允许一个写入服务器；第二个写入服务器会自动
-  降级为只读；写入服务器崩溃后约 60 秒锁可被接管。
-- **read_only**：从不写库，可被任意多个服务器同时加载。适合大厅展示、旁观副本、副本模板等。
+**按世界覆盖**：世界文件夹放 `ember-world.toml`：
+
+```toml
+border   = 512           # 最大边界（格），≤512 = 小地图（整世界内存驻留、秒克隆）
+generate = "seed"        # seed 按种子 | void 虚空 | ocean 海洋底
+mode     = "read_write"  # read_write（默认）| read_only（不落盘）
+source   = "arena"       # 只读克隆：读另一个世界的数据
+```
 
 ### 动态世界
 
 ```
-/world list                        # 列出已加载世界及在线人数
-/world load <名字>                 # 运行时加载或创建世界
-/world unload <名字>               # 撤离玩家到出生点、存盘、卸载
-/world tp <名字>                   # 把自己传送到该世界出生点
-/world clone <源> <目标>           # 复制世界为新名字并加载（SlimeWorld 式）
+/world list                              # 列出已加载世界及在线人数
+/world load <名字>                       # 运行时加载或创建世界
+/world unload <名字>                     # 撤离玩家到出生点、存盘、卸载
+/world tp <名字>                         # 把自己传送到该世界出生点
+/world clone <源> <目标> [save|readonly] # 保存克隆 / 只读内存克隆
+/world prewarm <名字>                    # 把世界区域预热进内存
+/world convert <名字> <格式>             # 迁移未加载世界的存储格式
 ```
 
 权限：`ember:command.world`（默认 OP 3 级）。加载/卸载/克隆都不会卡服 —— 存盘在后台进行。

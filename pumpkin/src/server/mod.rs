@@ -431,6 +431,27 @@ impl Server {
         dimension: Dimension,
         level_config: Option<pumpkin_config::world::LevelConfig>,
     ) -> Arc<World> {
+        // Border/residency come from the explicit config (dungeon instances
+        // have no on-disk sidecar) or the world's sidecar file.
+        let world_path = self.basic_config.get_world_path().join(&name);
+        let runtime = level_config.as_ref().map_or_else(
+            || {
+                pumpkin_config::ember_world::EmberWorldConfig::load(&world_path)
+                    .map(|s| (s.border, s.resident_region_cap()))
+            },
+            |lc| {
+                let border = lc.ember.border;
+                let small = border.is_some_and(|b| {
+                    b > 0 && b <= pumpkin_config::ember_world::SMALL_MAP_MAX_BORDER
+                });
+                let cap = if small {
+                    pumpkin_config::ember_world::SMALL_MAP_REGIONS
+                } else {
+                    0
+                };
+                Some((border, cap))
+            },
+        );
         {
             let worlds = self.worlds.load();
             if let Some(world) = worlds
@@ -474,11 +495,17 @@ impl Server {
         .await
         .expect("World creation panicked");
 
-        // Residency policy: sidecar-gated background prewarm. Worlds without
-        // a sidecar behave exactly as before.
-        let world_path = self.basic_config.get_world_path().join(&name);
-        if let Some(sidecar) = pumpkin_config::ember_world::EmberWorldConfig::load(&world_path) {
-            let cap = sidecar.resident_region_cap();
+        // Size-based policy: enforce the max border and prewarm small maps.
+        if let Some((border, cap)) = runtime {
+            if let Some(border) = border
+                && border > 0
+            {
+                let spawn = world.level_info.load();
+                let (cx, cz) = (f64::from(spawn.spawn_x), f64::from(spawn.spawn_z));
+                let mut wb = world.worldborder.lock().await;
+                wb.set_center(&world, cx, cz);
+                wb.set_diameter(&world, f64::from(border), None);
+            }
             if cap > 0 {
                 let level = world.level.clone();
                 tokio::spawn(async move {
@@ -654,14 +681,65 @@ impl Server {
             &self.advanced_config.world,
             &src_dir,
         );
-        if let pumpkin_config::chunk::ChunkConfig::EasyMysql(cfg) = &src_config.chunk {
-            pumpkin_world::chunk::easy_mysql::clone_world_data(cfg, &src_dir, &dst_dir)
+        if let pumpkin_config::chunk::ChunkConfig::Easy(cfg) = &src_config.chunk
+            && cfg.backend == pumpkin_config::chunk::EasyBackend::Mysql
+        {
+            let mysql = cfg.mysql(src_config.ember.mode);
+            pumpkin_world::chunk::easy_mysql::clone_world_data(&mysql, &src_dir, &dst_dir)
                 .await
                 .map_err(|e| format!("database clone failed: {e}"))?;
         }
 
         Ok(self
             .create_world(dst_name.to_string(), src_world.dimension.clone())
+            .await)
+    }
+
+    /// Read-only clone: loads `dst_name` as an in-memory instance that reads
+    /// `src_name`'s stored data. Edits stay in RAM and are discarded on
+    /// unload; nothing is copied, so many instances share the source's
+    /// memory. This is the reusable primitive behind read-only clones and
+    /// dungeon instances.
+    ///
+    /// # Errors
+    /// Fails when the destination is already loaded/unloading.
+    pub async fn clone_world_readonly(
+        self: &Arc<Self>,
+        src_name: &str,
+        dst_name: &str,
+    ) -> Result<Arc<World>, String> {
+        if self
+            .worlds
+            .load()
+            .iter()
+            .any(|w| w.get_world_name() == dst_name)
+        {
+            return Err(format!("world '{dst_name}' is already loaded"));
+        }
+        if self.is_world_unloading(dst_name) {
+            return Err(format!("world '{dst_name}' is still unloading"));
+        }
+
+        let global = &self.advanced_config.world;
+        let src_root = self.basic_config.get_world_path().join(src_name);
+        let src = pumpkin_config::ember_world::resolve_level_config(global, &src_root);
+        let level_config = pumpkin_config::world::LevelConfig {
+            chunk: src.chunk,
+            lighting: global.lighting,
+            autosave_ticks: 0,
+            ember: pumpkin_config::ember_world::EmberRuntime {
+                mode: pumpkin_config::chunk::EasyWorldMode::ReadOnly,
+                source: Some(src_name.to_string()),
+                generate: pumpkin_config::ember_world::GenerateMode::Void,
+                border: Some(pumpkin_config::ember_world::SMALL_MAP_MAX_BORDER),
+            },
+        };
+        Ok(self
+            .create_world_with(
+                dst_name.to_string(),
+                Dimension::OVERWORLD,
+                Some(level_config),
+            )
             .await)
     }
     // EMBER end

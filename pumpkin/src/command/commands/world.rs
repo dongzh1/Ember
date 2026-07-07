@@ -4,11 +4,12 @@
 //   /world load <name>         - load (or create) a world at runtime
 //   /world unload <name>       - evacuate players, save and unload a world
 //   /world tp <name>           - teleport yourself to a world's spawn
-//   /world clone <src> <dst>   - SlimeWorld-style clone: copy a world's
-//                                data under a new name and load it
+//   /world clone <src> <dst> [save|readonly] - clone a world: `save` (default)
+//                                copies it under a new name; `readonly` loads
+//                                an in-memory instance that discards changes
 //   /world prewarm <name>      - load a world's stored regions into memory
 //   /world convert <name> <fmt> - migrate an UNLOADED world's storage format
-//                                (anvil|linear|pump|easy|easy_shard)
+//                                (anvil|linear|pump|easy)
 
 use std::sync::Arc;
 
@@ -160,7 +161,10 @@ impl CommandExecutor for WorldUnloadExecutor {
     }
 }
 
-struct WorldCloneExecutor;
+/// `/world clone` — save clone (persistent copy under a new name).
+struct WorldCloneExecutor {
+    readonly: bool,
+}
 
 impl CommandExecutor for WorldCloneExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
@@ -169,13 +173,23 @@ impl CommandExecutor for WorldCloneExecutor {
             let dst = StringArgumentType::get(context, ARG_DST)?.to_string();
             let server = context.server().clone();
 
-            // The clone primitive lives on Server so plugins share it.
-            match server.clone_world(&src, &dst).await {
+            // Both clone primitives live on Server so plugins share them.
+            let result = if self.readonly {
+                server.clone_world_readonly(&src, &dst).await
+            } else {
+                server.clone_world(&src, &dst).await
+            };
+            match result {
                 Ok(world) => {
+                    let kind = if self.readonly {
+                        "read-only clone"
+                    } else {
+                        "clone"
+                    };
                     feedback(
                         context,
                         TextComponent::text(format!(
-                            "World '{src}' cloned to '{}' and loaded.",
+                            "World '{src}' {kind}d to '{}' and loaded.",
                             world.get_world_name(),
                         ))
                         .color_named(NamedColor::Green),
@@ -205,7 +219,7 @@ impl CommandExecutor for WorldPrewarmExecutor {
 
             // Manual prewarm is explicit operator intent: allow up to the
             // hard safety cap regardless of the sidecar's automatic policy.
-            let cap = pumpkin_config::ember_world::MAX_RESIDENT_REGIONS;
+            let cap = pumpkin_config::ember_world::MAX_PREWARM_REGIONS;
             let level = world.level.clone();
             tokio::spawn(async move {
                 level.prewarm_storage(cap).await;
@@ -243,7 +257,9 @@ async fn convert_dimension_trees(
             target,
         )
         .or_else(|| {
-            matches!(resolved.chunk, ChunkConfig::EasyMysql(_)).then(|| resolved.chunk.clone())
+            matches!(&resolved.chunk,
+                ChunkConfig::Easy(c) if c.backend == pumpkin_config::chunk::EasyBackend::Mysql)
+            .then(|| resolved.chunk.clone())
         });
         let Some(from) = from else {
             continue; // nothing stored (or already converted)
@@ -338,8 +354,11 @@ impl CommandExecutor for WorldConvertExecutor {
 
             // Make the migrated format explicit on disk so later default
             // changes can never flip this world again.
-            if let Err(e) = pumpkin_config::ember_world::write_sidecar_chunk(&root, target.clone())
-            {
+            let sidecar = pumpkin_config::ember_world::EmberWorldConfig {
+                chunk: Some(target.clone()),
+                ..Default::default()
+            };
+            if let Err(e) = pumpkin_config::ember_world::write_sidecar(&root, &sidecar) {
                 feedback(
                     context,
                     err_text(format!(
@@ -428,9 +447,18 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                 ),
             )
             .then(
-                literal("clone").then(argument(ARG_SRC, StringArgumentType::SingleWord).then(
-                    argument(ARG_DST, StringArgumentType::SingleWord).executes(WorldCloneExecutor),
-                )),
+                literal("clone").then(
+                    argument(ARG_SRC, StringArgumentType::SingleWord).then(
+                        argument(ARG_DST, StringArgumentType::SingleWord)
+                            // `/world clone <src> <dst>` — persistent save clone.
+                            .executes(WorldCloneExecutor { readonly: false })
+                            // `/world clone <src> <dst> readonly` — read-only.
+                            .then(
+                                literal("readonly").executes(WorldCloneExecutor { readonly: true }),
+                            )
+                            .then(literal("save").executes(WorldCloneExecutor { readonly: false })),
+                    ),
+                ),
             ),
     );
 }

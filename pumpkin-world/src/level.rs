@@ -1,10 +1,12 @@
 use crate::chunk::format::linear::LinearV2File;
 use crate::chunk::format::pump::PumpFile;
 // EMBER start - easyworld imports
-use crate::chunk::easy_instance::{DiscardEntityIO, EasyInstanceStorage};
+use crate::chunk::easy_instance::{DiscardEntityIO, EasyInstanceStorage, TemplateSource};
 use crate::chunk::easy_mysql::EasyMysqlStorage;
 use crate::chunk::format::easy::EasyWorldFile;
-use crate::chunk::format::easy_shard::EasyShardFile;
+use crate::chunk::gen_fill::GenFillIO;
+use pumpkin_config::chunk::{EasyBackend, EasyConfig, EasyWorldMode};
+use pumpkin_config::ember_world::{EmberRuntime, GenerateMode};
 // EMBER end
 use crate::chunk_system::{ChunkListener, ChunkLoading, GenerationSchedule, LevelChannel};
 use crate::generation::generator::VanillaGenerator;
@@ -52,6 +54,61 @@ use tokio_util::task::TaskTracker;
 
 pub type SyncChunk = Arc<ChunkData>;
 pub type SyncEntityChunk = Arc<ChunkEntityData>;
+
+// EMBER start - easyworld chunk storage selection
+/// Builds the chunk storage for an `easy` world from its backend and the
+/// per-world runtime settings (read-only clone source, generation mode).
+fn build_easy_chunk_saver(
+    cfg: &EasyConfig,
+    ember: &EmberRuntime,
+    world_root: &std::path::Path,
+    dim_path: &str,
+    min_y: i32,
+    height: i32,
+) -> Arc<dyn FileIO<Data = SyncChunk>> {
+    // Read-only clone: read a sibling world's stored data into a shared
+    // in-memory template; edits stay in RAM and are discarded on unload.
+    if ember.mode == EasyWorldMode::ReadOnly
+        && let Some(src) = ember.source.as_ref()
+        && let Some(base) = world_root.parent()
+    {
+        let src_root = base.join(src);
+        let source = match cfg.backend {
+            EasyBackend::File => TemplateSource::File { root: src_root },
+            EasyBackend::Mysql => TemplateSource::Mysql {
+                root: src_root,
+                config: cfg.mysql(EasyWorldMode::ReadOnly),
+            },
+        };
+        return Arc::new(EasyInstanceStorage::new(
+            src.clone(),
+            source,
+            dim_path.to_string(),
+            min_y,
+            height,
+        ));
+    }
+
+    // Normal region storage (file or MySQL), lazily/region loaded.
+    let inner: Arc<dyn FileIO<Data = SyncChunk>> = match cfg.backend {
+        EasyBackend::File => Arc::new(ChunkFileManager::<EasyWorldFile<ChunkData>>::new(())),
+        EasyBackend::Mysql => Arc::new(EasyMysqlStorage::new(&cfg.mysql(ember.mode))),
+    };
+
+    // Non-seed worlds synthesize void/ocean for ungenerated chunks instead
+    // of running the terrain generator.
+    if ember.generate == GenerateMode::Seed {
+        inner
+    } else {
+        Arc::new(GenFillIO {
+            inner,
+            mode: ember.generate,
+            min_y,
+            height,
+        })
+    }
+}
+// EMBER end
 
 /// The `Level` module provides functionality for working with chunks within or outside a Minecraft world.
 ///
@@ -157,8 +214,9 @@ impl Level {
         let entities_folder = dim_folder.join("entities");
         let poi_folder = dim_folder.join("poi");
 
-        // EMBER start - RAM-backed instance worlds create no folders
-        let ephemeral = matches!(level_config.chunk, ChunkConfig::EasyInstance(_));
+        // EMBER start - RAM-backed read-only clones create no folders
+        let ephemeral = level_config.ember.mode == pumpkin_config::chunk::EasyWorldMode::ReadOnly
+            && level_config.ember.source.is_some();
         if !ephemeral {
             std::fs::create_dir_all(&region_folder).expect("Failed to create Region folder");
             std::fs::create_dir_all(&entities_folder).expect("Failed to create Entities folder");
@@ -197,22 +255,22 @@ impl Level {
         // EMBER end
         let world_gen = get_world_gen(seed, dimension).into();
 
+        // EMBER start - easyworld: pick storage by backend + per-world runtime
+        let ember = level_config.ember.clone();
         let chunk_saver: Arc<dyn FileIO<Data = SyncChunk>> = match &level_config.chunk {
             ChunkConfig::Linear => Arc::new(ChunkFileManager::<LinearV2File<ChunkData>>::new(())),
             ChunkConfig::Anvil(config) => Arc::new(
                 ChunkFileManager::<AnvilChunkFile<ChunkData>>::new(config.clone()),
             ),
             ChunkConfig::Pump => Arc::new(ChunkFileManager::<PumpFile<ChunkData>>::new(())),
-            // EMBER start - easyworld format
-            ChunkConfig::Easy => Arc::new(ChunkFileManager::<EasyWorldFile<ChunkData>>::new(())),
-            ChunkConfig::EasyMysql(config) => Arc::new(EasyMysqlStorage::new(config)),
-            ChunkConfig::EasyShard(config) => {
-                Arc::new(ChunkFileManager::<EasyShardFile<ChunkData>>::new(*config))
-            }
-            ChunkConfig::EasyInstance(config) => Arc::new(EasyInstanceStorage::new(
-                config, dim_path, dim_min_y, dim_height,
-            )),
-            // EMBER end
+            ChunkConfig::Easy(cfg) => build_easy_chunk_saver(
+                cfg,
+                &ember,
+                &level_folder.root_folder,
+                &dim_path,
+                dim_min_y,
+                dim_height,
+            ),
         };
         let entity_saver: Arc<dyn FileIO<Data = SyncEntityChunk>> = match &level_config.chunk {
             ChunkConfig::Linear => {
@@ -222,20 +280,17 @@ impl Level {
                 AnvilChunkFile<ChunkEntityData>,
             >::new(config.clone())),
             ChunkConfig::Pump => Arc::new(ChunkFileManager::<PumpFile<ChunkEntityData>>::new(())),
-            // EMBER start - easyworld format
-            ChunkConfig::Easy | ChunkConfig::EasyMysql(_) => {
-                // Entity data uses file-based .easy storage even in MySQL mode.
-                Arc::new(ChunkFileManager::<EasyWorldFile<ChunkEntityData>>::new(()))
+            ChunkConfig::Easy(_) => {
+                if ember.mode == pumpkin_config::chunk::EasyWorldMode::ReadOnly {
+                    // Read-only worlds (clones/replicas) persist no entities.
+                    Arc::new(DiscardEntityIO)
+                } else {
+                    // Entity data always uses file-based .easy storage.
+                    Arc::new(ChunkFileManager::<EasyWorldFile<ChunkEntityData>>::new(()))
+                }
             }
-            ChunkConfig::EasyShard(config) => Arc::new(ChunkFileManager::<
-                EasyShardFile<ChunkEntityData>,
-            >::new(*config)),
-            ChunkConfig::EasyInstance(_) => {
-                // Instances never persist entities; a fall-through to a
-                // file-backed saver would write into the instance folder.
-                Arc::new(DiscardEntityIO)
-            } // EMBER end
         };
+        // EMBER end
 
         let pending_entity_generations = Arc::new(DashMap::new());
         let level_channel = Arc::new(LevelChannel::new());

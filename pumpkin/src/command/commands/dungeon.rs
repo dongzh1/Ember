@@ -6,22 +6,23 @@
 //   /dungeon list                 - resident templates + running instances
 //   /dungeon reload <template>    - drop the template cache (next start reloads)
 //
-// A template is a world folder in the `easy` format (or a world stored via
-// `easy_mysql`). Instances share ONE decompressed in-memory copy of the
-// template; per-instance edits live in RAM and are discarded on stop.
+// A template is an ordinary `easy` world folder. Each instance is a
+// read-only clone: it shares ONE decompressed in-memory copy of the
+// template, and per-instance edits live in RAM and are discarded on stop.
+// (`/dungeon start X` == `/world clone X X-iN readonly` with bookkeeping.)
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-use pumpkin_config::chunk::{ChunkConfig, EasyInstanceConfig, InstanceTemplateSource};
-use pumpkin_config::ember_world::resolve_level_config;
+use pumpkin_config::chunk::{ChunkConfig, EasyBackend, EasyWorldMode};
+use pumpkin_config::ember_world::{EmberRuntime, GenerateMode, resolve_level_config};
 use pumpkin_config::world::LevelConfig;
 use pumpkin_data::dimension::Dimension;
 use pumpkin_util::PermissionLvl;
 use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry};
 use pumpkin_util::text::{TextComponent, color::NamedColor};
-use pumpkin_world::chunk::easy_instance;
+use pumpkin_world::chunk::easy_instance::{self, TemplateSource};
 
 use crate::command::argument_builder::{ArgumentBuilder, argument, command, literal};
 use crate::command::argument_types::core::string::StringArgumentType;
@@ -54,22 +55,36 @@ fn ok_text(msg: impl Into<String>) -> TextComponent {
 }
 
 /// Resolves where a template world's region data lives, honoring the
-/// template folder's own sidecar (an `easy_mysql` template stays in the
+/// template folder's own sidecar (a `mysql`-backed template stays in the
 /// database; everything else reads `.easy` files from the folder).
-fn template_source(server: &Server, template: &str) -> (InstanceTemplateSource, String) {
-    let path = server.basic_config.get_world_path().join(template);
-    let resolved = resolve_level_config(&server.advanced_config.world, &path);
-    let path_str = path.to_string_lossy().replace('\\', "/");
-    let source = match resolved.chunk {
-        ChunkConfig::EasyMysql(config) => InstanceTemplateSource::Mysql {
-            path: path_str.clone(),
-            config,
+fn template_source(server: &Server, template: &str) -> TemplateSource {
+    let root = server.basic_config.get_world_path().join(template);
+    let resolved = resolve_level_config(&server.advanced_config.world, &root);
+    match &resolved.chunk {
+        ChunkConfig::Easy(cfg) if cfg.backend == EasyBackend::Mysql => TemplateSource::Mysql {
+            root,
+            config: cfg.mysql(EasyWorldMode::ReadOnly),
         },
-        _ => InstanceTemplateSource::File {
-            path: path_str.clone(),
+        _ => TemplateSource::File { root },
+    }
+}
+
+/// The `LevelConfig` for a read-only instance of `template`: same backend as
+/// the template, but read-only with the template as its data source.
+fn instance_level_config(server: &Server, template: &str) -> LevelConfig {
+    let global = &server.advanced_config.world;
+    let src = resolve_level_config(global, &server.basic_config.get_world_path().join(template));
+    LevelConfig {
+        chunk: src.chunk,
+        lighting: global.lighting,
+        autosave_ticks: 0,
+        ember: EmberRuntime {
+            mode: EasyWorldMode::ReadOnly,
+            source: Some(template.to_string()),
+            generate: GenerateMode::Void,
+            border: Some(pumpkin_config::ember_world::SMALL_MAP_MAX_BORDER),
         },
-    };
-    (source, path_str)
+    }
 }
 
 fn dim_path() -> String {
@@ -82,7 +97,7 @@ impl CommandExecutor for DungeonPrewarmExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
             let template = StringArgumentType::get(context, ARG_NAME)?.to_string();
-            let (source, _) = template_source(context.server(), &template);
+            let source = template_source(context.server(), &template);
 
             match easy_instance::prewarm_template(&template, &source, &dim_path()).await {
                 Ok((regions, chunks)) => {
@@ -119,7 +134,7 @@ impl CommandExecutor for DungeonStartExecutor {
             // Warm (or verify) the template before creating the world so a
             // broken template fails here with a clear message instead of
             // filling the world with void.
-            let (source, _) = template_source(&server, &template);
+            let source = template_source(&server, &template);
             if let Err(e) = easy_instance::prewarm_template(&template, &source, &dim_path()).await {
                 feedback(
                     context,
@@ -144,16 +159,10 @@ impl CommandExecutor for DungeonStartExecutor {
                 }
             };
 
-            let global = &server.advanced_config.world;
-            let level_config = LevelConfig {
-                chunk: ChunkConfig::EasyInstance(EasyInstanceConfig {
-                    template: template.clone(),
-                    source,
-                }),
-                lighting: global.lighting,
-                // Instances never persist: disable the autosave rounds.
-                autosave_ticks: 0,
-            };
+            // A read-only clone: same backend as the template, reading its
+            // data, discarding all edits.
+            let level_config = instance_level_config(&server, &template);
+            let _ = source; // template already warmed above
 
             let world = server
                 .create_world_with(name.clone(), Dimension::OVERWORLD, Some(level_config))

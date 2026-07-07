@@ -17,32 +17,32 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use pumpkin_config::chunk::{AnvilChunkConfig, ChunkConfig, EasyShardConfig};
+use pumpkin_config::chunk::{AnvilChunkConfig, ChunkConfig, EasyBackend, EasyConfig};
 use pumpkin_util::math::vector2::Vector2;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use crate::chunk::easy_instance::DiscardEntityIO;
 use crate::chunk::easy_mysql::EasyMysqlStorage;
 use crate::chunk::format::anvil::AnvilChunkFile;
 use crate::chunk::format::easy::EasyWorldFile;
-use crate::chunk::format::easy_shard::EasyShardFile;
 use crate::chunk::format::linear::LinearV2File;
 use crate::chunk::format::pump::PumpFile;
 use crate::chunk::io::{FileIO, LoadedData, file_manager::ChunkFileManager};
 use crate::chunk::{ChunkData, ChunkEntityData};
 use crate::level::{LevelFolder, SyncChunk, SyncEntityChunk};
 
-/// Region-file extension of a file-backed format (`None` for DB/RAM formats).
+/// Region-file extension of a file-backed format (`None` for the `MySQL`
+/// backend, which stores no region files).
 #[must_use]
 pub const fn extension_of(config: &ChunkConfig) -> Option<&'static str> {
     match config {
         ChunkConfig::Anvil(_) => Some("mca"),
         ChunkConfig::Linear => Some("linear"),
         ChunkConfig::Pump => Some("pump"),
-        ChunkConfig::Easy => Some("easy"),
-        ChunkConfig::EasyShard(_) => Some("ezs"),
-        ChunkConfig::EasyMysql(_) | ChunkConfig::EasyInstance(_) => None,
+        ChunkConfig::Easy(cfg) => match cfg.backend {
+            EasyBackend::File => Some("easy"),
+            EasyBackend::Mysql => None,
+        },
     }
 }
 
@@ -53,8 +53,7 @@ pub fn config_for_extension(ext: &str) -> Option<ChunkConfig> {
         "mca" => Some(ChunkConfig::Anvil(AnvilChunkConfig::default())),
         "linear" => Some(ChunkConfig::Linear),
         "pump" => Some(ChunkConfig::Pump),
-        "easy" => Some(ChunkConfig::Easy),
-        "ezs" => Some(ChunkConfig::EasyShard(EasyShardConfig::default())),
+        "easy" => Some(ChunkConfig::Easy(EasyConfig::default())),
         _ => None,
     }
 }
@@ -66,19 +65,17 @@ pub fn config_for_name(name: &str) -> Option<ChunkConfig> {
         "anvil" => Some(ChunkConfig::Anvil(AnvilChunkConfig::default())),
         "linear" => Some(ChunkConfig::Linear),
         "pump" => Some(ChunkConfig::Pump),
-        "easy" => Some(ChunkConfig::Easy),
-        "easy_shard" => Some(ChunkConfig::EasyShard(EasyShardConfig::default())),
+        "easy" => Some(ChunkConfig::Easy(EasyConfig::default())),
         _ => None,
     }
 }
 
-/// The entity-chunk file extension a config stores (differs from the chunk
-/// extension only for `easy_mysql`, whose entities stay in `.easy` files).
+/// The entity-chunk file extension a config stores. The `MySQL` backend
+/// keeps entities in `.easy` files, so it maps to `easy`.
 #[must_use]
-pub const fn entity_extension_of(config: &ChunkConfig) -> Option<&'static str> {
+pub fn entity_extension_of(config: &ChunkConfig) -> Option<&'static str> {
     match config {
-        ChunkConfig::EasyMysql(_) => Some("easy"),
-        ChunkConfig::EasyInstance(_) => None,
+        ChunkConfig::Easy(cfg) if cfg.backend == EasyBackend::Mysql => Some("easy"),
         other => extension_of(other),
     }
 }
@@ -112,7 +109,7 @@ pub fn scan_regions(dir: &Path, ext: &str) -> Vec<(i32, i32)> {
     out
 }
 
-const KNOWN_EXTENSIONS: &[&str] = &["mca", "linear", "pump", "easy", "ezs"];
+const KNOWN_EXTENSIONS: &[&str] = &["mca", "linear", "pump", "easy"];
 
 /// Guards a world against silent format switches.
 ///
@@ -187,22 +184,20 @@ pub struct ConvertStats {
     pub skipped: usize,
 }
 
-fn chunk_saver_for(config: &ChunkConfig) -> Result<Arc<dyn FileIO<Data = SyncChunk>>, String> {
-    Ok(match config {
+fn chunk_saver_for(config: &ChunkConfig) -> Arc<dyn FileIO<Data = SyncChunk>> {
+    match config {
         ChunkConfig::Linear => Arc::new(ChunkFileManager::<LinearV2File<ChunkData>>::new(())),
         ChunkConfig::Anvil(c) => Arc::new(ChunkFileManager::<AnvilChunkFile<ChunkData>>::new(
             c.clone(),
         )),
         ChunkConfig::Pump => Arc::new(ChunkFileManager::<PumpFile<ChunkData>>::new(())),
-        ChunkConfig::Easy => Arc::new(ChunkFileManager::<EasyWorldFile<ChunkData>>::new(())),
-        ChunkConfig::EasyShard(c) => {
-            Arc::new(ChunkFileManager::<EasyShardFile<ChunkData>>::new(*c))
-        }
-        ChunkConfig::EasyMysql(c) => Arc::new(EasyMysqlStorage::new(c)),
-        ChunkConfig::EasyInstance(_) => {
-            return Err("instance worlds are ephemeral and cannot be converted".to_string());
-        }
-    })
+        ChunkConfig::Easy(cfg) => match cfg.backend {
+            EasyBackend::File => Arc::new(ChunkFileManager::<EasyWorldFile<ChunkData>>::new(())),
+            EasyBackend::Mysql => Arc::new(EasyMysqlStorage::new(
+                &cfg.mysql(pumpkin_config::chunk::EasyWorldMode::ReadWrite),
+            )),
+        },
+    }
 }
 
 fn entity_saver_for(config: &ChunkConfig) -> Arc<dyn FileIO<Data = SyncEntityChunk>> {
@@ -212,13 +207,10 @@ fn entity_saver_for(config: &ChunkConfig) -> Arc<dyn FileIO<Data = SyncEntityChu
             ChunkFileManager::<AnvilChunkFile<ChunkEntityData>>::new(c.clone()),
         ),
         ChunkConfig::Pump => Arc::new(ChunkFileManager::<PumpFile<ChunkEntityData>>::new(())),
-        ChunkConfig::Easy | ChunkConfig::EasyMysql(_) => {
+        // Both easy backends store entities in file-based `.easy` regions.
+        ChunkConfig::Easy(_) => {
             Arc::new(ChunkFileManager::<EasyWorldFile<ChunkEntityData>>::new(()))
         }
-        ChunkConfig::EasyShard(c) => {
-            Arc::new(ChunkFileManager::<EasyShardFile<ChunkEntityData>>::new(*c))
-        }
-        ChunkConfig::EasyInstance(_) => Arc::new(DiscardEntityIO),
     }
 }
 
@@ -317,8 +309,8 @@ pub async fn convert_world(
         return Err("world already stores that format".to_string());
     }
 
-    let from_chunks = chunk_saver_for(from)?;
-    let to_chunks = chunk_saver_for(to)?;
+    let from_chunks = chunk_saver_for(from);
+    let to_chunks = chunk_saver_for(to);
     let from_entities = entity_saver_for(from);
     let to_entities = entity_saver_for(to);
 
@@ -447,7 +439,7 @@ mod tests {
             assert_eq!(extension_of(&config), Some(*ext));
         }
         assert!(config_for_extension("dat").is_none());
-        assert!(config_for_name("easy_shard").is_some());
+        assert!(config_for_name("easy").is_some());
         assert!(config_for_name("bogus").is_none());
     }
 
@@ -464,19 +456,30 @@ mod tests {
         assert_eq!(scan_regions(dir.path(), "easy"), vec![(3, 3)]);
     }
 
+    fn easy_file() -> ChunkConfig {
+        ChunkConfig::Easy(EasyConfig::default())
+    }
+
+    fn easy_mysql() -> ChunkConfig {
+        ChunkConfig::Easy(EasyConfig {
+            backend: EasyBackend::Mysql,
+            ..Default::default()
+        })
+    }
+
     #[test]
     fn source_detection_excludes_target() {
         let dir = temp_dir::TempDir::new().unwrap();
         std::fs::write(dir.child("r.0.0.pump"), b"x").unwrap();
         // Partial target output must never be mistaken for the source.
         std::fs::write(dir.child("r.0.0.easy"), b"x").unwrap();
-        let src = detect_source_for_conversion(dir.path(), &ChunkConfig::Easy).unwrap();
+        let src = detect_source_for_conversion(dir.path(), &easy_file()).unwrap();
         assert!(matches!(src, ChunkConfig::Pump));
 
         // Only target-format files present -> nothing to convert.
         let dir2 = temp_dir::TempDir::new().unwrap();
         std::fs::write(dir2.child("r.0.0.easy"), b"x").unwrap();
-        assert!(detect_source_for_conversion(dir2.path(), &ChunkConfig::Easy).is_none());
+        assert!(detect_source_for_conversion(dir2.path(), &easy_file()).is_none());
     }
 
     #[test]
@@ -484,31 +487,25 @@ mod tests {
         let dir = temp_dir::TempDir::new().unwrap();
         // Fresh world: config wins.
         assert!(matches!(
-            detect_on_disk_config(&ChunkConfig::Easy, dir.path()),
-            ChunkConfig::Easy
+            detect_on_disk_config(&easy_file(), dir.path()),
+            ChunkConfig::Easy(_)
         ));
         // Disk stores pump, config says easy -> pump wins.
         std::fs::write(dir.child("r.0.0.pump"), b"x").unwrap();
         assert!(matches!(
-            detect_on_disk_config(&ChunkConfig::Easy, dir.path()),
+            detect_on_disk_config(&easy_file(), dir.path()),
             ChunkConfig::Pump
         ));
         // Config format present on disk -> config wins even with strays.
         std::fs::write(dir.child("r.0.0.easy"), b"x").unwrap();
         assert!(matches!(
-            detect_on_disk_config(&ChunkConfig::Easy, dir.path()),
-            ChunkConfig::Easy
+            detect_on_disk_config(&easy_file(), dir.path()),
+            ChunkConfig::Easy(c) if c.backend == EasyBackend::File
         ));
-        // DB-backed config is never overridden by stray files.
-        let mysql = ChunkConfig::EasyMysql(pumpkin_config::chunk::EasyMysqlConfig {
-            url: String::new(),
-            mode: Default::default(),
-            key_prefix: String::new(),
-            max_cached_regions: 4,
-        });
+        // DB-backed config has no region files, so it is never overridden.
         assert!(matches!(
-            detect_on_disk_config(&mysql, dir.path()),
-            ChunkConfig::EasyMysql(_)
+            detect_on_disk_config(&easy_mysql(), dir.path()),
+            ChunkConfig::Easy(c) if c.backend == EasyBackend::Mysql
         ));
     }
 }

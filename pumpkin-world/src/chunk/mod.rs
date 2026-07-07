@@ -28,6 +28,9 @@ pub mod easy_instance;
 // EMBER start - world format detection & conversion
 pub mod convert;
 // EMBER end
+// EMBER start - non-seed generation (void / ocean) fill
+pub mod gen_fill;
+// EMBER end
 
 // TODO
 pub const CHUNK_WIDTH: usize = BlockPalette::SIZE;

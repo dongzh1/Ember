@@ -14,6 +14,13 @@ pub struct LevelConfig {
     /// Number of ticks between autosave checks. If 0, autosave is disabled.
     #[serde(default = "default_autosave_ticks")]
     pub autosave_ticks: u64,
+    // EMBER start - per-world runtime behaviour resolved from ember-world.toml
+    /// Per-world `EasyWorld` runtime settings (generation mode, access mode,
+    /// clone source, border). Not read from the global config file — it is
+    /// filled from the world's `ember-world.toml` sidecar at load.
+    #[serde(skip)]
+    pub ember: crate::ember_world::EmberRuntime,
+    // EMBER end
     // TODO: More options
 }
 

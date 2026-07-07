@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for chunk storage format.
 ///
-/// Supports multiple chunk formats, currently `Anvil`, `Linear`, `Pump`,
-/// `Easy`, and `EasyMysql`.
-#[derive(Deserialize, Default, Serialize, Clone)]
+/// Supports the upstream `Anvil`, `Linear` and `Pump` formats, plus Ember's
+/// `Easy` (the default), which stores worlds as region-level zstd either on
+/// disk or in `MySQL` — the backend is the only knob most operators need.
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum ChunkConfig {
     /// Standard Anvil chunk storage.
@@ -17,31 +18,71 @@ pub enum ChunkConfig {
     Linear,
     /// Pumpkin's own optimized world format.
     #[serde(rename = "pump")]
-    // EMBER: #[default] moved to Easy — Ember's default chunk format.
     Pump,
     // EMBER start - easyworld format
-    /// `EasyWorld` region-level zstd compressed format (.easy files).
-    /// Ember's default: best compression, empty-chunk pruning, atomic
-    /// writes. Existing worlds in other formats keep loading via on-disk
-    /// format detection; migrate deliberately with `/world convert`.
+    /// `EasyWorld`: region-level zstd with empty-chunk pruning and atomic
+    /// writes. Ember's default. One format, two backends (file / `MySQL`).
+    /// Per-world behaviour (size limit, generation, read-only, clone source)
+    /// lives in the world's `ember-world.toml` sidecar, not here.
     #[serde(rename = "easy")]
-    #[default]
-    Easy,
-    /// `EasyWorld` format stored in `MySQL` database.
-    #[serde(rename = "easy_mysql")]
-    EasyMysql(EasyMysqlConfig),
-    /// `EasyWorld` shard format (.ezs files): every chunk group is its own
-    /// zstd blob, so a single edit recompresses one group instead of the
-    /// whole region. Best for write-heavy worlds (resource worlds).
-    #[serde(rename = "easy_shard")]
-    EasyShard(EasyShardConfig),
-    /// `EasyWorld` ephemeral instance storage: any number of worlds share
-    /// one immutable in-memory template; per-instance edits live in RAM and
-    /// are discarded on unload. Best for dungeon/minigame instances.
-    #[serde(rename = "easy_instance")]
-    EasyInstance(EasyInstanceConfig),
+    Easy(EasyConfig),
     // EMBER end
 }
+
+// EMBER: Easy is the default chunk format.
+impl Default for ChunkConfig {
+    fn default() -> Self {
+        Self::Easy(EasyConfig::default())
+    }
+}
+
+// EMBER start - unified easy config
+/// Configuration for the `EasyWorld` format.
+#[derive(Deserialize, Serialize, Clone, Default)]
+#[serde(default)]
+pub struct EasyConfig {
+    /// Where chunk data is stored: on disk (`file`, default) or in a shared
+    /// `MySQL` database (`mysql`).
+    pub backend: EasyBackend,
+    /// `MySQL` connection URL (backend = `mysql` only),
+    /// e.g. `mysql://user:pass@localhost:3306/ember`.
+    pub url: String,
+    /// Optional namespace prepended to every database world key
+    /// (`<key_prefix>/<world folder path>`). Servers sharing one database
+    /// must use the same prefix and the same relative world folder layout.
+    pub key_prefix: String,
+    /// Maximum number of decompressed regions kept resident per world (LRU),
+    /// for the `mysql` backend. Default 32.
+    #[serde(default = "default_max_cached_regions")]
+    pub max_cached_regions: usize,
+}
+
+/// Storage backend for the `EasyWorld` format.
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum EasyBackend {
+    /// On-disk `.easy` region files (default).
+    #[default]
+    #[serde(rename = "file")]
+    File,
+    /// Region data stored in a shared `MySQL` database.
+    #[serde(rename = "mysql")]
+    Mysql,
+}
+
+impl EasyConfig {
+    /// Builds the `MySQL` connection parameters for this world, with the
+    /// per-world access `mode` resolved from the sidecar.
+    #[must_use]
+    pub fn mysql(&self, mode: EasyWorldMode) -> EasyMysqlConfig {
+        EasyMysqlConfig {
+            url: self.url.clone(),
+            mode,
+            key_prefix: self.key_prefix.clone(),
+            max_cached_regions: self.max_cached_regions,
+        }
+    }
+}
+// EMBER end
 
 /// Configuration for Anvil chunk storage.
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -85,53 +126,8 @@ const fn default_max_cached_regions() -> usize {
     32
 }
 
-/// Configuration for the `EasyWorld` shard format.
-#[derive(Deserialize, Serialize, Clone, Copy)]
-#[serde(default)]
-pub struct EasyShardConfig {
-    /// Number of chunks per compression unit. `1` (default) compresses each
-    /// chunk on its own — cheapest writes, ideal for resource worlds.
-    /// Larger groups (up to `1024` = whole region) trade write cost for a
-    /// better compression ratio. Clamped to `1..=1024` at load time.
-    pub group_chunks: u16,
-}
-
-impl Default for EasyShardConfig {
-    fn default() -> Self {
-        Self { group_chunks: 1 }
-    }
-}
-
-/// Configuration for `EasyWorld` ephemeral instance storage.
-#[derive(Deserialize, Serialize, Clone)]
-pub struct EasyInstanceConfig {
-    /// Template identifier. Instances created with the same identifier share
-    /// one immutable in-memory copy of the template's region data.
-    pub template: String,
-    /// Where the template's region data is loaded from.
-    pub source: InstanceTemplateSource,
-}
-
-/// Source of an `EasyWorld` instance template.
-#[derive(Deserialize, Serialize, Clone)]
-#[serde(tag = "kind")]
-pub enum InstanceTemplateSource {
-    /// A world folder containing `.easy` region files
-    /// (`<path>/dimensions/<ns>/<name>/region/r.X.Z.easy`).
-    #[serde(rename = "file")]
-    File { path: String },
-    /// An `EasyWorld` `MySQL` database; the world key is derived from
-    /// `path` exactly like a live `easy_mysql` world.
-    #[serde(rename = "mysql")]
-    Mysql {
-        path: String,
-        #[serde(flatten)]
-        config: EasyMysqlConfig,
-    },
-}
-
 /// Access mode for a shared `EasyWorld` database.
-#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum EasyWorldMode {
     /// Full access: loads, generates, and saves chunks. Requires the
     /// world lock; only one `read_write` server per database at a time.

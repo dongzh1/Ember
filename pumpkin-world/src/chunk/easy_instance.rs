@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, LazyLock};
 
 use bytes::Bytes;
-use pumpkin_config::chunk::{EasyInstanceConfig, InstanceTemplateSource};
+use pumpkin_config::chunk::EasyMysqlConfig;
 use pumpkin_util::math::vector2::Vector2;
 use tokio::sync::{OnceCell, RwLock, mpsc};
 use tracing::{error, info, warn};
@@ -47,6 +47,18 @@ pub fn dimension_path(minecraft_name: &str) -> String {
         Some((ns, n)) => format!("{ns}/{n}"),
         None => format!("minecraft/{minecraft_name}"),
     }
+}
+
+/// Where a read-only instance reads its source world's stored data.
+#[derive(Clone)]
+pub enum TemplateSource {
+    /// A world folder containing `.easy` region files.
+    File { root: PathBuf },
+    /// An `EasyWorld` `MySQL` database, keyed by the source world folder.
+    Mysql {
+        root: PathBuf,
+        config: EasyMysqlConfig,
+    },
 }
 
 // ─── Template ──────────────────────────────────────────────────────────
@@ -77,21 +89,18 @@ impl EasyTemplate {
 /// Loads a template from its source. Runs blocking IO + decompression on
 /// the blocking pool.
 async fn load_template(
-    source: &InstanceTemplateSource,
+    source: &TemplateSource,
     dim_path: &str,
 ) -> Result<Arc<EasyTemplate>, String> {
     let regions = match source {
-        InstanceTemplateSource::File { path } => {
-            let region_dir = PathBuf::from(path)
-                .join("dimensions")
-                .join(dim_path)
-                .join("region");
+        TemplateSource::File { root } => {
+            let region_dir = root.join("dimensions").join(dim_path).join("region");
             tokio::task::spawn_blocking(move || load_file_regions(&region_dir))
                 .await
                 .map_err(|e| e.to_string())??
         }
-        InstanceTemplateSource::Mysql { path, config } => {
-            crate::chunk::easy_mysql::load_world_regions(config, Path::new(path)).await?
+        TemplateSource::Mysql { root, config } => {
+            crate::chunk::easy_mysql::load_world_regions(config, root).await?
         }
     };
 
@@ -164,7 +173,7 @@ impl TemplateRegistry {
     async fn get_or_load(
         &self,
         id: &str,
-        source: &InstanceTemplateSource,
+        source: &TemplateSource,
         dim_path: &str,
     ) -> Result<Arc<EasyTemplate>, String> {
         let cell = {
@@ -192,7 +201,7 @@ impl TemplateRegistry {
 /// Returns `(regions, chunks)` of the resident template.
 pub async fn prewarm_template(
     id: &str,
-    source: &InstanceTemplateSource,
+    source: &TemplateSource,
     dim_path: &str,
 ) -> Result<(usize, usize), String> {
     let template = REGISTRY.get_or_load(id, source, dim_path).await?;
@@ -275,9 +284,10 @@ struct RegionOverlay {
     removed: HashSet<u32>,
 }
 
-/// Chunk storage of one ephemeral instance world.
+/// Chunk storage of one ephemeral instance world (a read-only clone).
 pub struct EasyInstanceStorage {
-    config: EasyInstanceConfig,
+    template_id: String,
+    source: TemplateSource,
     dim_path: String,
     min_y: i32,
     height: i32,
@@ -287,9 +297,16 @@ pub struct EasyInstanceStorage {
 
 impl EasyInstanceStorage {
     #[must_use]
-    pub fn new(config: &EasyInstanceConfig, dim_path: String, min_y: i32, height: i32) -> Self {
+    pub fn new(
+        template_id: String,
+        source: TemplateSource,
+        dim_path: String,
+        min_y: i32,
+        height: i32,
+    ) -> Self {
         Self {
-            config: config.clone(),
+            template_id,
+            source,
             dim_path,
             min_y,
             height,
@@ -302,7 +319,7 @@ impl EasyInstanceStorage {
         self.template
             .get_or_try_init(|| async {
                 REGISTRY
-                    .get_or_load(&self.config.template, &self.config.source, &self.dim_path)
+                    .get_or_load(&self.template_id, &self.source, &self.dim_path)
                     .await
             })
             .await
@@ -331,7 +348,7 @@ impl FileIO for EasyInstanceStorage {
                 Err(e) => {
                     error!(
                         "EasyWorld: template '{}' failed to load: {e}",
-                        self.config.template
+                        self.template_id
                     );
                     // Every requested chunk needs a response or the chunk
                     // system waits forever.
@@ -584,10 +601,8 @@ mod tests {
         let template = template_from_regions(vec![region]);
 
         let storage = EasyInstanceStorage {
-            config: EasyInstanceConfig {
-                template: "t".into(),
-                source: InstanceTemplateSource::File { path: ".".into() },
-            },
+            template_id: "t".into(),
+            source: TemplateSource::File { root: ".".into() },
             dim_path: "minecraft/overworld".into(),
             min_y: -64,
             height: 384,

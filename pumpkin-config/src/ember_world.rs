@@ -1,21 +1,18 @@
 // EMBER - per-world configuration sidecar
 //
-// A world folder may contain an `ember-world.toml` file overriding the
-// global `[world]` configuration for that world only. This is what lets
-// four very different world archetypes (hub, personal, resource, dungeon)
-// coexist on one running server, each with its own storage format,
-// residency policy and autosave cadence.
+// A world folder may carry an `ember-world.toml` that overrides the global
+// `[world]` config for that world only. This is what lets a small map
+// (loaded whole into memory, cloned instantly) and a big map (loaded region
+// by region) coexist on one server without the operator picking a storage
+// format — EasyWorld decides by size.
 //
 // Example `<world folder>/ember-world.toml`:
 //
 // ```toml
-// archetype = "hub"          # default | personal | hub | resource | dungeon
-// residency = "auto"         # auto | full | lazy
-// autosave_ticks = 24000
-//
-// [chunk]
-// type = "easy_shard"        # any [world.chunk] value is accepted here
-// group_chunks = 1
+// border   = 512            # max world size in blocks; <=512 -> small map
+// generate = "void"         # seed (default) | void | ocean
+// mode     = "read_write"   # read_write (default) | read_only
+// source   = "arena"        # read-only clone: read another world's data
 // ```
 //
 // Every key is optional; missing keys fall back to the global config.
@@ -25,68 +22,83 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
-use crate::{chunk::ChunkConfig, world::LevelConfig};
+use crate::{
+    chunk::{ChunkConfig, EasyWorldMode},
+    world::LevelConfig,
+};
 
 /// File name of the per-world configuration sidecar.
 pub const SIDECAR_FILE: &str = "ember-world.toml";
 
-/// Hard ceiling on fully-resident regions even for `residency = "full"`.
+/// Small-map border threshold (block side length).
 ///
-/// Protects a misconfigured unbounded world from eating all RAM.
-/// 64 regions = a 32768x32768-block area, tens of MB to a few GB resident.
-pub const MAX_RESIDENT_REGIONS: usize = 64;
+/// A world whose border is at or below this is loaded whole into memory and
+/// cloned by sharing that memory; larger (or borderless) worlds load region
+/// by region.
+pub const SMALL_MAP_MAX_BORDER: i32 = 512;
 
-/// What kind of world this is. Drives the `auto` residency decision and
-/// serves as operator documentation; it never changes data on disk.
+/// A centered 512-block border can straddle up to a 2x2 region grid, so a
+/// small map is prewarmed up to this many regions.
+pub const SMALL_MAP_REGIONS: usize = 4;
+
+/// Hard ceiling for an explicit `/world prewarm`, protecting against
+/// prewarming an unbounded world into memory.
+pub const MAX_PREWARM_REGIONS: usize = 64;
+
+/// How the world's terrain is produced for chunks that have never been
+/// stored.
 #[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub enum WorldArchetype {
-    /// No special treatment (the global defaults).
+pub enum GenerateMode {
+    /// Normal terrain generation from the world seed (default). Untouched
+    /// worlds keep generating exactly as before.
     #[default]
-    #[serde(rename = "default")]
-    Default,
-    /// Per-player world: small, must persist, many exist but few are loaded.
-    #[serde(rename = "personal")]
-    Personal,
-    /// Main city: small, near-static, many players gathered — read-heavy.
-    #[serde(rename = "hub")]
-    Hub,
-    /// Infinite mining/exploration world: write-heavy, periodically reset.
-    #[serde(rename = "resource")]
-    Resource,
-    /// Ephemeral instance world: template-based, changes are discarded.
-    #[serde(rename = "dungeon")]
-    Dungeon,
+    #[serde(rename = "seed")]
+    Seed,
+    /// Empty world: ungenerated chunks are all air. Good for build/dungeon
+    /// maps that supply their own structure.
+    #[serde(rename = "void")]
+    Void,
+    /// Ocean floor: ungenerated chunks are bedrock + stone + water up to sea
+    /// level, a blank canvas with a basic base layer.
+    #[serde(rename = "ocean")]
+    Ocean,
 }
 
-/// How much of the world's stored region data is kept resident in memory.
-#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub enum Residency {
-    /// Decide from the world's stored size: one region or less (a 512x512
-    /// world) is fully prewarmed and kept resident; `hub`/`dungeon` worlds
-    /// stay resident up to 4 regions (1024x1024); everything larger loads
-    /// lazily.
-    #[default]
-    #[serde(rename = "auto")]
-    Auto,
-    /// Prewarm and keep every stored region resident
-    /// (capped at [`MAX_RESIDENT_REGIONS`]).
-    #[serde(rename = "full")]
-    Full,
-    /// Regions load on demand only (the pre-sidecar behaviour).
-    #[serde(rename = "lazy")]
-    Lazy,
+/// Per-world runtime behaviour, resolved from the sidecar and carried on
+/// [`LevelConfig`] into world construction. Defaults reproduce a normal
+/// seed-generated, read-write, unbounded world.
+#[derive(Clone, Default, Debug)]
+pub struct EmberRuntime {
+    /// Storage access mode (`read_write` / `read_only`).
+    pub mode: EasyWorldMode,
+    /// Read-only clone source world name (reads that world's stored data).
+    pub source: Option<String>,
+    /// Terrain generation mode.
+    pub generate: GenerateMode,
+    /// Max world border in blocks (side length); `None` = unbounded.
+    pub border: Option<i32>,
 }
 
 /// Contents of a world's `ember-world.toml` sidecar.
 #[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct EmberWorldConfig {
-    /// World archetype (see [`WorldArchetype`]).
-    pub archetype: WorldArchetype,
-    /// Region residency policy (see [`Residency`]).
-    pub residency: Residency,
-    /// Chunk-storage override for this world; `None` uses the global
-    /// `[world.chunk]` value.
+    /// Max world border in blocks (side length). When set, the world border
+    /// is clamped to it (players cannot build past it) and a value
+    /// `<= SMALL_MAP_MAX_BORDER` marks the world as a small map. `None`
+    /// leaves the border unbounded (a big map).
+    pub border: Option<i32>,
+    /// Terrain generation mode (see [`GenerateMode`]).
+    pub generate: GenerateMode,
+    /// Storage access mode: `read_write` (default) or `read_only`
+    /// (never persists; changes are discarded on unload).
+    pub mode: EasyWorldMode,
+    /// Read-only clone source: the name of another world whose stored data
+    /// this world reads. Combined with `mode = "read_only"` it is an
+    /// in-memory instance of that world.
+    pub source: Option<String>,
+    /// Storage override for this world; `None` uses the global
+    /// `[world.chunk]` value (usually just to switch backend).
     pub chunk: Option<ChunkConfig>,
     /// Autosave override for this world; `None` uses the global value.
     pub autosave_ticks: Option<u64>,
@@ -95,7 +107,7 @@ pub struct EmberWorldConfig {
 impl EmberWorldConfig {
     /// Loads `<world_root>/ember-world.toml`. Returns `None` when the file
     /// is absent; a present-but-invalid file is reported loudly and treated
-    /// as absent so a typo can never silently switch storage formats.
+    /// as absent so a typo can never silently change a world's behaviour.
     #[must_use]
     pub fn load(world_root: &Path) -> Option<Self> {
         let path = world_root.join(SIDECAR_FILE);
@@ -103,10 +115,11 @@ impl EmberWorldConfig {
         match toml::from_str::<Self>(&text) {
             Ok(config) => {
                 info!(
-                    "EasyWorld: loaded sidecar {} (archetype {:?}, residency {:?})",
+                    "EasyWorld: loaded sidecar {} (border {:?}, generate {:?}, mode {:?})",
                     path.display(),
-                    config.archetype,
-                    config.residency,
+                    config.border,
+                    config.generate,
+                    config.mode,
                 );
                 Some(config)
             }
@@ -127,20 +140,36 @@ impl EmberWorldConfig {
             chunk: self.chunk.clone().unwrap_or_else(|| global.chunk.clone()),
             lighting: global.lighting,
             autosave_ticks: self.autosave_ticks.unwrap_or(global.autosave_ticks),
+            ember: self.runtime(),
         }
     }
 
-    /// Maximum number of stored regions this world may keep fully resident.
-    /// `0` means "load lazily, never prewarm".
+    /// The runtime behaviour this sidecar declares.
     #[must_use]
-    pub const fn resident_region_cap(&self) -> usize {
-        match self.residency {
-            Residency::Full => MAX_RESIDENT_REGIONS,
-            Residency::Lazy => 0,
-            Residency::Auto => match self.archetype {
-                WorldArchetype::Hub | WorldArchetype::Dungeon => 4,
-                _ => 1,
-            },
+    pub fn runtime(&self) -> EmberRuntime {
+        EmberRuntime {
+            mode: self.mode,
+            source: self.source.clone(),
+            generate: self.generate,
+            border: self.border,
+        }
+    }
+
+    /// Whether this world is a "small map" (loaded whole into memory).
+    #[must_use]
+    pub fn is_small_map(&self) -> bool {
+        self.border
+            .is_some_and(|b| b > 0 && b <= SMALL_MAP_MAX_BORDER)
+    }
+
+    /// Maximum number of stored regions to prewarm into memory. Small maps
+    /// are loaded whole; big maps load lazily (`0`).
+    #[must_use]
+    pub fn resident_region_cap(&self) -> usize {
+        if self.is_small_map() {
+            SMALL_MAP_REGIONS
+        } else {
+            0
         }
     }
 }
@@ -152,15 +181,13 @@ pub fn resolve_level_config(global: &LevelConfig, world_root: &Path) -> LevelCon
     EmberWorldConfig::load(world_root).map_or_else(|| global.clone(), |s| s.resolve(global))
 }
 
-/// Writes (or updates) a world's sidecar so its chunk format is explicit
-/// on disk — used by `/world convert` after a migration.
+/// Writes a world's sidecar to disk (used when creating a world with an
+/// explicit config, e.g. a clone or a dungeon instance).
 ///
 /// # Errors
 /// Fails when serialization or the file write fails.
-pub fn write_sidecar_chunk(world_root: &Path, chunk: ChunkConfig) -> Result<(), String> {
-    let mut config = EmberWorldConfig::load(world_root).unwrap_or_default();
-    config.chunk = Some(chunk);
-    let text = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
+pub fn write_sidecar(world_root: &Path, config: &EmberWorldConfig) -> Result<(), String> {
+    let text = toml::to_string_pretty(config).map_err(|e| e.to_string())?;
     std::fs::write(world_root.join(SIDECAR_FILE), text).map_err(|e| e.to_string())
 }
 
@@ -182,40 +209,34 @@ mod tests {
         };
         let resolved = sidecar.resolve(&global);
         assert_eq!(resolved.autosave_ticks, 1234);
-        // Chunk stays the global default when the sidecar has no override.
-        assert!(matches!(resolved.chunk, crate::chunk::ChunkConfig::Easy));
+        assert!(matches!(resolved.chunk, ChunkConfig::Easy(_)));
     }
 
     #[test]
-    fn residency_caps() {
+    fn small_map_by_border() {
         let mut c = EmberWorldConfig::default();
-        assert_eq!(c.resident_region_cap(), 1); // auto + default archetype
-        c.archetype = WorldArchetype::Hub;
-        assert_eq!(c.resident_region_cap(), 4); // auto + hub
-        c.residency = Residency::Lazy;
+        assert!(!c.is_small_map()); // no border -> big
         assert_eq!(c.resident_region_cap(), 0);
-        c.residency = Residency::Full;
-        assert_eq!(c.resident_region_cap(), MAX_RESIDENT_REGIONS);
+        c.border = Some(512);
+        assert!(c.is_small_map());
+        assert_eq!(c.resident_region_cap(), SMALL_MAP_REGIONS);
+        c.border = Some(2048);
+        assert!(!c.is_small_map()); // over the threshold -> big
     }
 
     #[test]
     fn sidecar_toml_roundtrip() {
         let text = r#"
-archetype = "resource"
-residency = "lazy"
-autosave_ticks = 6000
-
-[chunk]
-type = "easy_shard"
-group_chunks = 4
+border = 512
+generate = "void"
+mode = "read_only"
+source = "arena"
 "#;
         let parsed: EmberWorldConfig = toml::from_str(text).unwrap();
-        assert_eq!(parsed.archetype, WorldArchetype::Resource);
-        assert_eq!(parsed.residency, Residency::Lazy);
-        assert_eq!(parsed.autosave_ticks, Some(6000));
-        match parsed.chunk {
-            Some(ChunkConfig::EasyShard(cfg)) => assert_eq!(cfg.group_chunks, 4),
-            _ => panic!("expected easy_shard chunk override"),
-        }
+        assert_eq!(parsed.border, Some(512));
+        assert_eq!(parsed.generate, GenerateMode::Void);
+        assert_eq!(parsed.mode, EasyWorldMode::ReadOnly);
+        assert_eq!(parsed.source.as_deref(), Some("arena"));
+        assert!(parsed.is_small_map());
     }
 }
