@@ -611,12 +611,12 @@ mod tests {
         };
 
         // Overlay edit shadows the template; removal serves void.
-        {
-            let mut overlay = storage.overlay.write().await;
-            let ov = overlay.entry((0, 0)).or_default();
-            ov.edited.insert(1, Bytes::from_static(&[7u8; 2]));
-            ov.removed.insert(0);
-        }
+        let mut overlay = storage.overlay.write().await;
+        let ov = overlay.entry((0, 0)).or_default();
+        ov.edited.insert(1, Bytes::from_static(&[7u8; 2]));
+        ov.removed.insert(0);
+        drop(overlay);
+
         let overlay = storage.overlay.read().await;
         let ov = overlay.get(&(0, 0)).unwrap();
         assert!(ov.removed.contains(&0));

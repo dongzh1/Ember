@@ -21,3 +21,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }
 
 [lints]
 workspace = true
+
+# `tokio` is used only through the `#[plugin_impl]` macro expansion
+# (GLOBAL_RUNTIME = tokio::runtime::Runtime), which cargo-machete cannot see,
+# so it reports a false positive. The dependency is genuinely required.
+[package.metadata.cargo-machete]
+ignored = ["tokio"]
