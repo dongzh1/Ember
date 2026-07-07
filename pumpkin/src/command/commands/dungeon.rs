@@ -235,6 +235,20 @@ impl CommandExecutor for DungeonStopExecutor {
                     if let Ok(mut instances) = INSTANCES.lock() {
                         instances.remove(&name);
                     }
+                    // Remove any leftover instance folder once the background
+                    // unload finishes (instances persist nothing on disk).
+                    let folder = server.basic_config.get_world_path().join(&name);
+                    let server_bg = server.clone();
+                    let name_bg = name.clone();
+                    tokio::spawn(async move {
+                        for _ in 0..240u32 {
+                            if !server_bg.is_world_unloading(&name_bg) {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                        let _ = tokio::fs::remove_dir_all(&folder).await;
+                    });
                     feedback(
                         context,
                         ok_text(format!("Instance '{name}' unloaded, changes discarded.")),

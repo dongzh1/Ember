@@ -74,6 +74,16 @@ All settings live in `pumpkin.toml` in the server's working directory.
 
 ### EasyWorld formats
 
+`easy` is Ember's **default** chunk format (best compression, empty-chunk pruning, atomic
+writes). Worlds stored in another format keep loading unchanged — on startup Ember detects the
+on-disk format and honors it (with a loud log) instead of regenerating terrain. Migrate
+deliberately with `/world convert <name> <format>` while the world is unloaded; old files are
+kept as `*.bak` and the new format is pinned in the world's `ember-world.toml`.
+
+> Note: `easy` prunes all-air chunks, so a chunk mined out to pure air regenerates on reload
+> in generator-backed worlds. For void/skyblock-style maps use dungeon templates or a
+> non-pruning format (`anvil`/`pump`).
+
 ```toml
 # Region-level zstd compression (.easy files) — much smaller than Pump
 [world.chunk]
@@ -129,6 +139,7 @@ from memory; `hub`/`dungeon` archetypes stay resident up to four regions (1024×
 /world tp <name>                   # teleport yourself to a world's spawn
 /world clone <source> <dest>       # copy a world to a new name and load it (SlimeWorld-style)
 /world prewarm <name>              # load a world's stored regions into memory
+/world convert <name> <format>     # migrate an unloaded world's storage format
 ```
 
 Permission: `ember:command.world` (OP level 3 by default). Loading/unloading and cloning never

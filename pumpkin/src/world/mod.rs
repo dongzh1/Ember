@@ -364,10 +364,14 @@ impl World {
         }
 
         // Save portal POI to disk
-        let save_result = self.portal_poi.lock().await.save_all();
-        if let Err(e) = save_result {
-            error!("Failed to save portal POI: {e}");
+        // EMBER start - ephemeral instance worlds persist nothing
+        if !self.level.ephemeral {
+            let save_result = self.portal_poi.lock().await.save_all();
+            if let Err(e) = save_result {
+                error!("Failed to save portal POI: {e}");
+            }
         }
+        // EMBER end
 
         self.level.shutdown().await;
     }

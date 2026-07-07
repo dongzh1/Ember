@@ -353,6 +353,21 @@ impl Server {
             server.mojang_public_keys.store(Arc::new(k));
         }
 
+        // EMBER start - sidecar residency prewarm for startup worlds
+        for world in server.worlds.load().iter() {
+            let root = world.level.level_folder.root_folder.clone();
+            if let Some(sidecar) = pumpkin_config::ember_world::EmberWorldConfig::load(&root) {
+                let cap = sidecar.resident_region_cap();
+                if cap > 0 {
+                    let level = world.level.clone();
+                    tokio::spawn(async move {
+                        level.prewarm_storage(cap).await;
+                    });
+                }
+            }
+        }
+        // EMBER end
+
         info!("All worlds loaded successfully.");
 
         if server.basic_config.online_mode {

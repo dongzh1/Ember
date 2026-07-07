@@ -152,6 +152,18 @@ pub fn resolve_level_config(global: &LevelConfig, world_root: &Path) -> LevelCon
     EmberWorldConfig::load(world_root).map_or_else(|| global.clone(), |s| s.resolve(global))
 }
 
+/// Writes (or updates) a world's sidecar so its chunk format is explicit
+/// on disk — used by `/world convert` after a migration.
+///
+/// # Errors
+/// Fails when serialization or the file write fails.
+pub fn write_sidecar_chunk(world_root: &Path, chunk: ChunkConfig) -> Result<(), String> {
+    let mut config = EmberWorldConfig::load(world_root).unwrap_or_default();
+    config.chunk = Some(chunk);
+    let text = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    std::fs::write(world_root.join(SIDECAR_FILE), text).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,7 +183,7 @@ mod tests {
         let resolved = sidecar.resolve(&global);
         assert_eq!(resolved.autosave_ticks, 1234);
         // Chunk stays the global default when the sidecar has no override.
-        assert!(matches!(resolved.chunk, crate::chunk::ChunkConfig::Pump));
+        assert!(matches!(resolved.chunk, crate::chunk::ChunkConfig::Easy));
     }
 
     #[test]

@@ -17,11 +17,15 @@ pub enum ChunkConfig {
     Linear,
     /// Pumpkin's own optimized world format.
     #[serde(rename = "pump")]
-    #[default]
+    // EMBER: #[default] moved to Easy — Ember's default chunk format.
     Pump,
     // EMBER start - easyworld format
     /// `EasyWorld` region-level zstd compressed format (.easy files).
+    /// Ember's default: best compression, empty-chunk pruning, atomic
+    /// writes. Existing worlds in other formats keep loading via on-disk
+    /// format detection; migrate deliberately with `/world convert`.
     #[serde(rename = "easy")]
+    #[default]
     Easy,
     /// `EasyWorld` format stored in `MySQL` database.
     #[serde(rename = "easy_mysql")]

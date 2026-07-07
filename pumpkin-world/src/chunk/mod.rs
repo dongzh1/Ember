@@ -25,6 +25,9 @@ pub mod easy_mysql;
 // EMBER start - easyworld instance storage (shared-template ephemeral worlds)
 pub mod easy_instance;
 // EMBER end
+// EMBER start - world format detection & conversion
+pub mod convert;
+// EMBER end
 
 // TODO
 pub const CHUNK_WIDTH: usize = BlockPalette::SIZE;

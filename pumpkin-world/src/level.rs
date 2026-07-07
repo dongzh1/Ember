@@ -106,6 +106,12 @@ pub struct Level {
     pub thread_tracker: Mutex<Vec<thread::JoinHandle<()>>>,
     pub chunk_listener: Arc<ChunkListener>,
     pub gen_pool: Option<Arc<rayon::ThreadPool>>,
+
+    // EMBER start - ephemeral worlds (dungeon instances) persist nothing
+    /// `true` for RAM-backed instance worlds: no folders are created and
+    /// side-channel saves (portal POI, ...) are suppressed on shutdown.
+    pub ephemeral: bool,
+    // EMBER end
 }
 
 pub struct TickData {
@@ -151,9 +157,14 @@ impl Level {
         let entities_folder = dim_folder.join("entities");
         let poi_folder = dim_folder.join("poi");
 
-        std::fs::create_dir_all(&region_folder).expect("Failed to create Region folder");
-        std::fs::create_dir_all(&entities_folder).expect("Failed to create Entities folder");
-        std::fs::create_dir_all(&poi_folder).expect("Failed to create POI folder");
+        // EMBER start - RAM-backed instance worlds create no folders
+        let ephemeral = matches!(level_config.chunk, ChunkConfig::EasyInstance(_));
+        if !ephemeral {
+            std::fs::create_dir_all(&region_folder).expect("Failed to create Region folder");
+            std::fs::create_dir_all(&entities_folder).expect("Failed to create Entities folder");
+            std::fs::create_dir_all(&poi_folder).expect("Failed to create POI folder");
+        }
+        // EMBER end
 
         let level_folder = Arc::new(LevelFolder {
             root_folder,
@@ -162,6 +173,21 @@ impl Level {
             entities_folder,
             poi_folder,
         });
+
+        // EMBER start - on-disk format detection (never silently regenerate)
+        // If the region folder already stores a different format than the
+        // config asks for, honor the disk (loudly) so a format switch can
+        // never make existing terrain unreadable.
+        let detected_config = {
+            let mut resolved = level_config.clone();
+            resolved.chunk = crate::chunk::convert::detect_on_disk_config(
+                &resolved.chunk,
+                &level_folder.region_folder,
+            );
+            resolved
+        };
+        let level_config = &detected_config;
+        // EMBER end
 
         let seed = Seed(seed as u64);
         // EMBER start - easyworld instance: dimension geometry for void chunks
@@ -243,6 +269,9 @@ impl Level {
             thread_tracker,
             chunk_listener: listener.clone(),
             gen_pool: gen_pool.clone(),
+            // EMBER start - ephemeral worlds persist nothing
+            ephemeral,
+            // EMBER end
         });
 
         // TODO

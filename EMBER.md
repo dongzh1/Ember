@@ -117,6 +117,10 @@ git push origin main
 | EasyShard 格式 (`easy_shard`) | `pumpkin-world/src/chunk/format/easy_shard.rs`、`pumpkin-config/src/chunk.rs`、`pumpkin-world/src/chunk/io/file_manager.rs`、`pumpkin-world/src/chunk/format/pump.rs` | 资源世界专用 `.ezs`：每 `group_chunks`（默认 1）个区块独立 zstd,改一个只重压一组,终结整区重压写放大;常驻内存为压缩态（省 10-30 倍）;脏区**在被玩家占用时也随 autosave 增量落盘**（其他格式行为不变,file_manager 激活了原为死代码的 `should_write` 门）;原子写（tmp+fsync+rename） |
 | 副本模板多实例 (`easy_instance`) | `pumpkin-world/src/chunk/easy_instance.rs`、`pumpkin/src/command/commands/dungeon.rs` | SlimeWorld 式模板实例化：模板（easy/easy_mysql 世界）解压一次进全局注册表,N 个实例共享同一份内存（开新实例=Arc 克隆,纳秒级）;每实例 RAM 覆盖层,改动卸载即丢,模板永不被污染;模板外区块回填空气 `Full` 区块,原版地形生成器永不运行;实体用 `DiscardEntityIO` 不落盘。`/dungeon prewarm/start/stop/list/reload`（权限 `ember:command.dungeon`,OP 3 级） |
 | easy 格式强化 | `pumpkin-world/src/chunk/format/easy.rs`、`pumpkin-world/src/chunk/easy_mysql.rs` | 原子写（崩溃不再截断区域文件）;干净区域跳过整区重压;O(1) 前缀和索引替代 O(N) 扫描;MySQL 区缓存命中只走读锁（多人同世界冷加载不再串行）;`easy_mysql` 支持模板批量加载与区列表 |
+| 格式检测与转换 | `pumpkin-world/src/chunk/convert.rs`、`pumpkin-world/src/level.rs`、`pumpkin/src/command/commands/world.rs` | 开档时检测磁盘已有格式:与配置不符时**尊重磁盘并响亮报错**（切换格式永不再静默重生成地形）;`/world convert <名> <格式>` 显式迁移（区块+实体,旧文件改 `.bak`,成功后写 sidecar 固化格式,覆盖 DIM-1/DIM1） |
+| 默认格式 = easy | `pumpkin-config/src/chunk.rs` | `#[default]` 从 `pump` 移到 `easy`——新世界原生 easy;老世界由格式检测兜底继续可读 |
+| 副本零留存卫生 | `pumpkin-world/src/level.rs`（`Level::ephemeral`）、`pumpkin/src/world/mod.rs`、`pumpkin/src/command/commands/dungeon.rs` | 实例世界不再创建 region/entities/poi 文件夹;shutdown 时抑制传送门 POI 落盘;`/dungeon stop` 等后台卸载完成后清理残留实例文件夹——"改动不留存"承诺闭环 |
+| 启动世界预热 | `pumpkin/src/server/mod.rs` | 启动加载的默认世界（主世界等）也按 sidecar residency 预热（原来只有动态加载的世界吃 sidecar） |
 
 （新增功能时更新此表。）
 
