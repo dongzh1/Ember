@@ -14,7 +14,7 @@ members = [
     "pumpkin-codecs",
     "easyworld"
 ]
-exclude = ["pumpkin-codegen"]
+exclude = ["pumpkin-codegen", "npc-plugin"]
 
 [workspace.lints.clippy]
 # Groups

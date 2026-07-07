@@ -82,11 +82,14 @@ if (Test-Path (Join-Path $repo ".git\MERGE_HEAD")) {
     exit 1
 }
 
-# 0. 工作区必须干净
-$dirty = git status --porcelain
+# 0. 工作区必须干净 (父仓库的已跟踪文件)
+# --ignore-submodules=dirty: 忽略子模块内部未提交的改动 (如 pumpkin-plugin-wit 的
+# mannequin WIT WIP)。上游同步只合并父仓库的 master/main, 子模块内部 WIP 与之无关,
+# 由老大自管, 不该挡同步。gitlink 被提交移动过仍算改动 (dirty 级不忽略 M)。
+$dirty = git status --porcelain --ignore-submodules=dirty
 if ($dirty) {
-    git status --short
-    Fail "工作区有未提交的改动, 请先提交或 stash 再同步。"
+    git status --short --ignore-submodules=dirty
+    Fail "工作区有未提交的改动 (父仓库已跟踪文件), 请先提交或 stash 再同步。"
 }
 
 # 1. 拉取上游

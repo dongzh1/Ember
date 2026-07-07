@@ -10,6 +10,9 @@ use crate::entity::boss::wither::WitherEntity;
 use crate::entity::decoration::{
     armor_stand::ArmorStandEntity, end_crystal::EndCrystalEntity, painting::PaintingEntity,
 };
+// EMBER start: mannequin NPC entity
+use crate::entity::decoration::mannequin::MannequinEntity;
+// EMBER end
 use crate::entity::experience_orb::ExperienceOrbEntity;
 use crate::entity::falling::FallingEntity;
 use crate::entity::item::ItemEntity;
@@ -219,6 +222,9 @@ pub fn from_type(
             crate::entity::area_effect_cloud::AreaEffectCloudEntity::new(entity)
         }
         id if id == EntityType::ARMOR_STAND.id => Arc::new(ArmorStandEntity::new(entity)),
+        // EMBER start: mannequin NPC entity
+        id if id == EntityType::MANNEQUIN.id => Arc::new(MannequinEntity::new(entity)),
+        // EMBER end
         id if id == EntityType::PAINTING.id => Arc::new(PaintingEntity::new(entity)),
         id if id == EntityType::END_CRYSTAL.id => Arc::new(EndCrystalEntity::new(entity)),
         id if id == EntityType::ENDER_PEARL.id => Arc::new(EnderPearlEntity::new(entity)),

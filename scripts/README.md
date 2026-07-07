@@ -1,6 +1,13 @@
 # Ember 脚本目录
 
-日常改完代码后的完整流程(推荐顺序):
+**一条龙(推荐):** 双击根目录 `ship.bat` —— 一次跑完 `检查 → 推送 → 同步上游 → 云端构建`,
+任一步失败即停下并保留现场。
+
+```
+改代码 → ship.bat  (= check + push + sync-upstream + build-remote,顺序执行,失败即止)
+```
+
+想分步来 / 只跑其中一步时,用下面的单项脚本:
 
 ```
 改代码 → check.bat → build.bat(本地测试) → push.bat → build.bat(云端打正式包)
@@ -9,11 +16,13 @@
 ```
 
 所有 `.bat` 在仓库根目录,双击即可;`.ps1` 是实际逻辑,放本目录。
+`ship.ps1` 只是"编排器":在独立子进程里依次调用下面的单项脚本,不重复它们的逻辑。
 
 ## 脚本一览
 
 | 入口(根目录) | 实际脚本 | 作用 |
 |---|---|---|
+| `ship.bat` | `ship.ps1` | **一条龙**:检查 → 推送 → 同步上游 → 云端构建,顺序执行、失败即止。是编排器,不含新逻辑 |
 | `check.bat` | `check.ps1` | 代码检查:fmt + clippy(常改的三个 crate)。`-Full` 查全 workspace 并跑测试 |
 | `build.bat` | `build-windows.ps1` / `build-remote.ps1` | 菜单选择:本地构建 Windows 包 / 云端构建 Linux+Windows 包 |
 | `push.bat` | `push.ps1` | 提交 + 推送到 GitHub(origin/main),推送前自动做格式检查,禁止在 master 提交 |
@@ -37,12 +46,17 @@
 ## 命令行直接调用
 
 ```powershell
+.\scripts\ship.ps1 [-Message "[EMBER] feat: xxx"] [-Full] [-NoSync] [-NoBuild] [-SkipCheck] [-Ref main]
 .\scripts\check.ps1 [-Full]
 .\scripts\build-windows.ps1 [-SkipBuild]
 .\scripts\build-remote.ps1 [-Ref main]
 .\scripts\push.ps1 [-Message "[EMBER] feat: xxx"] [-NoCheck]
 .\scripts\sync-upstream.ps1
 ```
+
+> `ship.ps1`/`push.ps1`/`sync-upstream.ps1` 的"工作区干净"判断都用 `--ignore-submodules=dirty`,
+> 所以 `pumpkin-plugin-wit` 子模块内部未提交的 WIP(如 mannequin 的 WIT 改动)不会挡住推送/同步;
+> 子模块 gitlink 被真正提交移动过时仍会照常处理。
 
 ## 约定
 

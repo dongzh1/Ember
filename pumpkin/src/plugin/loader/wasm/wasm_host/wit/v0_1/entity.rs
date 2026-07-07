@@ -264,6 +264,74 @@ impl HostEntity for PluginHostState {
         Ok(())
     }
 
+    // EMBER start: mannequin NPC controls (no-op on non-mannequin entities)
+    async fn set_skin(
+        &mut self,
+        entity: Resource<Entity>,
+        value: String,
+        signature: Option<String>,
+    ) -> wasmtime::Result<()> {
+        let entity = entity_from_resource(self, &entity)?;
+        if let Some(mannequin) = entity
+            .cast_any()
+            .downcast_ref::<crate::entity::decoration::mannequin::MannequinEntity>(
+        ) {
+            let textures = if value.is_empty() {
+                None
+            } else {
+                Some(crate::entity::decoration::mannequin::SkinTextures {
+                    value: value.into_boxed_str(),
+                    signature: signature.map(String::into_boxed_str),
+                })
+            };
+            mannequin.set_skin(textures);
+        }
+        Ok(())
+    }
+
+    async fn set_description(
+        &mut self,
+        entity: Resource<Entity>,
+        description: Option<Resource<TextComponent>>,
+    ) -> wasmtime::Result<()> {
+        let entity = entity_from_resource(self, &entity)?;
+        let text = match description {
+            Some(handle) => {
+                let text_res = self
+                    .resource_table
+                    .get::<crate::plugin::loader::wasm::wasm_host::state::TextComponentResource>(
+                        &Resource::new_own(handle.rep()),
+                    )
+                    .map_err(|_| wasmtime::Error::msg("invalid text component resource handle"))?;
+                Some(text_res.provider.clone())
+            }
+            None => None,
+        };
+        if let Some(mannequin) = entity
+            .cast_any()
+            .downcast_ref::<crate::entity::decoration::mannequin::MannequinEntity>(
+        ) {
+            mannequin.set_description(text);
+        }
+        Ok(())
+    }
+
+    async fn set_immovable(
+        &mut self,
+        entity: Resource<Entity>,
+        immovable: bool,
+    ) -> wasmtime::Result<()> {
+        let entity = entity_from_resource(self, &entity)?;
+        if let Some(mannequin) = entity
+            .cast_any()
+            .downcast_ref::<crate::entity::decoration::mannequin::MannequinEntity>(
+        ) {
+            mannequin.set_immovable(immovable);
+        }
+        Ok(())
+    }
+    // EMBER end
+
     async fn is_fall_flying(&mut self, entity: Resource<Entity>) -> wasmtime::Result<bool> {
         let entity = entity_from_resource(self, &entity)?;
         Ok(entity

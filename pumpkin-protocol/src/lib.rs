@@ -425,6 +425,116 @@ pub struct Property {
     pub signature: Option<Box<str>>,
 }
 
+// EMBER start: mannequin NPC skin support
+/// The "Resolvable Profile" entity-metadata value (metadata type id 41 on
+/// protocol 776 / MC 26.2).
+///
+/// It is carried by the `mannequin` entity's `PROFILE` tracked data (index 17)
+/// and tells the client which skin/name to render.
+///
+/// Wire layout (verified against the MC 26.2 protocol): the `kind` `VarInt`-enum
+/// and its branch payload, then the outer `body`/`cape`/`elytra`
+/// prefixed-optional identifiers and the `model` prefixed-optional `VarInt`
+/// (`0` = wide, `1` = slim). The whole thing rides the generic serde encoder in
+/// `Metadata::write`, so `#[derive(Serialize)]` alone produces correct bytes.
+#[derive(Serialize, Clone, Debug)]
+pub struct ResolvableProfile {
+    /// Profile kind + its branch payload. Serialized first.
+    pub kind: ResolvableProfileKind,
+    /// Optional skin-texture override identifier.
+    pub body: Option<Box<str>>,
+    /// Optional cape override identifier.
+    pub cape: Option<Box<str>>,
+    /// Optional elytra override identifier.
+    pub elytra: Option<Box<str>>,
+    /// Optional body model (`0` = wide, `1` = slim).
+    pub model: Option<VarInt>,
+}
+
+/// The `Profile Kind` branch of a [`ResolvableProfile`]. Declaration order fixes
+/// the wire discriminant (`Partial` = 0, `Complete` = 1) — do not reorder.
+#[derive(Serialize, Clone, Debug)]
+pub enum ResolvableProfileKind {
+    /// A partial profile. The common case for a skin-only mannequin is
+    /// `properties = [textures]` with `username`/`uuid` left empty.
+    Partial {
+        /// Optional username (max 16).
+        username: Option<Box<str>>,
+        /// Optional profile UUID.
+        uuid: Option<uuid::Uuid>,
+        /// Profile properties (e.g. the signed `textures` property).
+        properties: Vec<Property>,
+    },
+    /// A fully resolved game profile.
+    Complete(GameProfileValue),
+}
+
+/// A resolved game profile carried inside [`ResolvableProfileKind::Complete`].
+#[derive(Serialize, Clone, Debug)]
+pub struct GameProfileValue {
+    /// Profile UUID.
+    pub uuid: uuid::Uuid,
+    /// Profile username (max 16).
+    pub name: Box<str>,
+    /// Profile properties.
+    pub properties: Vec<Property>,
+}
+
+impl ResolvableProfile {
+    /// A skin-only partial profile carrying one signed `textures` property.
+    #[must_use]
+    pub fn from_textures(value: Box<str>, signature: Option<Box<str>>) -> Self {
+        Self {
+            kind: ResolvableProfileKind::Partial {
+                username: None,
+                uuid: None,
+                properties: vec![Property {
+                    name: "textures".into(),
+                    value,
+                    signature,
+                }],
+            },
+            body: None,
+            cape: None,
+            elytra: None,
+            model: None,
+        }
+    }
+
+    /// A partial profile carrying only a username, to be resolved elsewhere.
+    #[must_use]
+    pub const fn from_name(name: Box<str>) -> Self {
+        Self {
+            kind: ResolvableProfileKind::Partial {
+                username: Some(name),
+                uuid: None,
+                properties: Vec::new(),
+            },
+            body: None,
+            cape: None,
+            elytra: None,
+            model: None,
+        }
+    }
+
+    /// An empty profile (renders the default skin).
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            kind: ResolvableProfileKind::Partial {
+                username: None,
+                uuid: None,
+                properties: Vec::new(),
+            },
+            body: None,
+            cape: None,
+            elytra: None,
+            model: None,
+        }
+    }
+}
+// EMBER end
+
 #[derive(Serialize)]
 pub struct KnownPack<'a> {
     pub namespace: &'a str,

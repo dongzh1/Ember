@@ -26,8 +26,10 @@ pub struct SkinTextures {
 }
 
 /// A `minecraft:mannequin` — a player-shaped display entity that renders any
-/// skin without a connected player. Added in MC 1.21.9 and carried through the
-/// 26.x line, it is the native basis for skinned NPCs.
+/// skin without a connected player.
+///
+/// Added in MC 1.21.9 and carried through the 26.x line, it is the native basis
+/// for skinned NPCs.
 ///
 /// It behaves like a stationary [`LivingEntity`] (inheriting movement, effects
 /// and death), and adds the mannequin-specific tracked data: the skin profile
@@ -55,12 +57,12 @@ impl MannequinEntity {
 
     /// Builds the wire profile from the currently stored skin.
     fn profile(&self) -> ResolvableProfile {
-        match &**self.skin.load() {
-            Some(skin) => {
+        let guard = self.skin.load();
+        (**guard)
+            .as_ref()
+            .map_or_else(ResolvableProfile::empty, |skin| {
                 ResolvableProfile::from_textures(skin.value.clone(), skin.signature.clone())
-            }
-            None => ResolvableProfile::empty(),
-        }
+            })
     }
 
     /// Sets the rendered skin and broadcasts it to viewers immediately.

@@ -33,7 +33,10 @@ if ($branch -eq "master") {
 Write-Host "分支: $branch"
 
 # 1. 显示改动
-$dirty = git status --porcelain
+# --ignore-submodules=dirty: 忽略子模块内部未提交的改动 (如 pumpkin-plugin-wit 的
+# mannequin WIT WIP)。推送只涉及父仓库的已跟踪文件; 子模块内部 WIP 由老大自管,
+# 不该挡推送。子模块的 gitlink 若真被提交移动过, 仍会被视为改动 (dirty 级不忽略 M)。
+$dirty = git status --porcelain --ignore-submodules=dirty
 if ($dirty) {
     Write-Host ""
     git status --short
