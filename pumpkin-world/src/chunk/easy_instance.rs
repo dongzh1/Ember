@@ -552,12 +552,13 @@ impl FileIO for DiscardEntityIO {
 
 // ─── Read-only chunk storage ───────────────────────────────────────────
 
-/// Wraps a chunk `FileIO` so a `read_only` world persists no block/chunk
-/// data: reads, watches and region enumeration delegate to the inner store,
-/// but saves are dropped (chunks marked clean). This mirrors
-/// [`DiscardEntityIO`] so a source-less `read_only` world stays symmetric —
-/// neither blocks nor entities are written back — instead of the File backend
-/// silently persisting blocks while entities are discarded.
+/// A chunk `FileIO` decorator that makes a `read_only` world persist nothing.
+///
+/// Reads, watches and region enumeration delegate to the inner store, but
+/// saves are dropped (chunks marked clean). This mirrors [`DiscardEntityIO`]
+/// so a source-less `read_only` world stays symmetric — neither blocks nor
+/// entities are written back — instead of the File backend silently
+/// persisting blocks while entities are discarded.
 pub struct ReadOnlyChunkIO {
     pub inner: Arc<dyn FileIO<Data = Arc<ChunkData>>>,
 }

@@ -148,12 +148,23 @@ impl CommandExecutor for DungeonStartExecutor {
             let name = loop {
                 let n = NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
                 let candidate = format!("{template}-i{n}");
+                // Also reject a name whose folder already exists on disk: an
+                // ephemeral instance persists nothing, so if it adopted an
+                // existing (unloaded) persistent world's name, `/dungeon stop`'s
+                // remove_dir_all would wipe that real world's data. Skipping
+                // on-disk names guarantees any folder present at stop time was
+                // created by the instance itself.
                 let taken = server
                     .worlds
                     .load()
                     .iter()
                     .any(|w| w.get_world_name() == candidate)
-                    || server.is_world_unloading(&candidate);
+                    || server.is_world_unloading(&candidate)
+                    || server
+                        .basic_config
+                        .get_world_path()
+                        .join(&candidate)
+                        .exists();
                 if !taken {
                     break candidate;
                 }

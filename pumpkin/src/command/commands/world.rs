@@ -90,6 +90,13 @@ impl CommandExecutor for WorldLoadExecutor {
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let server = context.server().clone();
 
+            // create_world is infallible and builds a path from the name, so an
+            // empty/invalid name (e.g. "/world load " with a trailing space)
+            // would create a stray dimension tree at the worlds root. Reject it.
+            if let Err(e) = crate::server::validate_world_name(&name) {
+                feedback(context, err_text(e)).await;
+                return Ok(0);
+            }
             if find_world(&server, &name).is_some() {
                 feedback(
                     context,

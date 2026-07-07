@@ -27,21 +27,21 @@ pub fn build_menu_dialog(service: &WorldService) -> Dialog {
 
     let mut buttons: Vec<ActionButton> = Vec::new();
 
-    // Loaded worlds get unload + delete actions.
+    // Loaded worlds get an unload action only. Delete lives on the unloaded
+    // worlds below: delete_world rejects a loaded world by design, so a Delete
+    // button here could never succeed.
     for (name, players) in &loaded {
         buttons.push(custom_button(
             format!("Unload {name} ({players})"),
             NamedColor::Gold,
             format!("ew:unload:{name}"),
         ));
-        buttons.push(custom_button(
-            format!("Delete {name}"),
-            NamedColor::Red,
-            format!("ew:delete:{name}"),
-        ));
     }
 
-    // On-disk worlds that aren't loaded get a load action.
+    // On-disk worlds that aren't loaded get load + delete actions. These
+    // satisfy delete_world's preconditions (not loaded; the always-loaded
+    // default world stays in loaded_names and is filtered out here), so a
+    // Delete button on these can actually succeed.
     for name in on_disk
         .iter()
         .filter(|name| !loaded_names.contains(name.as_str()))
@@ -50,6 +50,11 @@ pub fn build_menu_dialog(service: &WorldService) -> Dialog {
             format!("Load {name}"),
             NamedColor::Green,
             format!("ew:load:{name}"),
+        ));
+        buttons.push(custom_button(
+            format!("Delete {name}"),
+            NamedColor::Red,
+            format!("ew:delete:{name}"),
         ));
     }
 
@@ -155,8 +160,15 @@ impl EventHandler<CustomClickActionEvent> for WorldClickHandler {
 
             let message = match action {
                 MenuAction::Load(name) => {
-                    let world = self.service.create_or_load(name.to_string()).await;
-                    format!("Loaded world '{}'.", world.get_world_name())
+                    // Mirror the command path's guard: refuse to reload a world
+                    // whose previous instance is still flushing to disk, or two
+                    // Levels would write the same folder/DB rows concurrently.
+                    if self.service.is_unloading(name) {
+                        format!("World '{name}' is still unloading, retry shortly.")
+                    } else {
+                        let world = self.service.create_or_load(name.to_string()).await;
+                        format!("Loaded world '{}'.", world.get_world_name())
+                    }
                 }
                 MenuAction::Unload(name) => match self.service.unload(name).await {
                     Ok(()) => format!("Unloaded world '{name}'."),

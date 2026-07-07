@@ -462,6 +462,16 @@ impl Server {
             }
         }
 
+        // A world of this name may still be flushing after an unload: it has
+        // already left `worlds` (so the dedup above misses it) but its old
+        // Level keeps writing the same folder/DB rows for up to seconds. Wait
+        // for that flush to finish before opening a second Level on the same
+        // path, or the two writers would corrupt each other's data. The unload
+        // task clears the name once shutdown() completes, so this terminates.
+        while self.is_world_unloading(&name) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
         let server = self.clone();
         let name_clone = name.clone();
         let world = tokio::task::spawn_blocking(move || {
@@ -639,6 +649,8 @@ impl Server {
         src_name: &str,
         dst_name: &str,
     ) -> Result<Arc<World>, String> {
+        // Never build a destination path from an unchecked name (see delete_world).
+        validate_world_name(dst_name)?;
         let src_world = self
             .worlds
             .load()
@@ -664,31 +676,44 @@ impl Server {
             return Err(format!("folder '{}' already exists", dst_dir.display()));
         }
 
-        // Copy any on-disk data (region files, level.dat, entities).
-        if src_dir.exists() {
-            let (src_copy, dst_copy) = (src_dir.clone(), dst_dir.clone());
-            tokio::task::spawn_blocking(move || copy_dir_recursive(&src_copy, &dst_copy))
-                .await
-                .map_err(|e| format!("file copy panicked: {e}"))?
-                .map_err(|e| format!("file copy failed: {e}"))?;
-        }
+        // Copy on-disk data and clone DB rows. Both steps can create/populate
+        // dst_dir, so on ANY failure we best-effort remove dst_dir before
+        // returning — a failed clone must never leave a half-built world behind.
+        let cloned = async {
+            // Copy any on-disk data (region files, level.dat, entities).
+            if src_dir.exists() {
+                let (src_copy, dst_copy) = (src_dir.clone(), dst_dir.clone());
+                tokio::task::spawn_blocking(move || copy_dir_recursive(&src_copy, &dst_copy))
+                    .await
+                    .map_err(|e| format!("file copy panicked: {e}"))?
+                    .map_err(|e| format!("file copy failed: {e}"))?;
+            }
 
-        // easy_mysql keeps region data in the database — clone those rows to
-        // the new key too (in-database, no data transfer). Resolve the
-        // SOURCE world's effective config; its sidecar may pick a different
-        // backend than the global one.
-        let src_config = pumpkin_config::ember_world::resolve_level_config(
-            &self.advanced_config.world,
-            &src_dir,
-        );
-        if let pumpkin_config::chunk::ChunkConfig::Easy(cfg) = &src_config.chunk
-            && cfg.backend == pumpkin_config::chunk::EasyBackend::Mysql
-        {
-            let mysql = cfg.mysql(src_config.ember.mode);
-            pumpkin_world::chunk::easy_mysql::clone_world_data(&mysql, &src_dir, &dst_dir)
-                .await
-                .map_err(|e| format!("database clone failed: {e}"))?;
+            // easy_mysql keeps region data in the database — clone those rows to
+            // the new key too (in-database, no data transfer). Resolve the
+            // SOURCE world's effective config; its sidecar may pick a different
+            // backend than the global one.
+            let src_config = pumpkin_config::ember_world::resolve_level_config(
+                &self.advanced_config.world,
+                &src_dir,
+            );
+            if let pumpkin_config::chunk::ChunkConfig::Easy(cfg) = &src_config.chunk
+                && cfg.backend == pumpkin_config::chunk::EasyBackend::Mysql
+            {
+                let mysql = cfg.mysql(src_config.ember.mode);
+                pumpkin_world::chunk::easy_mysql::clone_world_data(&mysql, &src_dir, &dst_dir)
+                    .await
+                    .map_err(|e| format!("database clone failed: {e}"))?;
+            }
+            Ok::<(), String>(())
         }
+        .await;
+
+        if cloned.is_err() {
+            let cleanup = dst_dir.clone();
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&cleanup)).await;
+        }
+        cloned?;
 
         Ok(self
             .create_world(dst_name.to_string(), src_world.dimension.clone())
@@ -750,6 +775,12 @@ impl Server {
     /// # Errors
     /// Fails when the world is loaded/unloading/default, or deletion fails.
     pub async fn delete_world(self: &Arc<Self>, name: &str) -> Result<(), String> {
+        // Reject names that escape the worlds directory BEFORE any path is
+        // built: "", ".", "..", or names with separators would otherwise let
+        // remove_dir_all wipe the worlds container or the server root. This is
+        // the authoritative guard — the plugin API reaches this primitive
+        // directly, bypassing the command parser.
+        validate_world_name(name)?;
         if self
             .worlds
             .load()
@@ -1538,6 +1569,32 @@ impl Server {
         }
     }
 }
+
+// EMBER start - world name validation (guards path-building primitives)
+/// Rejects a world name that could escape the worlds directory once joined
+/// into a filesystem path. A valid name is exactly one normal path component:
+/// no empty string, no `.`/`..`, no `/`/`\`/NUL separators, no absolute path
+/// or drive prefix. Guards the destructive primitives (`delete_world`,
+/// `clone_world`) so neither a command with a trailing space nor a plugin
+/// passing a raw name can `remove_dir_all` the worlds container or the server
+/// root; also reused by the `/world load` command so an empty name can't
+/// create a stray dimension tree at the container root.
+pub(crate) fn validate_world_name(name: &str) -> Result<(), String> {
+    use std::path::Component;
+    let mut components = std::path::Path::new(name).components();
+    let single_normal = matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    );
+    if single_normal && !name.contains('/') && !name.contains('\\') && !name.contains('\0') {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid world name '{name}': must be a single folder name (no '/', '\\', '.', '..', or empty)"
+        ))
+    }
+}
+// EMBER end
 
 // EMBER start - world clone helper (shared by Server::clone_world)
 /// Recursively copies a directory tree (a world folder: region files,

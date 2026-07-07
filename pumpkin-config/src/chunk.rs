@@ -38,7 +38,7 @@ impl Default for ChunkConfig {
 
 // EMBER start - unified easy config
 /// Configuration for the `EasyWorld` format.
-#[derive(Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct EasyConfig {
     /// Where chunk data is stored: on disk (`file`, default) or in a shared
@@ -55,6 +55,22 @@ pub struct EasyConfig {
     /// for the `mysql` backend. Default 32.
     #[serde(default = "default_max_cached_regions")]
     pub max_cached_regions: usize,
+}
+
+// A manual `Default` (not derived) so the config-merge base — built from
+// `Default::default()`, not from a deserialized file — carries the documented
+// `max_cached_regions = 32`. A derived Default would yield 0 (usize default),
+// which the merge then persists and clamps to 4, silently giving globally
+// configured mysql worlds an 8x-smaller region cache than the sidecar path.
+impl Default for EasyConfig {
+    fn default() -> Self {
+        Self {
+            backend: EasyBackend::default(),
+            url: String::new(),
+            key_prefix: String::new(),
+            max_cached_regions: default_max_cached_regions(),
+        }
+    }
 }
 
 /// Storage backend for the `EasyWorld` format.
