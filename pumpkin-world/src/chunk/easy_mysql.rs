@@ -365,6 +365,42 @@ pub async fn clone_world_data(
     Ok(res.rows_affected())
 }
 
+/// Deletes all region rows of a world (and its dimension sub-worlds) from
+/// the database. Returns the number of removed regions.
+///
+/// # Errors
+/// Fails when the database is unreachable.
+pub async fn delete_world_data(
+    config: &EasyMysqlConfig,
+    folder: &std::path::Path,
+) -> Result<u64, String> {
+    let key = world_key_for(config, folder);
+    let pool = sqlx::mysql::MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&config.url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let res = sqlx::query(
+        "DELETE FROM easyworld_regions WHERE world_key = ? OR world_key LIKE CONCAT(?, '/%')",
+    )
+    .bind(&key)
+    .bind(&key)
+    .execute(&pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    // Drop any stale write lock for the world too.
+    let _ = sqlx::query("DELETE FROM easyworld_locks WHERE world_key = ?")
+        .bind(&key)
+        .execute(&pool)
+        .await;
+    pool.close().await;
+    info!(
+        "EasyWorld: deleted {} regions of '{key}' from the database",
+        res.rows_affected()
+    );
+    Ok(res.rows_affected())
+}
+
 /// Loads every stored region of a world from the database in one query.
 /// Used to build shared dungeon-instance templates; the decompression runs
 /// on the blocking pool.

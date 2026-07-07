@@ -206,6 +206,31 @@ impl CommandExecutor for WorldCloneExecutor {
     }
 }
 
+struct WorldDeleteExecutor;
+
+impl CommandExecutor for WorldDeleteExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            match context.server().delete_world(&name).await {
+                Ok(()) => {
+                    feedback(
+                        context,
+                        TextComponent::text(format!("World '{name}' deleted."))
+                            .color_named(NamedColor::Green),
+                    )
+                    .await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(format!("Cannot delete '{name}': {e}"))).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+
 struct WorldPrewarmExecutor;
 
 impl CommandExecutor for WorldPrewarmExecutor {
@@ -437,6 +462,9 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
             )
             .then(literal("prewarm").then(
                 argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldPrewarmExecutor),
+            ))
+            .then(literal("delete").then(
+                argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldDeleteExecutor),
             ))
             .then(
                 literal("convert").then(

@@ -742,6 +742,56 @@ impl Server {
             )
             .await)
     }
+
+    /// Permanently deletes a world's data (folder on disk, plus its rows in
+    /// the database for a `mysql`-backed world). The world must not be
+    /// loaded, unloading, or the default world.
+    ///
+    /// # Errors
+    /// Fails when the world is loaded/unloading/default, or deletion fails.
+    pub async fn delete_world(self: &Arc<Self>, name: &str) -> Result<(), String> {
+        if self
+            .worlds
+            .load()
+            .iter()
+            .any(|w| w.get_world_name() == name)
+        {
+            return Err(format!("world '{name}' is loaded — unload it first"));
+        }
+        if self.is_world_unloading(name) {
+            return Err(format!("world '{name}' is still unloading"));
+        }
+        if let Some(first) = self.worlds.load().first()
+            && first.get_world_name() == name
+        {
+            return Err("cannot delete the default world".to_string());
+        }
+
+        let root = self.basic_config.get_world_path().join(name);
+
+        // Delete database rows for a mysql-backed world before the folder,
+        // so the sidecar (which selects the backend) is still readable.
+        let config =
+            pumpkin_config::ember_world::resolve_level_config(&self.advanced_config.world, &root);
+        if let pumpkin_config::chunk::ChunkConfig::Easy(cfg) = &config.chunk
+            && cfg.backend == pumpkin_config::chunk::EasyBackend::Mysql
+        {
+            let mysql = cfg.mysql(config.ember.mode);
+            pumpkin_world::chunk::easy_mysql::delete_world_data(&mysql, &root)
+                .await
+                .map_err(|e| format!("database delete failed: {e}"))?;
+        }
+
+        if root.exists() {
+            let root_copy = root.clone();
+            tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&root_copy))
+                .await
+                .map_err(|e| format!("delete panicked: {e}"))?
+                .map_err(|e| format!("delete failed: {e}"))?;
+        }
+        info!("Deleted world '{name}'");
+        Ok(())
+    }
     // EMBER end
 
     /// Adds a new player to the server.
