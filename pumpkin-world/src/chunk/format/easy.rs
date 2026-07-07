@@ -160,6 +160,40 @@ impl EasyRegionData {
         self.chunk_sizes.len()
     }
 
+    /// Byte spans `(offset, size)` of every stored chunk, indexed by
+    /// region-relative chunk index. One O(1024) prefix-sum pass replaces the
+    /// O(N)-per-lookup scans of `stored_before`/`offset_of_stored` on
+    /// read-heavy paths (batch loads, template building).
+    pub(crate) fn chunk_spans(&self) -> Box<[Option<(usize, usize)>]> {
+        let mut spans = vec![None; 1024].into_boxed_slice();
+        let mut stored_idx = 0usize;
+        let mut offset = 0usize;
+        for index in 0..1024u32 {
+            if self.has_chunk(index) {
+                let Some(&size) = self.chunk_sizes.get(stored_idx) else {
+                    break;
+                };
+                let size = size as usize;
+                if offset + size > self.chunks_data.len() {
+                    break;
+                }
+                spans[index as usize] = Some((offset, size));
+                offset += size;
+                stored_idx += 1;
+            }
+        }
+        spans
+    }
+
+    /// Iterates `(chunk index, raw NBT bytes)` over every stored chunk.
+    /// Used to build shared instance templates.
+    pub(crate) fn stored_chunks(&self) -> impl Iterator<Item = (u32, &[u8])> + '_ {
+        let spans = self.chunk_spans();
+        (0..1024u32).filter_map(move |i| {
+            spans[i as usize].map(|(offset, size)| (i, &self.chunks_data[offset..offset + size]))
+        })
+    }
+
     /// Structural consistency check for data loaded from disk or database.
     /// Guards every later slice/index operation against corrupted input.
     pub(crate) fn is_consistent(&self) -> bool {
@@ -202,10 +236,37 @@ pub(crate) fn is_prunable_chunk(chunk: &crate::chunk::ChunkData) -> bool {
     true
 }
 
+/// Decompresses and validates a serialized region blob (the shared decode
+/// path for `.easy` files, `MySQL` rows and instance templates).
+pub(crate) fn decode_region_bytes(raw: &[u8]) -> Result<EasyRegionData, ChunkReadingError> {
+    let mut decoder = StreamingDecoder::new(raw).map_err(|e| {
+        ChunkReadingError::Compression(crate::chunk::CompressionError::ZstdError(
+            std::io::Error::other(e.to_string()),
+        ))
+    })?;
+    let mut decompressed = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut decompressed)
+        .map_err(ChunkReadingError::IoError)?;
+
+    let data: EasyRegionData = postcard::from_bytes(&decompressed).map_err(|e| {
+        ChunkReadingError::ParsingError(crate::chunk::ChunkParsingError::ErrorDeserializingChunk(
+            e.to_string(),
+        ))
+    })?;
+
+    if !data.is_consistent() {
+        return Err(ChunkReadingError::InvalidHeader);
+    }
+    Ok(data)
+}
+
 // ─── ChunkSerializer implementation ────────────────────────────────────
 
 pub struct EasyWorldFile<D> {
     data: EasyRegionData,
+    /// Set on the first actual mutation; a clean region skips the
+    /// whole-region recompress + rewrite entirely on flush.
+    dirty: std::sync::atomic::AtomicBool,
     _phantom: PhantomData<D>,
 }
 
@@ -213,6 +274,7 @@ impl<D> Default for EasyWorldFile<D> {
     fn default() -> Self {
         Self {
             data: EasyRegionData::new(0, 0),
+            dirty: std::sync::atomic::AtomicBool::new(false),
             _phantom: PhantomData,
         }
     }
@@ -232,11 +294,19 @@ where
         format!("r.{region_x}.{region_z}.easy")
     }
 
-    fn should_write(&self, _is_watched: bool) -> bool {
-        true
+    fn should_write(&self, is_watched: bool) -> bool {
+        // Watched regions defer to the unload/unwatch flush, like Anvil.
+        !is_watched
     }
 
     async fn write(&self, backend: &Self::WriteBackend) -> Result<(), std::io::Error> {
+        // A region that was never mutated has nothing to say: skip the
+        // whole-region recompress and leave the on-disk file untouched.
+        if !self.dirty.load(std::sync::atomic::Ordering::Acquire) {
+            trace!("EasyWorld v2: skipping clean region {}", backend.display());
+            return Ok(());
+        }
+
         let serialized = postcard::to_allocvec(&self.data)
             .map_err(|e| std::io::Error::other(format!("postcard serialize: {e}")))?;
         let raw_len = serialized.len();
@@ -255,31 +325,24 @@ where
             backend.display(),
         );
 
-        tokio::fs::write(backend, compressed).await
+        // Atomic replace: write a temp file, fsync, then rename over the
+        // target so a crash mid-write can never truncate the region.
+        let tmp = backend.with_extension("easy.tmp");
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        tokio::io::AsyncWriteExt::write_all(&mut file, &compressed).await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&tmp, backend).await?;
+        self.dirty
+            .store(false, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 
     fn read(r: Bytes) -> Result<Self, ChunkReadingError> {
-        let mut decoder = StreamingDecoder::new(&r[..]).map_err(|e| {
-            ChunkReadingError::Compression(crate::chunk::CompressionError::ZstdError(
-                std::io::Error::other(e.to_string()),
-            ))
-        })?;
-        let mut decompressed = Vec::new();
-        std::io::Read::read_to_end(&mut decoder, &mut decompressed)
-            .map_err(ChunkReadingError::IoError)?;
-
-        let data: EasyRegionData = postcard::from_bytes(&decompressed).map_err(|e| {
-            ChunkReadingError::ParsingError(
-                crate::chunk::ChunkParsingError::ErrorDeserializingChunk(e.to_string()),
-            )
-        })?;
-
-        if !data.is_consistent() {
-            return Err(ChunkReadingError::InvalidHeader);
-        }
-
+        let data = decode_region_bytes(&r)?;
         Ok(Self {
             data,
+            dirty: std::sync::atomic::AtomicBool::new(false),
             _phantom: PhantomData,
         })
     }
@@ -305,7 +368,9 @@ where
             trace!("EasyWorld: pruning empty chunk ({x},{z}) index {index}");
             // Remove any previously stored version, otherwise a chunk that was
             // mined out to all air would resurrect its old contents on reload.
-            self.data.remove_chunk(index);
+            if self.data.remove_chunk(index) {
+                self.dirty.store(true, std::sync::atomic::Ordering::Release);
+            }
             return Ok(());
         }
 
@@ -315,6 +380,7 @@ where
             .map_err(|e| ChunkWritingError::ChunkSerializingError(e.to_string()))?;
 
         self.data.upsert_chunk(index, &bytes);
+        self.dirty.store(true, std::sync::atomic::Ordering::Release);
 
         Ok(())
     }
@@ -324,13 +390,15 @@ where
         chunks: Vec<Vector2<i32>>,
         stream: tokio::sync::mpsc::Sender<LoadedData<Self::Data, ChunkReadingError>>,
     ) {
+        // One O(1024) pass, then O(1) per requested chunk.
+        let spans = self.data.chunk_spans();
         for pos in chunks {
             let rel_x = pos.x.rem_euclid(32);
             let rel_z = pos.y.rem_euclid(32);
-            let index = (rel_x + rel_z * 32) as u32;
+            let index = (rel_x + rel_z * 32) as usize;
 
-            if let Some(raw_bytes) = self.data.get_chunk_bytes(index) {
-                let bytes = Bytes::from(raw_bytes);
+            if let Some((offset, size)) = spans[index] {
+                let bytes = Bytes::copy_from_slice(&self.data.chunks_data[offset..offset + size]);
                 match D::from_bytes(&bytes, pos) {
                     Ok(data) => {
                         let _ = stream.send(LoadedData::Loaded(data)).await;
@@ -348,16 +416,21 @@ where
 
 impl<D: 'static> EasyWorldFile<D> {
     /// Try to prune: returns `true` if the chunk should be skipped.
-    /// Uses `Any` downcasting so this compiles for both `ChunkData` and `ChunkEntityData`.
     fn try_prune(chunk_data: &D) -> bool {
-        // SAFETY: We only downcast to ChunkData; if D is ChunkEntityData, this is a no-op.
-        let any = chunk_data as &dyn std::any::Any;
-        if let Some(chunk) = any.downcast_ref::<crate::chunk::ChunkData>() {
-            return is_prunable_chunk(chunk);
-        }
-        // For ChunkEntityData, never prune (entities are always meaningful).
-        false
+        try_prune_chunk_any(chunk_data)
     }
+}
+
+/// Returns `true` when the (type-erased) chunk should be pruned from
+/// storage. Uses `Any` downcasting so it compiles for both `ChunkData` and
+/// `ChunkEntityData`; only all-air `ChunkData` is ever pruned.
+pub(crate) fn try_prune_chunk_any<D: 'static>(chunk_data: &D) -> bool {
+    let any = chunk_data as &dyn std::any::Any;
+    if let Some(chunk) = any.downcast_ref::<crate::chunk::ChunkData>() {
+        return is_prunable_chunk(chunk);
+    }
+    // For ChunkEntityData, never prune (entities are always meaningful).
+    false
 }
 
 #[cfg(test)]
@@ -418,6 +491,26 @@ mod tests {
         assert_eq!(back.region_z, 7);
         assert_eq!(back.get_chunk_bytes(0).unwrap(), vec![42u8; 16]);
         assert_eq!(back.get_chunk_bytes(1023).unwrap(), vec![43u8; 32]);
+    }
+
+    #[test]
+    fn spans_agree_with_lookup() {
+        let mut r = EasyRegionData::new(0, 0);
+        r.upsert_chunk(900, &[9u8; 10]);
+        r.upsert_chunk(300, &[3u8; 7]);
+        r.upsert_chunk(5, &[5u8; 4]);
+        let spans = r.chunk_spans();
+        for i in 0..1024u32 {
+            match (spans[i as usize], r.get_chunk_bytes(i)) {
+                (Some((offset, size)), Some(bytes)) => {
+                    assert_eq!(&r.chunks_data[offset..offset + size], &bytes[..]);
+                }
+                (None, None) => {}
+                _ => panic!("span/lookup disagree at index {i}"),
+            }
+        }
+        let stored: Vec<u32> = r.stored_chunks().map(|(i, _)| i).collect();
+        assert_eq!(stored, vec![5, 300, 900]);
     }
 
     #[test]

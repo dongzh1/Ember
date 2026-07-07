@@ -95,6 +95,31 @@ max_cached_regions = 32    # LRU cap on resident decompressed regions (memory bo
 - **read_only** — never writes; safe on any number of servers simultaneously. Great for lobby
   displays, spectator copies, or dungeon templates.
 
+```toml
+# Per-chunk-group zstd (.ezs files) — minimal write cost for write-heavy worlds
+[world.chunk]
+type = "easy_shard"
+group_chunks = 1           # chunks per compression unit (1 = cheapest writes, 1024 = best ratio)
+```
+
+### Per-world configuration (`ember-world.toml`)
+
+Drop an `ember-world.toml` into a world's folder to override the global `[world]` settings for
+that world only — hub, resource, personal and dungeon worlds can each use their own storage
+format and residency policy on one server:
+
+```toml
+archetype = "hub"          # default | personal | hub | resource | dungeon
+residency = "auto"         # auto (small worlds stay fully in RAM) | full | lazy
+autosave_ticks = 24000
+
+[chunk]                    # any [world.chunk] value works here
+type = "easy"
+```
+
+With `residency = "auto"`, worlds of one region (512×512) are prewarmed and served entirely
+from memory; `hub`/`dungeon` archetypes stay resident up to four regions (1024×1024).
+
 ### Dynamic worlds
 
 ```
@@ -103,10 +128,28 @@ max_cached_regions = 32    # LRU cap on resident decompressed regions (memory bo
 /world unload <name>               # evict players to spawn, save, and unload
 /world tp <name>                   # teleport yourself to a world's spawn
 /world clone <source> <dest>       # copy a world to a new name and load it (SlimeWorld-style)
+/world prewarm <name>              # load a world's stored regions into memory
 ```
 
 Permission: `ember:command.world` (OP level 3 by default). Loading/unloading and cloning never
 stall the tick loop — saves run in the background.
+
+### Dungeon instances
+
+Run any number of throwaway copies of one template world — the template (an `easy` or
+`easy_mysql` world) is decompressed into memory once and shared by every instance; per-instance
+changes live in RAM and are discarded on stop:
+
+```
+/dungeon prewarm <template>        # load the template into shared memory
+/dungeon start <template>          # open a new instance world and teleport in
+/dungeon stop <instance>           # unload an instance, discarding its changes
+/dungeon list                      # resident templates + running instances
+/dungeon reload <template>         # drop the cached template (next start reloads it)
+```
+
+Permission: `ember:command.dungeon` (OP level 3 by default). Starting an instance copies no
+data (it shares the template's memory), so instances open and close instantly.
 
 ### Plugin permissions
 

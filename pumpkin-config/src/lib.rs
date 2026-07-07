@@ -31,6 +31,9 @@ mod commands;
 
 mod chat;
 pub mod chunk;
+// EMBER start - per-world config sidecar
+pub mod ember_world;
+// EMBER end
 pub mod lighting;
 pub mod op;
 

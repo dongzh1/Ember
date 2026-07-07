@@ -6,6 +6,7 @@
 //   /world tp <name>           - teleport yourself to a world's spawn
 //   /world clone <src> <dst>   - SlimeWorld-style clone: copy a world's
 //                                data under a new name and load it
+//   /world prewarm <name>      - load a world's stored regions into memory
 
 use std::path::Path;
 use std::sync::Arc;
@@ -234,7 +235,13 @@ impl CommandExecutor for WorldCloneExecutor {
 
             // easy_mysql keeps region data in the database — clone the rows
             // to the new key as well (in-database, no data transfer).
-            if let ChunkConfig::EasyMysql(cfg) = &server.advanced_config.world.chunk {
+            // Resolve the SOURCE world's effective config (its sidecar may
+            // select a different backend than the global one).
+            let src_level_config = pumpkin_config::ember_world::resolve_level_config(
+                &server.advanced_config.world,
+                &src_dir,
+            );
+            if let ChunkConfig::EasyMysql(cfg) = &src_level_config.chunk {
                 match pumpkin_world::chunk::easy_mysql::clone_world_data(cfg, &src_dir, &dst_dir)
                     .await
                 {
@@ -260,6 +267,37 @@ impl CommandExecutor for WorldCloneExecutor {
                 TextComponent::text(format!(
                     "World '{src}' cloned to '{}' and loaded.",
                     world.get_world_name(),
+                ))
+                .color_named(NamedColor::Green),
+            )
+            .await;
+            Ok(1)
+        })
+    }
+}
+
+struct WorldPrewarmExecutor;
+
+impl CommandExecutor for WorldPrewarmExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let Some(world) = find_world(context.server(), &name) else {
+                feedback(context, err_text(format!("World '{name}' is not loaded."))).await;
+                return Ok(0);
+            };
+
+            // Manual prewarm is explicit operator intent: allow up to the
+            // hard safety cap regardless of the sidecar's automatic policy.
+            let cap = pumpkin_config::ember_world::MAX_RESIDENT_REGIONS;
+            let level = world.level.clone();
+            tokio::spawn(async move {
+                level.prewarm_storage(cap).await;
+            });
+            feedback(
+                context,
+                TextComponent::text(format!(
+                    "Prewarming world '{name}' in the background (up to {cap} regions)."
                 ))
                 .color_named(NamedColor::Green),
             )
@@ -320,6 +358,9 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                     argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldTpExecutor),
                 ),
             )
+            .then(literal("prewarm").then(
+                argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldPrewarmExecutor),
+            ))
             .then(
                 literal("clone").then(argument(ARG_SRC, StringArgumentType::SingleWord).then(
                     argument(ARG_DST, StringArgumentType::SingleWord).executes(WorldCloneExecutor),

@@ -370,7 +370,18 @@ where
                         watchers.get(&path).is_some_and(|&c| c > 0)
                     };
 
-                    if !is_watched {
+                    // EMBER start - per-format watched-flush policy
+                    // Formats may opt into flushing while still watched
+                    // (EasyShard's incremental durable autosave); everyone
+                    // else keeps the defer-until-unwatch behaviour
+                    // (`should_write(true)` is `false` for them).
+                    let should_flush = if is_watched {
+                        chunk_serializer.read().await.should_write(true)
+                    } else {
+                        true
+                    };
+
+                    if should_flush {
                         // A read-lock suffices for `write()` since we have already
                         // applied all mutations above.
                         {
@@ -383,12 +394,15 @@ where
                             // Read-lock released here.
                         };
 
-                        // Drop our handle so `can_remove` may succeed.
-                        drop(chunk_serializer);
+                        if !is_watched {
+                            // Drop our handle so `can_remove` may succeed.
+                            drop(chunk_serializer);
 
-                        // Evict the cache entry when no longer needed.
-                        self.maybe_evict(&path).await;
+                            // Evict the cache entry when no longer needed.
+                            self.maybe_evict(&path).await;
+                        }
                     }
+                    // EMBER end
 
                     Ok(())
                 });

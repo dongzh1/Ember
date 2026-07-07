@@ -46,9 +46,14 @@ where
         format!("r.{region_x}.{region_z}.pump")
     }
 
-    fn should_write(&self, _is_watched: bool) -> bool {
-        true
+    // EMBER start - watched-flush policy
+    // `should_write` was dead code upstream; the file manager now consults
+    // it for watched regions. `!is_watched` preserves Pump's original
+    // defer-until-unwatch behaviour.
+    fn should_write(&self, is_watched: bool) -> bool {
+        !is_watched
     }
+    // EMBER end
 
     async fn write(&self, backend: &Self::WriteBackend) -> Result<(), std::io::Error> {
         let mut bytes = Vec::new();

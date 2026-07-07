@@ -89,6 +89,37 @@ where
 
     /// Ensure that all ongoing operations are finished
     fn block_and_await_ongoing_tasks(&self) -> BoxFuture<'_, ()>;
+
+    // EMBER start - region enumeration for prewarm/residency
+    /// Lists the stored regions of this world (for prewarming small worlds
+    /// into memory). The default scans the region folder for files named
+    /// `r.<x>.<z>.<ext>`; database-backed stores override this.
+    fn list_regions<'a>(&'a self, folder: &'a LevelFolder) -> BoxFuture<'a, Vec<(i32, i32)>> {
+        Box::pin(async move {
+            let mut out = Vec::new();
+            let Ok(mut dir) = tokio::fs::read_dir(&folder.region_folder).await else {
+                return out;
+            };
+            while let Ok(Some(entry)) = dir.next_entry().await {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                let mut parts = name.split('.');
+                if parts.next() != Some("r") {
+                    continue;
+                }
+                let (Some(x), Some(z)) = (parts.next(), parts.next()) else {
+                    continue;
+                };
+                if let (Ok(x), Ok(z)) = (x.parse::<i32>(), z.parse::<i32>()) {
+                    out.push((x, z));
+                }
+            }
+            out.sort_unstable();
+            out.dedup();
+            out
+        })
+    }
+    // EMBER end
 }
 
 /// Trait to serialize and deserialize the chunk data to and from bytes.

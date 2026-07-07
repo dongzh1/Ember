@@ -1,8 +1,10 @@
 use crate::chunk::format::linear::LinearV2File;
 use crate::chunk::format::pump::PumpFile;
 // EMBER start - easyworld imports
+use crate::chunk::easy_instance::{DiscardEntityIO, EasyInstanceStorage};
 use crate::chunk::easy_mysql::EasyMysqlStorage;
 use crate::chunk::format::easy::EasyWorldFile;
+use crate::chunk::format::easy_shard::EasyShardFile;
 // EMBER end
 use crate::chunk_system::{ChunkListener, ChunkLoading, GenerationSchedule, LevelChannel};
 use crate::generation::generator::VanillaGenerator;
@@ -129,6 +131,9 @@ pub struct LevelFolder {
 
 impl Level {
     #[must_use]
+    // EMBER start - the easyworld saver match arms push this over the lint budget
+    #[expect(clippy::too_many_lines)]
+    // EMBER end
     pub fn from_root_folder(
         level_config: &LevelConfig,
         root_folder: PathBuf,
@@ -159,6 +164,11 @@ impl Level {
         });
 
         let seed = Seed(seed as u64);
+        // EMBER start - easyworld instance: dimension geometry for void chunks
+        let dim_path = format!("{namespace}/{name}");
+        let dim_min_y = dimension.min_y;
+        let dim_height = dimension.height;
+        // EMBER end
         let world_gen = get_world_gen(seed, dimension).into();
 
         let chunk_saver: Arc<dyn FileIO<Data = SyncChunk>> = match &level_config.chunk {
@@ -170,6 +180,12 @@ impl Level {
             // EMBER start - easyworld format
             ChunkConfig::Easy => Arc::new(ChunkFileManager::<EasyWorldFile<ChunkData>>::new(())),
             ChunkConfig::EasyMysql(config) => Arc::new(EasyMysqlStorage::new(config)),
+            ChunkConfig::EasyShard(config) => {
+                Arc::new(ChunkFileManager::<EasyShardFile<ChunkData>>::new(*config))
+            }
+            ChunkConfig::EasyInstance(config) => Arc::new(EasyInstanceStorage::new(
+                config, dim_path, dim_min_y, dim_height,
+            )),
             // EMBER end
         };
         let entity_saver: Arc<dyn FileIO<Data = SyncEntityChunk>> = match &level_config.chunk {
@@ -184,6 +200,14 @@ impl Level {
             ChunkConfig::Easy | ChunkConfig::EasyMysql(_) => {
                 // Entity data uses file-based .easy storage even in MySQL mode.
                 Arc::new(ChunkFileManager::<EasyWorldFile<ChunkEntityData>>::new(()))
+            }
+            ChunkConfig::EasyShard(config) => Arc::new(ChunkFileManager::<
+                EasyShardFile<ChunkEntityData>,
+            >::new(*config)),
+            ChunkConfig::EasyInstance(_) => {
+                // Instances never persist entities; a fall-through to a
+                // file-backed saver would write into the instance folder.
+                Arc::new(DiscardEntityIO)
             } // EMBER end
         };
 
@@ -366,6 +390,47 @@ impl Level {
     pub fn loaded_chunk_count(&self) -> usize {
         self.loaded_chunks.len()
     }
+
+    // EMBER start - world prewarm (residency)
+    /// Loads up to `max_regions` stored regions into the storage layer's
+    /// cache, so a small world serves its first players with zero cold-load
+    /// hitches (hub teleport storms, freshly started dungeon instances).
+    /// Runs entirely off the tick loop; call from a background task.
+    pub async fn prewarm_storage(&self, max_regions: usize) -> usize {
+        if max_regions == 0 {
+            return 0;
+        }
+        let regions = self.chunk_saver.list_regions(&self.level_folder).await;
+        let total = regions.len();
+        if total == 0 {
+            return 0;
+        }
+        if total > max_regions {
+            warn!(
+                "Prewarm of {} covers {max_regions} of {total} regions (cap reached)",
+                self.level_folder.root_folder.display(),
+            );
+        }
+        let mut warmed = 0usize;
+        for (rx, rz) in regions.into_iter().take(max_regions) {
+            // Fetching one chunk per region is enough: the storage layer
+            // loads and caches the whole region to serve it.
+            let coords = [Vector2::new(rx << 5, rz << 5)];
+            let (send, mut recv) = mpsc::channel(1);
+            let fetch = self
+                .chunk_saver
+                .fetch_chunks(&self.level_folder, &coords, send);
+            let drain = async move { while recv.recv().await.is_some() {} };
+            tokio::join!(fetch, drain);
+            warmed += 1;
+        }
+        info!(
+            "Prewarmed {warmed}/{total} regions of {}",
+            self.level_folder.root_folder.display(),
+        );
+        warmed
+    }
+    // EMBER end
 
     pub fn list_cached(&self) {
         for entry in self.loaded_chunks.iter() {

@@ -55,6 +55,14 @@ const CREATE_TABLE: &str = concat!(
 const SELECT_REGION: &str =
     "SELECT data FROM easyworld_regions WHERE world_key = ? AND region_x = ? AND region_z = ?";
 
+/// All stored regions of one world (template loading / bulk hydrate).
+const SELECT_ALL_REGIONS: &str =
+    "SELECT region_x, region_z, data FROM easyworld_regions WHERE world_key = ?";
+
+/// Region coordinates only (cheap residency/prewarm enumeration).
+const SELECT_REGION_LIST: &str =
+    "SELECT region_x, region_z FROM easyworld_regions WHERE world_key = ?";
+
 const UPSERT_REGION: &str = concat!(
     "INSERT INTO easyworld_regions (world_key, region_x, region_z, data) ",
     "VALUES (?, ?, ?, ?) ",
@@ -118,28 +126,8 @@ fn serialize_region(region: &EasyRegionData) -> Result<Vec<u8>, ChunkWritingErro
 }
 
 fn deserialize_region(data: &[u8]) -> Result<EasyRegionData, ChunkReadingError> {
-    let mut decoder = ruzstd::decoding::StreamingDecoder::new(data).map_err(|e| {
-        ChunkReadingError::Compression(crate::chunk::CompressionError::ZstdError(
-            std::io::Error::other(e.to_string()),
-        ))
-    })?;
-    let mut decompressed = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut decompressed)
-        .map_err(ChunkReadingError::IoError)?;
-    let region: EasyRegionData = postcard::from_bytes(&decompressed).map_err(|e| {
-        ChunkReadingError::ParsingError(crate::chunk::ChunkParsingError::ErrorDeserializingChunk(
-            e.to_string(),
-        ))
-    })?;
-    // Reject corrupted rows up front instead of panicking on a bad slice later.
-    if !region.is_consistent() {
-        return Err(ChunkReadingError::ParsingError(
-            crate::chunk::ChunkParsingError::ErrorDeserializingChunk(
-                "inconsistent easyworld region data".to_string(),
-            ),
-        ));
-    }
-    Ok(region)
+    // Shared decode path (decompress + postcard + consistency check).
+    crate::chunk::format::easy::decode_region_bytes(data)
 }
 
 // ─── MySQL pool wrapper ────────────────────────────────────────────────
@@ -377,6 +365,35 @@ pub async fn clone_world_data(
     Ok(res.rows_affected())
 }
 
+/// Loads every stored region of a world from the database in one query.
+/// Used to build shared dungeon-instance templates; the decompression runs
+/// on the blocking pool.
+pub(crate) async fn load_world_regions(
+    config: &EasyMysqlConfig,
+    folder_path: &std::path::Path,
+) -> Result<Vec<EasyRegionData>, String> {
+    let world_key = world_key_for(config, folder_path);
+    let pool = sqlx::mysql::MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&config.url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(i32, i32, Vec<u8>)> = sqlx::query_as(SELECT_ALL_REGIONS)
+        .bind(&world_key)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    pool.close().await;
+
+    tokio::task::spawn_blocking(move || {
+        rows.into_iter()
+            .map(|(_, _, data)| deserialize_region(&data).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ─── FileIO implementation ─────────────────────────────────────────────
 
 /// (world key, region x, region z)
@@ -396,33 +413,44 @@ const PREFETCH_MARGIN: i32 = 4;
 /// least recently touched region (it reloads from the database on demand).
 ///
 /// Regions are held behind `Arc` so a cache hit shares the buffer instead
-/// of deep-copying it on every fetch.
+/// of deep-copying it on every fetch. Recency is tracked with atomics so a
+/// cache hit needs only a shared borrow — many players loading chunks of
+/// the same world (hub teleport storms) no longer serialize on the outer
+/// `RwLock`'s writer path.
 struct RegionCache {
-    map: BTreeMap<RegionKey, (Arc<EasyRegionData>, u64)>,
-    tick: u64,
+    map: BTreeMap<RegionKey, CacheEntry>,
+    tick: std::sync::atomic::AtomicU64,
     cap: usize,
+}
+
+struct CacheEntry {
+    region: Arc<EasyRegionData>,
+    last_used: std::sync::atomic::AtomicU64,
 }
 
 impl RegionCache {
     fn new(cap: usize) -> Self {
         Self {
             map: BTreeMap::new(),
-            tick: 0,
+            tick: std::sync::atomic::AtomicU64::new(0),
             cap: cap.max(4),
         }
     }
 
-    fn get(&mut self, key: &RegionKey) -> Option<Arc<EasyRegionData>> {
-        self.tick += 1;
-        let tick = self.tick;
-        self.map.get_mut(key).map(|(region, last)| {
-            *last = tick;
-            region.clone()
-        })
+    /// Cache hit under a shared borrow (callers hold only the read lock).
+    fn get(&self, key: &RegionKey) -> Option<Arc<EasyRegionData>> {
+        let entry = self.map.get(key)?;
+        let tick = self.tick.fetch_add(1, Ordering::Relaxed) + 1;
+        entry.last_used.store(tick, Ordering::Relaxed);
+        Some(entry.region.clone())
     }
 
     fn contains(&self, key: &RegionKey) -> bool {
         self.map.contains_key(key)
+    }
+
+    fn next_tick(&self) -> std::sync::atomic::AtomicU64 {
+        std::sync::atomic::AtomicU64::new(self.tick.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
     fn evict_to_cap(&mut self) {
@@ -430,7 +458,7 @@ impl RegionCache {
             let Some(oldest) = self
                 .map
                 .iter()
-                .min_by_key(|(_, (_, last))| *last)
+                .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
                 .map(|(k, _)| k.clone())
             else {
                 break;
@@ -441,8 +469,8 @@ impl RegionCache {
 
     /// Authoritative insert (post-save): always replaces the entry.
     fn put(&mut self, key: RegionKey, region: Arc<EasyRegionData>) {
-        self.tick += 1;
-        self.map.insert(key, (region, self.tick));
+        let last_used = self.next_tick();
+        self.map.insert(key, CacheEntry { region, last_used });
         self.evict_to_cap();
     }
 
@@ -452,8 +480,8 @@ impl RegionCache {
         if self.map.contains_key(&key) {
             return;
         }
-        self.tick += 1;
-        self.map.insert(key, (region, self.tick));
+        let last_used = self.next_tick();
+        self.map.insert(key, CacheEntry { region, last_used });
         self.evict_to_cap();
     }
 
@@ -681,7 +709,8 @@ impl EasyMysqlStorage {
         rz: i32,
     ) -> Result<Arc<EasyRegionData>, ChunkReadingError> {
         let key = (world_key.to_string(), rx, rz);
-        let cached = self.region_cache.write().await.get(&key);
+        // Hit path only needs the read lock (recency is atomic).
+        let cached = self.region_cache.read().await.get(&key);
         if let Some(region) = cached {
             return Ok(region);
         }
@@ -982,6 +1011,21 @@ impl FileIO for EasyMysqlStorage {
     fn block_and_await_ongoing_tasks(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             trace!("EasyMysqlStorage: block_and_await_ongoing_tasks (no-op)");
+        })
+    }
+
+    /// Region list comes from the database, not the (empty) region folder.
+    fn list_regions<'a>(&'a self, folder: &'a LevelFolder) -> BoxFuture<'a, Vec<(i32, i32)>> {
+        Box::pin(async move {
+            let world_key = self.world_key(folder);
+            let Ok(pool) = self.ensure_pool().await else {
+                return Vec::new();
+            };
+            sqlx::query_as(SELECT_REGION_LIST)
+                .bind(&world_key)
+                .fetch_all(&pool.pool)
+                .await
+                .unwrap_or_default()
         })
     }
 }

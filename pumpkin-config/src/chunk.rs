@@ -26,6 +26,16 @@ pub enum ChunkConfig {
     /// `EasyWorld` format stored in `MySQL` database.
     #[serde(rename = "easy_mysql")]
     EasyMysql(EasyMysqlConfig),
+    /// `EasyWorld` shard format (.ezs files): every chunk group is its own
+    /// zstd blob, so a single edit recompresses one group instead of the
+    /// whole region. Best for write-heavy worlds (resource worlds).
+    #[serde(rename = "easy_shard")]
+    EasyShard(EasyShardConfig),
+    /// `EasyWorld` ephemeral instance storage: any number of worlds share
+    /// one immutable in-memory template; per-instance edits live in RAM and
+    /// are discarded on unload. Best for dungeon/minigame instances.
+    #[serde(rename = "easy_instance")]
+    EasyInstance(EasyInstanceConfig),
     // EMBER end
 }
 
@@ -69,6 +79,51 @@ pub struct EasyMysqlConfig {
 
 const fn default_max_cached_regions() -> usize {
     32
+}
+
+/// Configuration for the `EasyWorld` shard format.
+#[derive(Deserialize, Serialize, Clone, Copy)]
+#[serde(default)]
+pub struct EasyShardConfig {
+    /// Number of chunks per compression unit. `1` (default) compresses each
+    /// chunk on its own — cheapest writes, ideal for resource worlds.
+    /// Larger groups (up to `1024` = whole region) trade write cost for a
+    /// better compression ratio. Clamped to `1..=1024` at load time.
+    pub group_chunks: u16,
+}
+
+impl Default for EasyShardConfig {
+    fn default() -> Self {
+        Self { group_chunks: 1 }
+    }
+}
+
+/// Configuration for `EasyWorld` ephemeral instance storage.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct EasyInstanceConfig {
+    /// Template identifier. Instances created with the same identifier share
+    /// one immutable in-memory copy of the template's region data.
+    pub template: String,
+    /// Where the template's region data is loaded from.
+    pub source: InstanceTemplateSource,
+}
+
+/// Source of an `EasyWorld` instance template.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(tag = "kind")]
+pub enum InstanceTemplateSource {
+    /// A world folder containing `.easy` region files
+    /// (`<path>/dimensions/<ns>/<name>/region/r.X.Z.easy`).
+    #[serde(rename = "file")]
+    File { path: String },
+    /// An `EasyWorld` `MySQL` database; the world key is derived from
+    /// `path` exactly like a live `easy_mysql` world.
+    #[serde(rename = "mysql")]
+    Mysql {
+        path: String,
+        #[serde(flatten)]
+        config: EasyMysqlConfig,
+    },
 }
 
 /// Access mode for a shared `EasyWorld` database.

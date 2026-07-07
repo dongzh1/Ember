@@ -400,6 +400,22 @@ impl Server {
     }
 
     pub async fn create_world(self: &Arc<Self>, name: String, dimension: Dimension) -> Arc<World> {
+        // EMBER start - delegate to create_world_with (per-world config)
+        self.create_world_with(name, dimension, None).await
+        // EMBER end
+    }
+
+    // EMBER start - create_world_with: explicit per-world LevelConfig
+    /// Like [`Self::create_world`], but an explicit [`LevelConfig`] replaces
+    /// the global configuration for this world — used by ephemeral dungeon
+    /// instances. After creation, a world with an `ember-world.toml`
+    /// sidecar is prewarmed in the background per its residency policy.
+    pub async fn create_world_with(
+        self: &Arc<Self>,
+        name: String,
+        dimension: Dimension,
+        level_config: Option<pumpkin_config::world::LevelConfig>,
+    ) -> Arc<World> {
         {
             let worlds = self.worlds.load();
             if let Some(world) = worlds
@@ -412,12 +428,13 @@ impl Server {
 
         let server = self.clone();
         let name_clone = name.clone();
-        tokio::task::spawn_blocking(move || {
+        let world = tokio::task::spawn_blocking(move || {
             let world_path = server.basic_config.get_world_path().join(name_clone);
             let registry = server.block_registry.clone();
             let l_info = server.level_info.clone();
             let weak = Arc::downgrade(&server);
-            let config = Arc::new(server.advanced_config.world.clone());
+            let config =
+                Arc::new(level_config.unwrap_or_else(|| server.advanced_config.world.clone()));
             let seed = server.level_info.load().world_gen_settings.seed;
 
             // TODO: gen_pool should be reused
@@ -440,8 +457,24 @@ impl Server {
             world
         })
         .await
-        .expect("World creation panicked")
+        .expect("World creation panicked");
+
+        // Residency policy: sidecar-gated background prewarm. Worlds without
+        // a sidecar behave exactly as before.
+        let world_path = self.basic_config.get_world_path().join(&name);
+        if let Some(sidecar) = pumpkin_config::ember_world::EmberWorldConfig::load(&world_path) {
+            let cap = sidecar.resident_region_cap();
+            if cap > 0 {
+                let level = world.level.clone();
+                tokio::spawn(async move {
+                    level.prewarm_storage(cap).await;
+                });
+            }
+        }
+
+        world
     }
+    // EMBER end
 
     // EMBER start - dynamic world unload
     /// Unloads a world at runtime: evacuates its players to `fallback`,
