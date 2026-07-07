@@ -79,7 +79,7 @@ impl ActiveTargetGoal {
         self.target = target;
     }
 
-    fn find_closest_target(&mut self, mob: &MobEntity) {
+    async fn find_closest_target(&mut self, mob: &MobEntity) {
         let follow_range = mob
             .living_entity
             .get_attribute_value(&Attributes::FOLLOW_RANGE);
@@ -93,30 +93,26 @@ impl ActiveTargetGoal {
         let mut search_pos = mob.living_entity.entity.pos.load();
         search_pos.y += mob.living_entity.entity.entity_dimension.load().eye_height as f64;
 
-        if self.target_type == &EntityType::PLAYER {
-            let potential_player = world
+        let potential_entity = if self.target_type == &EntityType::PLAYER {
+            world
                 .get_closest_player(search_pos, follow_range)
-                .map(|p: Arc<Player>| p as Arc<dyn EntityBase>);
-
-            if let Some(potential_entity) = potential_player
-                && let Some(living) = potential_entity.get_living_entity()
-                && self
-                    .target_predicate
-                    .test(&world, Some(&mob.living_entity), living)
-            {
-                self.target = Some(potential_entity);
-                return;
-            }
+                .map(|p: Arc<Player>| p as Arc<dyn EntityBase>)
         } else {
-            let potential_entity =
-                world.get_closest_entity(search_pos, follow_range, Some(&[self.target_type]));
+            world.get_closest_entity(search_pos, follow_range, Some(&[self.target_type]))
+        };
 
-            if let Some(potential_entity) = potential_entity
-                && let Some(living) = potential_entity.get_living_entity()
-                && self
-                    .target_predicate
-                    .test(&world, Some(&mob.living_entity), living)
-            {
+        if let Some(potential_entity) = potential_entity
+            && let Some(living) = potential_entity.get_living_entity()
+            && self
+                .target_predicate
+                .test(&world, Some(&mob.living_entity), living)
+        {
+            // Line-of-sight gate: a mob cannot acquire a target it cannot
+            // see. This is the visibility check `TargetPredicate::test` omits
+            // (it is sync; raycasting is not).
+            let visible = !self.target_predicate.respects_visibility
+                || world.can_see(&mob.living_entity, living).await;
+            if visible {
                 self.target = Some(potential_entity);
                 return;
             }
@@ -133,7 +129,7 @@ impl Goal for ActiveTargetGoal {
             {
                 return false;
             }
-            self.find_closest_target(mob.get_mob_entity());
+            self.find_closest_target(mob.get_mob_entity()).await;
             self.target.is_some()
         })
     }

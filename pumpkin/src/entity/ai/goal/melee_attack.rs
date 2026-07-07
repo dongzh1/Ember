@@ -189,13 +189,24 @@ impl Goal for MeleeAttackGoal {
 
             self.cooldown = (self.cooldown - 1).max(0);
 
-            // TODO: Add visibility check (canSee) - requires world raycast
-            if self.cooldown <= 0
+            // Only attack a target in range that the mob can actually see, so
+            // mobs no longer hit through walls.
+            let in_range = self.cooldown <= 0
                 && mob
                     .get_mob_entity()
                     .is_in_attack_range(target.as_ref())
-                    .await
-            {
+                    .await;
+            let can_see = match target.get_living_entity() {
+                Some(target_living) => {
+                    let world = mob.get_entity().world.load();
+                    world
+                        .can_see(&mob.get_mob_entity().living_entity, target_living)
+                        .await
+                }
+                // Non-living targets have no eye position; skip the check.
+                None => true,
+            };
+            if in_range && can_see {
                 self.cooldown = self.get_max_cooldown();
                 mob.get_mob_entity().living_entity.swing_hand().await;
                 mob.get_mob_entity().try_attack(mob, target.as_ref()).await;

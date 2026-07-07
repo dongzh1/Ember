@@ -37,7 +37,7 @@ use crate::{
         {OnNeighborUpdateArgs, OnScheduledTickArgs},
     },
     command::client_suggestions,
-    entity::{Entity, EntityBase, player::Player, r#type::from_type},
+    entity::{Entity, EntityBase, living::LivingEntity, player::Player, r#type::from_type},
     error::PumpkinError,
     net::{ClientPlatform, java::JavaClient},
     plugin::{
@@ -3855,6 +3855,22 @@ impl World {
                     .then(|| (entity.get_entity().entity_uuid, entity.clone()))
             })
             .collect()
+    }
+
+    /// Whether `from` has an unobstructed line of sight to `to`, casting a
+    /// ray between their eye positions and stopping at the first solid block.
+    /// Used by targeting/attacking so mobs cannot see through walls.
+    pub async fn can_see(self: &Arc<Self>, from: &LivingEntity, to: &LivingEntity) -> bool {
+        let eye_pos = |living: &LivingEntity| {
+            let pos = living.entity.pos.load();
+            let eye_height = f64::from(living.entity.entity_dimension.load().eye_height);
+            Vector3::new(pos.x, pos.y + eye_height, pos.z)
+        };
+        self.raycast(eye_pos(from), eye_pos(to), async |block_pos, w| {
+            w.get_block_state(block_pos).is_solid()
+        })
+        .await
+        .is_none()
     }
 
     pub fn get_closest_player(&self, pos: Vector3<f64>, radius: f64) -> Option<Arc<Player>> {
