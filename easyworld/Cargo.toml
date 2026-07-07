@@ -1,0 +1,23 @@
+[package]
+name = "easyworld"
+description = "EasyWorld — a native Pumpkin plugin exposing reusable world management as a prerequisite library."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Native plugins are loaded as dynamic libraries by the Pumpkin plugin loader.
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+pumpkin = { path = "../pumpkin" }
+pumpkin-api-macros = { path = "../pumpkin-api-macros" }
+pumpkin-util.workspace = true
+pumpkin-protocol = { workspace = true, features = ["default"] }
+pumpkin-data = { workspace = true, features = ["default"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }
+
+[lints]
+workspace = true

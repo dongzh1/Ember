@@ -120,6 +120,9 @@ git push origin main
 | 世界生命周期事件 | `pumpkin/src/plugin/api/events/world/world_load.rs`、`world_unload.rs`、`world/mod.rs`、`pumpkin/src/server/mod.rs` | `WorldLoad`（世界上线后通知）和 `WorldUnload`（卸载前触发,**可取消**,在撤离玩家前）——插件可观察/否决世界创建与卸载。接入 `create_world_with`/`unload_world` |
 | clone 原语下沉 | `pumpkin/src/server/mod.rs`、`pumpkin/src/command/commands/world.rs` | `Server::clone_world(src,dst)` 成为可复用原语（文件递归拷 + easy_mysql 库内 `INSERT..SELECT` + 加载新世界,按源世界 resolved 配置判后端）;`/world clone` 命令收缩成薄壳。**服务端持有原语,业务留给命令/插件** |
 
+| easyworld 前置插件 | `easyworld/`（新 crate：`Cargo.toml`、`src/lib.rs`+`service.rs`+`commands.rs`+`dialog.rs`）、根 `Cargo.toml` members | 仓库**第一个 native 插件示例**。① `WorldService` 前置库(其他插件 `get_service::<WorldService>("easyworld")` 调 create_or_load/unload/clone/clone_readonly/delete/list);② `/ew list/create/load/unload/clone/clone-ro/delete/menu`(权限 `easyworld:command.manage`);③ `/ew menu` dialog 图形菜单(按钮点击经 `CustomClickActionEvent` 驱动 WorldService,操作后重渲染) |
+| 原生对话框 + 磁盘世界枚举 | `pumpkin/src/entity/player.rs`（`show_dialog`/`clear_dialog`）、`pumpkin/src/server/mod.rs`（`list_world_folders`、`delete_world`）、`pumpkin-world/src/chunk/easy_mysql.rs`（`delete_world_data`） | `Player::show_dialog`/`clear_dialog` 原生发服务端对话框(原来只有 WASM 有);`Server::list_world_folders` 枚举磁盘未加载世界;`delete_world` 删世界(文件夹+库行+锁)。前两者可 PR 上游 |
+
 （新增功能时更新此表。）
 
 ## 服务端 vs 插件边界（架构原则）
