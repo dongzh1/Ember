@@ -10,7 +10,6 @@
 //   /world convert <name> <fmt> - migrate an UNLOADED world's storage format
 //                                (anvil|linear|pump|easy|easy_shard)
 
-use std::path::Path;
 use std::sync::Arc;
 
 use pumpkin_config::chunk::ChunkConfig;
@@ -161,20 +160,6 @@ impl CommandExecutor for WorldUnloadExecutor {
     }
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let target = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), &target)?;
-        }
-    }
-    Ok(())
-}
-
 struct WorldCloneExecutor;
 
 impl CommandExecutor for WorldCloneExecutor {
@@ -184,96 +169,25 @@ impl CommandExecutor for WorldCloneExecutor {
             let dst = StringArgumentType::get(context, ARG_DST)?.to_string();
             let server = context.server().clone();
 
-            let Some(src_world) = find_world(&server, &src) else {
-                feedback(context, err_text(format!("World '{src}' is not loaded."))).await;
-                return Ok(0);
-            };
-            if find_world(&server, &dst).is_some() {
-                feedback(
-                    context,
-                    err_text(format!("World '{dst}' is already loaded.")),
-                )
-                .await;
-                return Ok(0);
-            }
-            if server.is_world_unloading(&dst) {
-                feedback(
-                    context,
-                    err_text(format!("World '{dst}' is still unloading, retry shortly.")),
-                )
-                .await;
-                return Ok(0);
-            }
-
-            let src_dir = src_world.level.level_folder.root_folder.clone();
-            let dst_dir = server.basic_config.get_world_path().join(&dst);
-            if dst_dir.exists() {
-                feedback(
-                    context,
-                    err_text(format!("Folder '{}' already exists.", dst_dir.display())),
-                )
-                .await;
-                return Ok(0);
-            }
-
-            // Copy any on-disk data (region files, level.dat, entities).
-            if src_dir.exists() {
-                let (src_copy, dst_copy) = (src_dir.clone(), dst_dir.clone());
-                let copied =
-                    tokio::task::spawn_blocking(move || copy_dir_recursive(&src_copy, &dst_copy))
-                        .await;
-                match copied {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        feedback(context, err_text(format!("File copy failed: {e}"))).await;
-                        return Ok(0);
-                    }
-                    Err(e) => {
-                        feedback(context, err_text(format!("File copy panicked: {e}"))).await;
-                        return Ok(0);
-                    }
+            // The clone primitive lives on Server so plugins share it.
+            match server.clone_world(&src, &dst).await {
+                Ok(world) => {
+                    feedback(
+                        context,
+                        TextComponent::text(format!(
+                            "World '{src}' cloned to '{}' and loaded.",
+                            world.get_world_name(),
+                        ))
+                        .color_named(NamedColor::Green),
+                    )
+                    .await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(format!("Cannot clone '{src}': {e}"))).await;
+                    Ok(0)
                 }
             }
-
-            // easy_mysql keeps region data in the database — clone the rows
-            // to the new key as well (in-database, no data transfer).
-            // Resolve the SOURCE world's effective config (its sidecar may
-            // select a different backend than the global one).
-            let src_level_config = pumpkin_config::ember_world::resolve_level_config(
-                &server.advanced_config.world,
-                &src_dir,
-            );
-            if let ChunkConfig::EasyMysql(cfg) = &src_level_config.chunk {
-                match pumpkin_world::chunk::easy_mysql::clone_world_data(cfg, &src_dir, &dst_dir)
-                    .await
-                {
-                    Ok(regions) => {
-                        feedback(
-                            context,
-                            TextComponent::text(format!("Cloned {regions} database regions.")),
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        feedback(context, err_text(format!("Database clone failed: {e}"))).await;
-                        return Ok(0);
-                    }
-                }
-            }
-
-            let world = server
-                .create_world(dst.clone(), src_world.dimension.clone())
-                .await;
-            feedback(
-                context,
-                TextComponent::text(format!(
-                    "World '{src}' cloned to '{}' and loaded.",
-                    world.get_world_name(),
-                ))
-                .color_named(NamedColor::Green),
-            )
-            .await;
-            Ok(1)
         })
     }
 }

@@ -487,6 +487,11 @@ impl Server {
             }
         }
 
+        // Notify plugins that a world came online (informational).
+        self.plugin_manager
+            .fire(crate::plugin::api::events::world::world_load::WorldLoad::new(world.clone()))
+            .await;
+
         world
     }
     // EMBER end
@@ -518,6 +523,20 @@ impl Server {
             if !worlds.iter().any(|w| w.uuid == fallback.uuid) {
                 return Err("fallback world is not loaded".to_string());
             }
+        }
+
+        // Let plugins veto the unload before anything is disturbed.
+        let event = self
+            .plugin_manager
+            .fire(
+                crate::plugin::api::events::world::world_unload::WorldUnload::new(
+                    world.clone(),
+                    fallback.clone(),
+                ),
+            )
+            .await;
+        if event.cancelled {
+            return Err("world unload cancelled by a plugin".to_string());
         }
 
         // Evacuate players to the fallback world's spawn.
@@ -577,6 +596,73 @@ impl Server {
         self.pending_world_unloads
             .lock()
             .is_ok_and(|pending| pending.contains(name))
+    }
+
+    /// SlimeWorld-style clone: copies a loaded world's on-disk data (and its
+    /// `easy_mysql` database rows, if any) under a new name, then loads it.
+    ///
+    /// This is the reusable primitive behind `/world clone` and the plugin
+    /// API. Business policy (permissions, quotas) belongs to the caller.
+    ///
+    /// # Errors
+    /// Fails when the source is not loaded, the destination already exists
+    /// or is unloading, or copying fails.
+    pub async fn clone_world(
+        self: &Arc<Self>,
+        src_name: &str,
+        dst_name: &str,
+    ) -> Result<Arc<World>, String> {
+        let src_world = self
+            .worlds
+            .load()
+            .iter()
+            .find(|w| w.get_world_name() == src_name)
+            .cloned()
+            .ok_or_else(|| format!("world '{src_name}' is not loaded"))?;
+        if self
+            .worlds
+            .load()
+            .iter()
+            .any(|w| w.get_world_name() == dst_name)
+        {
+            return Err(format!("world '{dst_name}' is already loaded"));
+        }
+        if self.is_world_unloading(dst_name) {
+            return Err(format!("world '{dst_name}' is still unloading"));
+        }
+
+        let src_dir = src_world.level.level_folder.root_folder.clone();
+        let dst_dir = self.basic_config.get_world_path().join(dst_name);
+        if dst_dir.exists() {
+            return Err(format!("folder '{}' already exists", dst_dir.display()));
+        }
+
+        // Copy any on-disk data (region files, level.dat, entities).
+        if src_dir.exists() {
+            let (src_copy, dst_copy) = (src_dir.clone(), dst_dir.clone());
+            tokio::task::spawn_blocking(move || copy_dir_recursive(&src_copy, &dst_copy))
+                .await
+                .map_err(|e| format!("file copy panicked: {e}"))?
+                .map_err(|e| format!("file copy failed: {e}"))?;
+        }
+
+        // easy_mysql keeps region data in the database — clone those rows to
+        // the new key too (in-database, no data transfer). Resolve the
+        // SOURCE world's effective config; its sidecar may pick a different
+        // backend than the global one.
+        let src_config = pumpkin_config::ember_world::resolve_level_config(
+            &self.advanced_config.world,
+            &src_dir,
+        );
+        if let pumpkin_config::chunk::ChunkConfig::EasyMysql(cfg) = &src_config.chunk {
+            pumpkin_world::chunk::easy_mysql::clone_world_data(cfg, &src_dir, &dst_dir)
+                .await
+                .map_err(|e| format!("database clone failed: {e}"))?;
+        }
+
+        Ok(self
+            .create_world(dst_name.to_string(), src_world.dimension.clone())
+            .await)
     }
     // EMBER end
 
@@ -1299,3 +1385,21 @@ impl Server {
         }
     }
 }
+
+// EMBER start - world clone helper (shared by Server::clone_world)
+/// Recursively copies a directory tree (a world folder: region files,
+/// level.dat, entities, ...).
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+// EMBER end

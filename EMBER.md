@@ -121,8 +121,17 @@ git push origin main
 | 默认格式 = easy | `pumpkin-config/src/chunk.rs` | `#[default]` 从 `pump` 移到 `easy`——新世界原生 easy;老世界由格式检测兜底继续可读 |
 | 副本零留存卫生 | `pumpkin-world/src/level.rs`（`Level::ephemeral`）、`pumpkin/src/world/mod.rs`、`pumpkin/src/command/commands/dungeon.rs` | 实例世界不再创建 region/entities/poi 文件夹;shutdown 时抑制传送门 POI 落盘;`/dungeon stop` 等后台卸载完成后清理残留实例文件夹——"改动不留存"承诺闭环 |
 | 启动世界预热 | `pumpkin/src/server/mod.rs` | 启动加载的默认世界（主世界等）也按 sidecar residency 预热（原来只有动态加载的世界吃 sidecar） |
+| 世界生命周期事件 | `pumpkin/src/plugin/api/events/world/world_load.rs`、`world_unload.rs`、`world/mod.rs`、`pumpkin/src/server/mod.rs` | `WorldLoad`（世界上线后通知）和 `WorldUnload`（卸载前触发,**可取消**,在撤离玩家前）——插件可观察/否决世界创建与卸载。接入 `create_world_with`/`unload_world` |
+| clone 原语下沉 | `pumpkin/src/server/mod.rs`、`pumpkin/src/command/commands/world.rs` | `Server::clone_world(src,dst)` 成为可复用原语（文件递归拷 + easy_mysql 库内 `INSERT..SELECT` + 加载新世界,按源世界 resolved 配置判后端）;`/world clone` 命令收缩成薄壳。**服务端持有原语,业务留给命令/插件** |
 
 （新增功能时更新此表。）
+
+## 服务端 vs 插件边界（架构原则）
+
+**服务端负责原语**（存储格式、世界加载/卸载/克隆/实例/预热 API、生命周期事件）;**插件负责业务**（副本准入、排队、经济、消息）。
+
+- **Native 插件**:`Context.server` 是公开的 `Arc<Server>`,今天即可调用全部原语（`create_world_with`/`unload_world`/`clone_world`/`is_world_unloading`/`prewarm_storage`）+ 监听/否决 `WorldLoad`/`WorldUnload` 事件——写业务适配插件无需任何新增 API。
+- **WASM 插件**:世界管理 API 仍缺（只有 `create-world`,无 unload/clone/instance;无生命周期事件)。要让沙箱/热重载的 WASM 插件也能驱动,需扩展 `pumpkin-plugin-wit` 子模块的 WIT 契约（该子模块是独立 git 仓库,需 fork）——尚未做,待决策。
 
 ## 许可证
 
