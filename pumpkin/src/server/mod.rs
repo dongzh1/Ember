@@ -792,6 +792,31 @@ impl Server {
         info!("Deleted world '{name}'");
         Ok(())
     }
+
+    /// Lists world folders present on disk (each subfolder of the worlds
+    /// directory that holds a `level.dat` or a `dimensions/` tree). Used by
+    /// tooling to show worlds that exist but are not loaded.
+    #[must_use]
+    pub fn list_world_folders(&self) -> Vec<String> {
+        let base = self.basic_config.get_world_path();
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let path = entry.path();
+            let looks_like_world =
+                path.join("level.dat").exists() || path.join("dimensions").is_dir();
+            if looks_like_world && let Some(name) = entry.file_name().to_str() {
+                out.push(name.to_string());
+            }
+        }
+        out.sort();
+        out
+    }
     // EMBER end
 
     /// Adds a new player to the server.

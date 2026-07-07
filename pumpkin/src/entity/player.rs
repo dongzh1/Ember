@@ -3136,6 +3136,60 @@ impl Player {
         self.send_system_message_raw(text, false).await;
     }
 
+    // EMBER start - native server-driven dialog helpers
+    /// Shows a server-driven dialog to a Java client (no-op for Bedrock).
+    /// The dialog's `Custom` button actions come back as `CustomClickAction`
+    /// events, keyed by their `id`.
+    pub async fn show_dialog(&self, dialog: &pumpkin_protocol::java::client::dialog::Dialog) {
+        use pumpkin_protocol::IdOr;
+        use pumpkin_protocol::java::client::dialog::DialogNBT;
+        let ClientPlatform::Java(client) = self.client.as_ref() else {
+            return;
+        };
+        match client.connection_state.load() {
+            pumpkin_protocol::ConnectionState::Config => {
+                client
+                    .send_packet_now(
+                        &pumpkin_protocol::java::client::config::CConfigShowDialog::new(
+                            IdOr::Value(DialogNBT(dialog)),
+                        ),
+                    )
+                    .await;
+            }
+            pumpkin_protocol::ConnectionState::Play => {
+                client
+                    .send_packet_now(&pumpkin_protocol::java::client::play::CPlayShowDialog::new(
+                        IdOr::Value(DialogNBT(dialog)),
+                    ))
+                    .await;
+            }
+            _ => {}
+        }
+    }
+
+    /// Clears any open server-driven dialog on a Java client.
+    pub async fn clear_dialog(&self) {
+        let ClientPlatform::Java(client) = self.client.as_ref() else {
+            return;
+        };
+        match client.connection_state.load() {
+            pumpkin_protocol::ConnectionState::Config => {
+                client
+                    .send_packet_now(
+                        &pumpkin_protocol::java::client::config::CConfigClearDialog::new(),
+                    )
+                    .await;
+            }
+            pumpkin_protocol::ConnectionState::Play => {
+                client
+                    .send_packet_now(&pumpkin_protocol::java::client::play::CPlayClearDialog::new())
+                    .await;
+            }
+            _ => {}
+        }
+    }
+    // EMBER end
+
     pub async fn send_system_message_raw(&self, text: &TextComponent, overlay: bool) {
         match self.client.as_ref() {
             ClientPlatform::Java(client) => {
