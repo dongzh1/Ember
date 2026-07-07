@@ -159,8 +159,14 @@ fn load_file_regions(
 
 // ─── Registry ──────────────────────────────────────────────────────────
 
+/// Templates are keyed by `(id, dim_path)`, not by `id` alone: the same clone
+/// source resolves to different terrain per dimension (each dim is loaded from
+/// its own `dim_path`), so keying by id alone lets a second dimension of the
+/// same source collide with — and be served — the first dimension's terrain.
+type TemplateKey = (String, String);
+
 struct TemplateRegistry {
-    map: RwLock<HashMap<String, Arc<OnceCell<Arc<EasyTemplate>>>>>,
+    map: RwLock<HashMap<TemplateKey, Arc<OnceCell<Arc<EasyTemplate>>>>>,
 }
 
 static REGISTRY: LazyLock<TemplateRegistry> = LazyLock::new(|| TemplateRegistry {
@@ -178,7 +184,7 @@ impl TemplateRegistry {
     ) -> Result<Arc<EasyTemplate>, String> {
         let cell = {
             let mut map = self.map.write().await;
-            map.entry(id.to_string())
+            map.entry((id.to_string(), dim_path.to_string()))
                 .or_insert_with(|| Arc::new(OnceCell::new()))
                 .clone()
         };
@@ -212,7 +218,12 @@ pub async fn prewarm_template(
 /// its source. Running instances keep serving their existing copy.
 /// Returns `true` when the template was resident.
 pub async fn reload_template(id: &str) -> bool {
-    REGISTRY.map.write().await.remove(id).is_some()
+    // Drop every per-dimension entry for this id. The map is keyed by
+    // (id, dim_path), so a plain remove(id) would match nothing.
+    let mut map = REGISTRY.map.write().await;
+    let before = map.len();
+    map.retain(|(k_id, _), _| k_id != id);
+    map.len() != before
 }
 
 /// `(id, regions, chunks, live handles)` of every resident template.
@@ -221,7 +232,7 @@ pub async fn reload_template(id: &str) -> bool {
 pub async fn list_templates() -> Vec<(String, usize, usize, usize)> {
     let map = REGISTRY.map.read().await;
     let mut out = Vec::new();
-    for (id, cell) in map.iter() {
+    for ((id, _dim), cell) in map.iter() {
         if let Some(template) = cell.get() {
             out.push((
                 id.clone(),
@@ -400,14 +411,23 @@ impl FileIO for EasyInstanceStorage {
                 if !chunk.is_dirty() {
                     continue;
                 }
+                // Snapshot-and-clear the dirty flag BEFORE reading the chunk, so a
+                // mutation that races in during to_bytes().await re-dirties it and is
+                // picked up by the next save instead of being wiped by a blanket clear.
+                chunk.mark_dirty(false);
                 let (region, index) = Self::region_and_index(*pos);
                 if is_prunable_chunk(chunk) {
                     updates.push((region, index, None));
                 } else {
-                    let bytes = chunk
-                        .to_bytes()
-                        .await
-                        .map_err(|e| ChunkWritingError::ChunkSerializingError(e.to_string()))?;
+                    let bytes = match chunk.to_bytes().await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            // Serialization failed — re-dirty so the chunk is retried
+                            // next save rather than left clean-but-unsaved.
+                            chunk.mark_dirty(true);
+                            return Err(ChunkWritingError::ChunkSerializingError(e.to_string()));
+                        }
+                    };
                     updates.push((region, index, Some(bytes)));
                 }
             }
@@ -426,10 +446,6 @@ impl FileIO for EasyInstanceStorage {
                 }
             }
 
-            // RAM only — mark clean; everything is discarded on unload.
-            for (_, chunk) in &chunks_data {
-                chunk.mark_dirty(false);
-            }
             Ok(())
         })
     }
@@ -531,6 +547,72 @@ impl FileIO for DiscardEntityIO {
 
     fn block_and_await_ongoing_tasks(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
+    }
+}
+
+// ─── Read-only chunk storage ───────────────────────────────────────────
+
+/// Wraps a chunk `FileIO` so a `read_only` world persists no block/chunk
+/// data: reads, watches and region enumeration delegate to the inner store,
+/// but saves are dropped (chunks marked clean). This mirrors
+/// [`DiscardEntityIO`] so a source-less `read_only` world stays symmetric —
+/// neither blocks nor entities are written back — instead of the File backend
+/// silently persisting blocks while entities are discarded.
+pub struct ReadOnlyChunkIO {
+    pub inner: Arc<dyn FileIO<Data = Arc<ChunkData>>>,
+}
+
+impl FileIO for ReadOnlyChunkIO {
+    type Data = Arc<ChunkData>;
+
+    fn fetch_chunks<'a>(
+        &'a self,
+        folder: &'a LevelFolder,
+        chunk_coords: &'a [Vector2<i32>],
+        stream: mpsc::Sender<LoadedData<Self::Data, ChunkReadingError>>,
+    ) -> BoxFuture<'a, ()> {
+        self.inner.fetch_chunks(folder, chunk_coords, stream)
+    }
+
+    fn save_chunks<'a>(
+        &'a self,
+        _folder: &'a LevelFolder,
+        chunks_data: Vec<(Vector2<i32>, Self::Data)>,
+    ) -> BoxFuture<'a, Result<(), ChunkWritingError>> {
+        Box::pin(async move {
+            for (_, chunk) in &chunks_data {
+                chunk.mark_dirty(false);
+            }
+            Ok(())
+        })
+    }
+
+    fn watch_chunks<'a>(
+        &'a self,
+        folder: &'a LevelFolder,
+        chunks: &'a [Vector2<i32>],
+    ) -> BoxFuture<'a, ()> {
+        self.inner.watch_chunks(folder, chunks)
+    }
+
+    fn unwatch_chunks<'a>(
+        &'a self,
+        folder: &'a LevelFolder,
+        chunks: &'a [Vector2<i32>],
+    ) -> BoxFuture<'a, ()> {
+        self.inner.unwatch_chunks(folder, chunks)
+    }
+
+    fn clear_watched_chunks(&self) -> BoxFuture<'_, ()> {
+        self.inner.clear_watched_chunks()
+    }
+
+    fn block_and_await_ongoing_tasks(&self) -> BoxFuture<'_, ()> {
+        self.inner.block_and_await_ongoing_tasks()
+    }
+
+    fn list_regions<'a>(&'a self, folder: &'a LevelFolder) -> BoxFuture<'a, Vec<(i32, i32)>> {
+        self.inner.list_regions(folder)
     }
 }
 

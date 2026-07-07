@@ -1,0 +1,12 @@
+[package]
+name = "npc-plugin"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0"
+description = "Display NPCs on Ember using native mannequin entities"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pumpkin-plugin-api = { path = "../pumpkin-plugin-api" }

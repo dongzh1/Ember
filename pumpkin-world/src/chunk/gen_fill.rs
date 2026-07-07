@@ -107,6 +107,13 @@ fn ocean_chunk(pos: Vector2<i32>, min_y: i32, height: i32) -> ChunkData {
         }
     }
 
+    // base_chunk starts fully sky-lit (light_populated = true); after filling
+    // the solids/water the interior and floor would stay lit as if under open
+    // sky. Mark lighting unpopulated so the engine relights the chunk on load
+    // (Default lighting mode) instead of baking in a uniform sky_light = 15.
+    chunk
+        .light_populated
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     chunk
 }
 

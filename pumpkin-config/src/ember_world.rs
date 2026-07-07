@@ -111,7 +111,22 @@ impl EmberWorldConfig {
     #[must_use]
     pub fn load(world_root: &Path) -> Option<Self> {
         let path = world_root.join(SIDECAR_FILE);
-        let text = std::fs::read_to_string(&path).ok()?;
+        // Distinguish "absent" from "present but unreadable". Swallowing a
+        // read error (permission denied, sharing violation, I/O error) as if
+        // the file were absent would silently revert the world to the global
+        // config and drop its per-world protective settings (read_only,
+        // border, ...) — exactly what the "reported loudly" contract forbids.
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                error!(
+                    "EasyWorld: IGNORING unreadable sidecar {} ({e}); falling back to global config",
+                    path.display()
+                );
+                return None;
+            }
+        };
         match toml::from_str::<Self>(&text) {
             Ok(config) => {
                 info!(

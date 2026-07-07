@@ -77,6 +77,11 @@ const LOCK_TTL_SECS: i64 = 60;
 /// How often the heartbeat task refreshes held locks (and retries denied ones).
 const LOCK_HEARTBEAT_SECS: u64 = 20;
 
+/// Once the per-region lock map exceeds this many entries, `region_lock`
+/// opportunistically drops the ones no save is holding so a long-running
+/// server's map can't grow unbounded across every region ever written.
+const REGION_LOCK_PRUNE_THRESHOLD: usize = 1024;
+
 const CREATE_LOCK_TABLE: &str = concat!(
     "CREATE TABLE IF NOT EXISTS easyworld_locks (",
     "world_key VARCHAR(512) NOT NULL,",
@@ -295,7 +300,11 @@ impl MysqlPool {
 const CLONE_REGIONS: &str = concat!(
     "INSERT INTO easyworld_regions (world_key, region_x, region_z, data) ",
     "SELECT CONCAT(?, SUBSTRING(world_key, CHAR_LENGTH(?) + 1)), region_x, region_z, data ",
-    "FROM easyworld_regions WHERE world_key = ? OR world_key LIKE CONCAT(?, '/%')"
+    // Match the world's own key or its dimension sub-keys via a literal '/'-delimited
+    // prefix test, NOT `LIKE`, so a '_' or '%' in a world name can't act as a SQL
+    // wildcard and pull in unrelated worlds' rows (EMBER: wildcard-injection fix).
+    "FROM easyworld_regions ",
+    "WHERE world_key = ? OR SUBSTRING(world_key, 1, CHAR_LENGTH(?) + 1) = CONCAT(?, '/')"
 );
 
 /// Compute the database key for a world folder path.
@@ -353,6 +362,7 @@ pub async fn clone_world_data(
         .bind(&src_key)
         .bind(&src_key)
         .bind(&src_key)
+        .bind(&src_key)
         .execute(&pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -380,19 +390,29 @@ pub async fn delete_world_data(
         .connect(&config.url)
         .await
         .map_err(|e| e.to_string())?;
+    // Match the world's own key or its dimension sub-keys via a literal '/'-delimited
+    // prefix test, NOT `LIKE`, so a '_' or '%' in a world name can't act as a SQL
+    // wildcard and delete unrelated worlds' rows (EMBER: wildcard-injection fix).
     let res = sqlx::query(
-        "DELETE FROM easyworld_regions WHERE world_key = ? OR world_key LIKE CONCAT(?, '/%')",
+        "DELETE FROM easyworld_regions \
+         WHERE world_key = ? OR SUBSTRING(world_key, 1, CHAR_LENGTH(?) + 1) = CONCAT(?, '/')",
     )
+    .bind(&key)
     .bind(&key)
     .bind(&key)
     .execute(&pool)
     .await
     .map_err(|e| e.to_string())?;
-    // Drop any stale write lock for the world too.
-    let _ = sqlx::query("DELETE FROM easyworld_locks WHERE world_key = ?")
-        .bind(&key)
-        .execute(&pool)
-        .await;
+    // Drop any stale write lock for the world and its dimension sub-keys too.
+    let _ = sqlx::query(
+        "DELETE FROM easyworld_locks \
+         WHERE world_key = ? OR SUBSTRING(world_key, 1, CHAR_LENGTH(?) + 1) = CONCAT(?, '/')",
+    )
+    .bind(&key)
+    .bind(&key)
+    .bind(&key)
+    .execute(&pool)
+    .await;
     pool.close().await;
     info!(
         "EasyWorld: deleted {} regions of '{key}' from the database",
@@ -528,6 +548,14 @@ impl RegionCache {
     fn clear(&mut self) {
         self.map.clear();
     }
+
+    /// Drops every cached region belonging to `world_key`. Called after a
+    /// write-lock failover round-trip so the next fetch reloads the
+    /// authoritative rows another writer committed while we were degraded,
+    /// instead of writing our stale pre-handoff region back over them.
+    fn invalidate_world(&mut self, world_key: &str) {
+        self.map.retain(|k, _| k.0 != world_key);
+    }
 }
 
 pub struct EasyMysqlStorage {
@@ -592,6 +620,7 @@ impl EasyMysqlStorage {
                 let locks = storage.world_write_locks.clone();
                 let owner = storage.owner_id.clone();
                 let shutdown = storage.shutdown.clone();
+                let region_cache = storage.region_cache.clone();
                 handle.spawn(async move {
                     let mut interval =
                         tokio::time::interval(Duration::from_secs(LOCK_HEARTBEAT_SECS));
@@ -621,6 +650,10 @@ impl EasyMysqlStorage {
                                         error!(
                                             "EasyWorld: lost write lock for {key} — writes are now rejected"
                                         );
+                                        // Another server is authoritative now; drop our cached
+                                        // regions for this world so we stop serving stale reads
+                                        // during the split-brain window.
+                                        region_cache.write().await.invalidate_world(&key);
                                         locks.write().await.insert(key, false);
                                     }
                                     Err(e) => {
@@ -634,6 +667,10 @@ impl EasyMysqlStorage {
                                 info!(
                                     "EasyWorld: took over write lock for {key} (previous writer gone)"
                                 );
+                                // The previous writer may have committed regions while we were
+                                // read-degraded; drop our stale cache so the next fetch reloads
+                                // its authoritative data before we ever write over it.
+                                region_cache.write().await.invalidate_world(&key);
                                 locks.write().await.insert(key, true);
                             }
                         }
@@ -711,6 +748,13 @@ impl EasyMysqlStorage {
     async fn region_lock(&self, world_key: &str, rx: i32, rz: i32) -> Arc<tokio::sync::Mutex<()>> {
         let key = (world_key.to_string(), rx, rz);
         let mut locks = self.region_locks.write().await;
+        // Opportunistically drop lock entries no save is holding: a strong_count
+        // of 1 means only this map still references the mutex, so removing it
+        // cannot break an in-flight save's per-region serialization. Safe under
+        // the write lock — no concurrent region_lock() can hand out a clone here.
+        if locks.len() > REGION_LOCK_PRUNE_THRESHOLD {
+            locks.retain(|_, m| Arc::strong_count(m) > 1);
+        }
         locks
             .entry(key)
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))

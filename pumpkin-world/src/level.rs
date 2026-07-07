@@ -1,7 +1,9 @@
 use crate::chunk::format::linear::LinearV2File;
 use crate::chunk::format::pump::PumpFile;
 // EMBER start - easyworld imports
-use crate::chunk::easy_instance::{DiscardEntityIO, EasyInstanceStorage, TemplateSource};
+use crate::chunk::easy_instance::{
+    DiscardEntityIO, EasyInstanceStorage, ReadOnlyChunkIO, TemplateSource,
+};
 use crate::chunk::easy_mysql::EasyMysqlStorage;
 use crate::chunk::format::easy::EasyWorldFile;
 use crate::chunk::gen_fill::GenFillIO;
@@ -97,7 +99,7 @@ fn build_easy_chunk_saver(
 
     // Non-seed worlds synthesize void/ocean for ungenerated chunks instead
     // of running the terrain generator.
-    if ember.generate == GenerateMode::Seed {
+    let saver: Arc<dyn FileIO<Data = SyncChunk>> = if ember.generate == GenerateMode::Seed {
         inner
     } else {
         Arc::new(GenFillIO {
@@ -106,6 +108,17 @@ fn build_easy_chunk_saver(
             min_y,
             height,
         })
+    };
+
+    // A read_only world that reaches here has no source template (the source
+    // branch returned above). Wrap the saver so block/chunk writes are never
+    // persisted — matching the entity_saver's DiscardEntityIO — so read_only
+    // stays symmetric. The File backend would otherwise write blocks to disk
+    // while entities are silently dropped, corrupting a "read_only" world.
+    if ember.mode == EasyWorldMode::ReadOnly {
+        Arc::new(ReadOnlyChunkIO { inner: saver })
+    } else {
+        saver
     }
 }
 // EMBER end
