@@ -35,9 +35,11 @@ jobs:
           - os: ubuntu-latest
             artifact: ember-linux-x86_64
             binary: pumpkin
+            plugin: libeasyworld.so
           - os: windows-latest
             artifact: ember-windows-x86_64
             binary: pumpkin.exe
+            plugin: easyworld.dll
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,30 +49,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build (release)
-        run: cargo build --release -p pumpkin
+        run: cargo build --release -p pumpkin -p easyworld
 
       - name: Stamp build info
         shell: bash
         run: |
-          mkdir -p out
+          mkdir -p out/plugins
           cp "target/release/${{ matrix.binary }}" out/
+          cp "target/release/${{ matrix.plugin }}" out/plugins/
           {
             echo "Ember build"
             echo "commit:  $(git rev-parse --short HEAD)"
             echo "ref:     ${GITHUB_REF_NAME}"
             echo "date:    $(date -u +"%Y-%m-%d %H:%M") UTC"
             echo "target:  ${{ matrix.artifact }}"
+            echo "plugins: easyworld"
           } > out/BUILD-INFO.txt
           cat out/BUILD-INFO.txt
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        run: tar -czf "${{ matrix.artifact }}.tar.gz" -C out pumpkin BUILD-INFO.txt
+        run: tar -czf "${{ matrix.artifact }}.tar.gz" -C out pumpkin plugins BUILD-INFO.txt
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path out\pumpkin.exe, out\BUILD-INFO.txt -DestinationPath "${{ matrix.artifact }}.zip"
+        run: Compress-Archive -Path out\pumpkin.exe, out\plugins, out\BUILD-INFO.txt -DestinationPath "${{ matrix.artifact }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

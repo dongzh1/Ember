@@ -27,13 +27,16 @@ Write-Host "=== Ember 本地构建 (Windows x64) ===" -ForegroundColor Cyan
 
 if (-not $SkipBuild) {
     Write-Host ""
-    Write-Host "[1/2] cargo build --release -p pumpkin (首次构建可能要十几分钟)..." -ForegroundColor Cyan
-    cargo build --release -p pumpkin
+    Write-Host "[1/2] cargo build --release -p pumpkin -p easyworld (首次构建可能要十几分钟)..." -ForegroundColor Cyan
+    cargo build --release -p pumpkin -p easyworld
     if ($LASTEXITCODE -ne 0) { Fail "构建失败,请先修复编译错误 (可先跑 scripts\check.ps1)。" }
 }
 
 $exe = Join-Path $repo "target\release\pumpkin.exe"
 if (-not (Test-Path $exe)) { Fail "找不到 $exe,请先构建。" }
+
+$plugin = Join-Path $repo "target\release\easyworld.dll"
+if (-not (Test-Path $plugin)) { Fail "找不到 $plugin (easyworld 插件),请先构建。" }
 
 Write-Host ""
 Write-Host "[2/2] 打包..." -ForegroundColor Cyan
@@ -47,12 +50,19 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $stage | Out-Null
 
 Copy-Item $exe (Join-Path $stage "pumpkin.exe")
+
+# easyworld 插件放进 plugins\ 文件夹,解压即用
+$stagePlugins = Join-Path $stage "plugins"
+New-Item -ItemType Directory -Force $stagePlugins | Out-Null
+Copy-Item $plugin (Join-Path $stagePlugins "easyworld.dll")
+
 @(
     "Ember build"
     "commit:  $commit"
     "branch:  $((git rev-parse --abbrev-ref HEAD).Trim())"
     "date:    $(Get-Date -Format 'yyyy-MM-dd HH:mm') (local)"
     "target:  ember-windows-x86_64"
+    "plugins: easyworld"
 ) | Out-File (Join-Path $stage "BUILD-INFO.txt") -Encoding utf8
 
 $zip = Join-Path $dist "ember-$commit-windows-x86_64.zip"
@@ -63,5 +73,5 @@ Remove-Item -Recurse -Force $stage
 $sizeMb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host ""
 Write-Host "=== 打包完成: $zip ($sizeMb MB) ===" -ForegroundColor Green
-Write-Host "解压后直接运行 pumpkin.exe 即可启动服务端。" -ForegroundColor Yellow
+Write-Host "解压后运行 pumpkin.exe 启动服务端;easyworld 插件已在 plugins\ 里,自动加载。" -ForegroundColor Yellow
 exit 0
