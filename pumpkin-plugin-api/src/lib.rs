@@ -67,8 +67,49 @@ pub mod logging;
 mod wit {
     wit_bindgen::generate!({
         skip: ["init-plugin"],
-        path: "../pumpkin-plugin-wit/v0.1",
-        world: "plugin",
+        // EMBER: upstream's pristine wit dir + Ember's overlay (ember:plugin/plugin
+        // = upstream plugin world + mannequin controls). Submodule stays untouched.
+        path: ["../pumpkin-plugin-wit/v0.1", "../ember-wit"],
+        world: "ember:plugin/plugin",
+        // EMBER: our `plugin` world `include`s all of upstream's `pumpkin:plugin/plugin`
+        // world wholesale. Since that makes every pumpkin:plugin interface "foreign"
+        // to the ember:plugin package doing the composing, wit-bindgen won't guess
+        // whether to alias or (re)generate any of them — every interface upstream's
+        // world touches needs an explicit answer. This is the full closure (verified
+        // against every `use` in pumpkin-plugin-wit/v0.1/*.wit), not just mannequin's.
+        with: {
+            "pumpkin:plugin/bedrock-packets@0.1.0": generate,
+            "pumpkin:plugin/biomes@0.1.0": generate,
+            "pumpkin:plugin/block-entity@0.1.0": generate,
+            "pumpkin:plugin/boss-bar@0.1.0": generate,
+            "pumpkin:plugin/command@0.1.0": generate,
+            "pumpkin:plugin/common@0.1.0": generate,
+            "pumpkin:plugin/context@0.1.0": generate,
+            "pumpkin:plugin/data-components@0.1.0": generate,
+            "pumpkin:plugin/enchantments@0.1.0": generate,
+            "pumpkin:plugin/entity@0.1.0": generate,
+            "pumpkin:plugin/entity-types@0.1.0": generate,
+            "pumpkin:plugin/event@0.1.0": generate,
+            "pumpkin:plugin/forms@0.1.0": generate,
+            "pumpkin:plugin/gui@0.1.0": generate,
+            "pumpkin:plugin/i18n@0.1.0": generate,
+            "pumpkin:plugin/item-stack@0.1.0": generate,
+            "pumpkin:plugin/java-dialogs@0.1.0": generate,
+            "pumpkin:plugin/java-packets@0.1.0": generate,
+            "pumpkin:plugin/logging@0.1.0": generate,
+            "pumpkin:plugin/metadata@0.1.0": generate,
+            "pumpkin:plugin/particles@0.1.0": generate,
+            "pumpkin:plugin/permission@0.1.0": generate,
+            "pumpkin:plugin/player@0.1.0": generate,
+            "pumpkin:plugin/recipe@0.1.0": generate,
+            "pumpkin:plugin/scheduler@0.1.0": generate,
+            "pumpkin:plugin/scoreboard@0.1.0": generate,
+            "pumpkin:plugin/server@0.1.0": generate,
+            "pumpkin:plugin/sounds@0.1.0": generate,
+            "pumpkin:plugin/text@0.1.0": generate,
+            "pumpkin:plugin/uuid@0.1.0": generate,
+            "pumpkin:plugin/world@0.1.0": generate,
+        },
         enable_method_chaining: true
     });
 

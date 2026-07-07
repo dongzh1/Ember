@@ -31,8 +31,12 @@ pub mod uuid;
 pub mod world;
 
 bindgen!({
-    path: "../pumpkin-plugin-wit/v0.1",
-    world: "plugin",
+    // EMBER: read upstream's pristine wit dir PLUS Ember's overlay package
+    // (ember:plugin/plugin = upstream plugin world + mannequin), so the
+    // pumpkin-plugin-wit submodule stays byte-for-byte upstream. The overlay
+    // world is named `plugin`, so generated `Plugin`/`PluginPre` are unchanged.
+    path: ["../pumpkin-plugin-wit/v0.1", "../ember-wit"],
+    world: "ember:plugin/plugin",
     imports: { default: async | trappable },
     exports: { default: async | trappable},
 });

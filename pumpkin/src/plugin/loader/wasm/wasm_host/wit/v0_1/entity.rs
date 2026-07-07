@@ -5,6 +5,8 @@ use pumpkin_util::math::vector3::Vector3;
 
 use crate::plugin::loader::wasm::wasm_host::{
     state::{EntityResource, PluginHostState},
+    // EMBER: mannequin lives in the Ember overlay package (ember:plugin)
+    wit::v0_1::ember::plugin::mannequin,
     wit::v0_1::events::to_wasm_position,
     wit::v0_1::pumpkin::plugin::{
         common::{EntityPose, Position},
@@ -35,6 +37,78 @@ fn entity_from_resource(
         .map_err(|_| wasmtime::Error::msg("invalid entity resource handle"))
         .map(|resource| resource.provider.clone())
 }
+
+// EMBER start: mannequin NPC controls, kept in a SEPARATE `mannequin` interface
+// so upstream world.wit's entity resource stays pristine. Each fn resolves the
+// entity handle and no-ops unless it is a MannequinEntity.
+impl mannequin::Host for PluginHostState {
+    async fn set_skin(
+        &mut self,
+        e: Resource<Entity>,
+        value: String,
+        signature: Option<String>,
+    ) -> wasmtime::Result<()> {
+        let entity = entity_from_resource(self, &e)?;
+        if let Some(m) = entity
+            .cast_any()
+            .downcast_ref::<crate::entity::decoration::mannequin::MannequinEntity>()
+        {
+            let textures = if value.is_empty() {
+                None
+            } else {
+                Some(crate::entity::decoration::mannequin::SkinTextures {
+                    value: value.into_boxed_str(),
+                    signature: signature.map(String::into_boxed_str),
+                })
+            };
+            m.set_skin(textures);
+        }
+        Ok(())
+    }
+
+    async fn set_description(
+        &mut self,
+        e: Resource<Entity>,
+        description: Option<Resource<TextComponent>>,
+    ) -> wasmtime::Result<()> {
+        let entity = entity_from_resource(self, &e)?;
+        let text = match description {
+            Some(handle) => {
+                let text_res = self
+                    .resource_table
+                    .get::<crate::plugin::loader::wasm::wasm_host::state::TextComponentResource>(
+                        &Resource::new_own(handle.rep()),
+                    )
+                    .map_err(|_| wasmtime::Error::msg("invalid text component resource handle"))?;
+                Some(text_res.provider.clone())
+            }
+            None => None,
+        };
+        if let Some(m) = entity
+            .cast_any()
+            .downcast_ref::<crate::entity::decoration::mannequin::MannequinEntity>()
+        {
+            m.set_description(text);
+        }
+        Ok(())
+    }
+
+    async fn set_immovable(
+        &mut self,
+        e: Resource<Entity>,
+        immovable: bool,
+    ) -> wasmtime::Result<()> {
+        let entity = entity_from_resource(self, &e)?;
+        if let Some(m) = entity
+            .cast_any()
+            .downcast_ref::<crate::entity::decoration::mannequin::MannequinEntity>()
+        {
+            m.set_immovable(immovable);
+        }
+        Ok(())
+    }
+}
+// EMBER end
 
 const fn map_entity_pose(pose: InternalEntityPose) -> EntityPose {
     match pose {
@@ -263,74 +337,6 @@ impl HostEntity for PluginHostState {
         entity.get_entity().set_glowing(glowing).await;
         Ok(())
     }
-
-    // EMBER start: mannequin NPC controls (no-op on non-mannequin entities)
-    async fn set_skin(
-        &mut self,
-        entity: Resource<Entity>,
-        value: String,
-        signature: Option<String>,
-    ) -> wasmtime::Result<()> {
-        let entity = entity_from_resource(self, &entity)?;
-        if let Some(mannequin) = entity
-            .cast_any()
-            .downcast_ref::<crate::entity::decoration::mannequin::MannequinEntity>(
-        ) {
-            let textures = if value.is_empty() {
-                None
-            } else {
-                Some(crate::entity::decoration::mannequin::SkinTextures {
-                    value: value.into_boxed_str(),
-                    signature: signature.map(String::into_boxed_str),
-                })
-            };
-            mannequin.set_skin(textures);
-        }
-        Ok(())
-    }
-
-    async fn set_description(
-        &mut self,
-        entity: Resource<Entity>,
-        description: Option<Resource<TextComponent>>,
-    ) -> wasmtime::Result<()> {
-        let entity = entity_from_resource(self, &entity)?;
-        let text = match description {
-            Some(handle) => {
-                let text_res = self
-                    .resource_table
-                    .get::<crate::plugin::loader::wasm::wasm_host::state::TextComponentResource>(
-                        &Resource::new_own(handle.rep()),
-                    )
-                    .map_err(|_| wasmtime::Error::msg("invalid text component resource handle"))?;
-                Some(text_res.provider.clone())
-            }
-            None => None,
-        };
-        if let Some(mannequin) = entity
-            .cast_any()
-            .downcast_ref::<crate::entity::decoration::mannequin::MannequinEntity>(
-        ) {
-            mannequin.set_description(text);
-        }
-        Ok(())
-    }
-
-    async fn set_immovable(
-        &mut self,
-        entity: Resource<Entity>,
-        immovable: bool,
-    ) -> wasmtime::Result<()> {
-        let entity = entity_from_resource(self, &entity)?;
-        if let Some(mannequin) = entity
-            .cast_any()
-            .downcast_ref::<crate::entity::decoration::mannequin::MannequinEntity>(
-        ) {
-            mannequin.set_immovable(immovable);
-        }
-        Ok(())
-    }
-    // EMBER end
 
     async fn is_fall_flying(&mut self, entity: Resource<Entity>) -> wasmtime::Result<bool> {
         let entity = entity_from_resource(self, &entity)?;

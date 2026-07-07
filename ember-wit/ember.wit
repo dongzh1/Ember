@@ -1,0 +1,27 @@
+// EMBER: mannequin NPC controls as a SEPARATE package that extends upstream's
+// `pumpkin:plugin` world. This keeps the pumpkin-plugin-wit submodule 100%
+// pristine (upstream syncs never touch it), while bindgen reads this dir plus
+// the submodule dir together.
+package ember:plugin@0.1.0;
+
+interface mannequin {
+    use pumpkin:plugin/%world@0.1.0.{entity};
+    use pumpkin:plugin/text@0.1.0.{text-component};
+
+    /// Sets a mannequin's rendered skin from a base64 textures value and its
+    /// optional Mojang signature. Empty value renders the default skin.
+    set-skin: func(e: borrow<entity>, value: string, signature: option<string>);
+    /// Sets a mannequin's below-name description line (none = default label).
+    set-description: func(e: borrow<entity>, description: option<text-component>);
+    /// Sets whether a mannequin resists being pushed.
+    set-immovable: func(e: borrow<entity>, immovable: bool);
+}
+
+/// Ember's plugin world: everything upstream's `pumpkin:plugin` `plugin` world
+/// provides, plus the mannequin controls. Named `plugin` (in the `ember:plugin`
+/// package) so bindgen still generates `Plugin`/`PluginPre` — no host renames.
+/// bindgen targets `ember:plugin/plugin`.
+world plugin {
+    include pumpkin:plugin/plugin@0.1.0;
+    import mannequin;
+}
