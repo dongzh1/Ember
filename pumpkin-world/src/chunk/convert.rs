@@ -182,7 +182,7 @@ pub struct ConvertStats {
     pub entity_chunks: usize,
     /// Chunks that failed to read from the source (corrupt) and were skipped.
     pub skipped: usize,
-    /// Source regions entirely outside `border` and left uncoverted (crop).
+    /// Source regions entirely outside `border` and left unconverted (crop).
     pub regions_cropped: usize,
 }
 
