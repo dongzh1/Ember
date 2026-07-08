@@ -24,12 +24,16 @@ impl ItemBehaviour for NameTagItem {
         entity: Arc<dyn EntityBase>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let entity = entity.get_entity();
-            if entity.entity_type.saveable
+            if entity.get_entity().entity_type.saveable
                 && let Some(name) = item.get_data_component::<CustomNameImpl>()
             {
                 // TODO
-                entity.set_custom_name(name.name.clone());
+                entity.get_entity().set_custom_name(name.name.clone());
+                // EMBER start - name-tagged mobs are exempt from distance despawn
+                if let Some(mob) = entity.as_mob_entity() {
+                    mob.set_persistence_required(true);
+                }
+                // EMBER end
                 item.decrement_unless_creative(player.gamemode.load(), 1);
             }
         })

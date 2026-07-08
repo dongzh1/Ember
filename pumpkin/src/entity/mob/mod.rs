@@ -735,6 +735,12 @@ impl<T: Mob + Send + 'static> EntityBase for T {
         self
     }
 
+    // EMBER start - generic mob downcast (see EntityBase::as_mob_entity)
+    fn as_mob_entity(&self) -> Option<&MobEntity> {
+        Some(self.get_mob_entity())
+    }
+    // EMBER end
+
     fn is_in_love(&self) -> bool {
         self.get_mob_entity().is_in_love()
     }

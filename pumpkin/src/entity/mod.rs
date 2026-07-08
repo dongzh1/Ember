@@ -601,6 +601,15 @@ pub trait EntityBase: Send + Sync + NBTStorage + std::any::Any {
         None
     }
 
+    // EMBER start - generic mob downcast (persistence_required, no_ai, ... from non-mob-specific code)
+    /// Returns the [`mob::MobEntity`] backing this entity, if it is a mob.
+    /// Lets generic code (item behaviours, commands) reach mob-only state
+    /// (e.g. `persistence_required`) without knowing the concrete species type.
+    fn as_mob_entity(&self) -> Option<&mob::MobEntity> {
+        None
+    }
+    // EMBER end
+
     /// Should return the name of the entity without click or hover events.
     fn get_name(&self) -> TextComponent {
         let entity = self.get_entity();
