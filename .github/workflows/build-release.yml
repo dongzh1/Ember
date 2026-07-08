@@ -1,11 +1,24 @@
 # ============================================================================
 # EMBER - Build Release
 #
-# Ember 专用打包工作流:在云端构建 Linux x64 + Windows x64 服务端。
+# Ember 专用打包工作流:在云端构建 Linux x64 + Windows x64 服务端,
+# 每次运行都会自动创建一个新的 GitHub Release ——一次云端构建 = 一次发布。
 #
 # 触发方式:
-#   1. 手动: 本地跑 scripts/build-remote.ps1 (或 GitHub 网页 Run workflow)
-#   2. 推送 ember-* 标签: 自动构建并创建 GitHub Release
+#   唯一入口是 workflow_dispatch —— 本地双击 ship.bat(或单独跑
+#   scripts/build-remote.ps1),也可以去 GitHub 网页 Actions 页面手动
+#   "Run workflow"。没有 tag-push 触发,版本号完全由工作流自己算,人手动
+#   打的 tag 不会被识别。
+#
+# 版本号规则:
+#   扫描仓库里已有的 `ember-vX.XX` Release,取最大值 +0.01,四舍五入到
+#   两位小数。仓库里还没有任何 ember-v* Release 时,从 0.01 开始发布。
+#
+# 产物(参考 Pumpkin 的 https://github.com/Pumpkin-MC/Pumpkin/releases):
+#   不打 zip/tar,可执行文件直接改名成 ember(Linux)/ember.exe(Windows)
+#   当 Release 附件传上去,下载下来就能跑。
+#   注意:GitHub Release 附件不保留 Unix 执行位(Releases API 的固有限制,
+#   Pumpkin 自己的发布页也一样),Linux 下载后需要自己 `chmod +x ember`。
 #
 # 与上游 rust.yml 的 nightly 构建区别:
 #   - rust.yml 只在 master(上游镜像)触发,不含 Ember 的 main 分支改动
@@ -16,12 +29,13 @@ name: Ember Build Release
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "ember-*"
 
 env:
   CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ember-build-release
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -35,9 +49,11 @@ jobs:
           - os: ubuntu-latest
             artifact: ember-linux-x86_64
             binary: pumpkin
+            asset: ember
           - os: windows-latest
             artifact: ember-windows-x86_64
             binary: pumpkin.exe
+            asset: ember.exe
     steps:
       - uses: actions/checkout@v7
 
@@ -47,43 +63,23 @@ jobs:
       - name: Build (release)
         run: cargo build --release -p pumpkin
 
-      - name: Stamp build info
+      - name: Stage binary
         shell: bash
         run: |
           mkdir -p out
-          cp "target/release/${{ matrix.binary }}" out/
-          {
-            echo "Ember build"
-            echo "commit:  $(git rev-parse --short HEAD)"
-            echo "ref:     ${GITHUB_REF_NAME}"
-            echo "date:    $(date -u +"%Y-%m-%d %H:%M") UTC"
-            echo "target:  ${{ matrix.artifact }}"
-          } > out/BUILD-INFO.txt
-          cat out/BUILD-INFO.txt
-
-      - name: Package (Linux)
-        if: runner.os == 'Linux'
-        run: tar -czf "${{ matrix.artifact }}.tar.gz" -C out pumpkin BUILD-INFO.txt
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Compress-Archive -Path out\pumpkin.exe, out\BUILD-INFO.txt -DestinationPath "${{ matrix.artifact }}.zip"
+          cp "target/release/${{ matrix.binary }}" "out/${{ matrix.asset }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          compression-level: 0
-          path: |
-            *.tar.gz
-            *.zip
+          path: out/${{ matrix.asset }}
 
   release:
     name: Create GitHub Release
-    if: startsWith(github.ref, 'refs/tags/ember-')
     needs: [build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -91,13 +87,46 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: dist/
-          merge-multiple: true
+
+      - name: Compute next version
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+
+          # 只认自己发的 ember-vX.XX,人手动打的其他 tag/release 不影响计数。
+          releases=$(gh release list -R "$REPO" --limit 1000 --json tagName -q '.[].tagName')
+
+          max_cents=0
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ ^ember-v([0-9]+\.[0-9]+)$ ]]; then
+              v="${BASH_REMATCH[1]}"
+              cents=$(awk -v x="$v" 'BEGIN{printf "%d", (x*100)+0.5}')
+              if [ "$cents" -gt "$max_cents" ]; then max_cents=$cents; fi
+            fi
+          done <<< "$releases"
+
+          next_cents=$((max_cents + 1))
+          version=$(awk -v c="$next_cents" 'BEGIN{printf "%.2f", c/100}')
+
+          echo "上一个版本 cents=$max_cents -> 本次发布 v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=ember-v${version}" >> "$GITHUB_OUTPUT"
 
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
-          files: |
-            dist/*.tar.gz
-            dist/*.zip
-          name: ${{ github.ref_name }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Ember v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          body: |
+            commit `${{ github.sha }}` @ `${{ github.ref_name }}`
+
+            Linux 下载后需要自行加执行权限:`chmod +x ember`
+          files: |
+            dist/ember-linux-x86_64/ember
+            dist/ember-windows-x86_64/ember.exe

@@ -36,12 +36,10 @@
   云端构建(`.github/workflows/build-release.yml`),`build-remote.ps1` 会触发、
   等待并下载产物到 `dist\remote-<runId>\`。
   注意:云端构建的是 **GitHub 上的代码**,先推送再构建。
-- **发正式版**:打 `ember-*` 标签推上去,工作流自动构建并创建 GitHub Release:
-
-  ```
-  git tag ember-v0.1.0
-  git push origin ember-v0.1.0
-  ```
+- **发正式版**:不用手动打 tag —— 云端构建(`build-remote.ps1` / `ship.bat`)每跑一次,
+  工作流自己就会创建一个新的 GitHub Release,版本号从 `0.01` 起自动 +0.01(扫描已有
+  `ember-vX.XX` Release 取最大值算下一个)。附件是裸的 `ember`(Linux)/`ember.exe`
+  (Windows),不再打包 zip/tar,下载下来就能跑(Linux 需要自己 `chmod +x ember`)。
 
 ## 命令行直接调用
 
