@@ -644,10 +644,15 @@ mod tests {
         })
     }
 
+    fn region_with(region_x: i32, region_z: i32, index: u32, bytes: &[u8]) -> EasyRegionData {
+        let mut map = rustc_hash::FxHashMap::default();
+        map.insert(index, Bytes::copy_from_slice(bytes));
+        EasyRegionData::from_chunks(region_x, region_z, &map)
+    }
+
     #[test]
     fn template_serves_shared_bytes() {
-        let mut region = EasyRegionData::new(0, 0);
-        region.upsert_chunk(7, &[1, 2, 3]);
+        let region = region_with(0, 0, 7, &[1, 2, 3]);
         let template = template_from_regions(vec![region]);
 
         // Two "instances" get the same underlying buffer (refcount clone).
@@ -679,8 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn overlay_edit_and_remove_semantics() {
-        let mut region = EasyRegionData::new(0, 0);
-        region.upsert_chunk(0, &[9u8; 4]);
+        let region = region_with(0, 0, 0, &[9u8; 4]);
         let template = template_from_regions(vec![region]);
 
         let storage = EasyInstanceStorage {

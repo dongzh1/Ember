@@ -143,17 +143,41 @@ pub fn synthesize_chunk(
 /// synthesized chunks (see [`synthesize_chunk`]). Every other operation is
 /// delegated straight to `inner`.
 ///
-/// Callers skip wrapping for `GenerateMode::Seed` (the vanilla generator is
-/// wanted there); the decorator still works if wrapped, synthesizing all-air.
+/// Callers skip wrapping for `GenerateMode::Seed` with no `border` (the
+/// vanilla generator runs everywhere, unbounded); the decorator is still
+/// used whenever a `border` is set, even under `Seed`, so the border
+/// actually stops generation instead of only stopping player movement (see
+/// [`Self::border`]).
 pub struct GenFillIO {
     /// The world's real chunk store.
     pub inner: Arc<dyn FileIO<Data = Arc<ChunkData>>>,
-    /// How missing chunks are synthesized.
+    /// How missing chunks *inside* the border (or everywhere, if no border
+    /// is set) are synthesized.
     pub mode: GenerateMode,
     /// World bottom (block Y of the lowest section).
     pub min_y: i32,
     /// World height in blocks.
     pub height: i32,
+    /// Max world border in blocks (side length), centered on the world
+    /// origin (0, 0) — same value as `ember-world.toml`'s `border`, which
+    /// also clamps player movement (`pumpkin::world::border`), but that is
+    /// a separate, purely visual/movement mechanic that never reaches
+    /// storage or generation. A chunk entirely outside this box is always
+    /// synthesized as void, regardless of `mode` — this is what actually
+    /// stops new terrain from generating/persisting past the border.
+    /// `None` = unbounded (vanilla behaviour).
+    pub border: Option<i32>,
+}
+
+impl GenFillIO {
+    /// Whether chunk `pos`'s 16×16 column is entirely outside a
+    /// `border`-side-length square centered on the origin.
+    fn chunk_outside_border(pos: Vector2<i32>, border: i32) -> bool {
+        let half = f64::from(border) / 2.0;
+        let block_x = f64::from(pos.x * 16 + 8); // chunk center
+        let block_z = f64::from(pos.y * 16 + 8);
+        block_x < -half || block_x >= half || block_z < -half || block_z >= half
+    }
 }
 
 impl FileIO for GenFillIO {
@@ -169,6 +193,7 @@ impl FileIO for GenFillIO {
             let mode = self.mode;
             let min_y = self.min_y;
             let height = self.height;
+            let border = self.border;
 
             // A bounded channel of 1 keeps backpressure between the inner
             // store and the caller (mirrors `ChunkFileManager::fetch_chunks`).
@@ -179,6 +204,25 @@ impl FileIO for GenFillIO {
             let forward = async move {
                 while let Some(data) = recv.recv().await {
                     let mapped = match data {
+                        LoadedData::Missing(pos)
+                            if border.is_some_and(|b| Self::chunk_outside_border(pos, b)) =>
+                        {
+                            // Outside the border: always void, regardless of
+                            // `mode` — the border must cap generation even
+                            // under `Seed`, where the real generator would
+                            // otherwise still run for everything.
+                            LoadedData::Loaded(Arc::new(synthesize_chunk(
+                                pos,
+                                min_y,
+                                height,
+                                GenerateMode::Void,
+                            )))
+                        }
+                        LoadedData::Missing(pos) if mode == GenerateMode::Seed => {
+                            // Inside the border (or unbounded): let the real
+                            // generator handle it, same as no wrapping at all.
+                            LoadedData::Missing(pos)
+                        }
                         LoadedData::Missing(pos) => {
                             LoadedData::Loaded(Arc::new(synthesize_chunk(pos, min_y, height, mode)))
                         }
@@ -259,6 +303,22 @@ mod tests {
         assert!(matches!(chunk.status, ChunkStatus::Full));
         let sections = chunk.section.block_sections.read().unwrap();
         assert!(sections.iter().all(BlockPalette::has_only_air));
+    }
+
+    #[test]
+    fn chunk_outside_border_basics() {
+        // The origin chunk is always inside for any positive border.
+        assert!(!GenFillIO::chunk_outside_border(Vector2::new(0, 0), 512));
+        // Chunk (15, 0) center = 248 blocks; still inside a 512 border (half = 256).
+        assert!(!GenFillIO::chunk_outside_border(Vector2::new(15, 0), 512));
+        // Chunk (16, 0) center = 264 blocks; outside.
+        assert!(GenFillIO::chunk_outside_border(Vector2::new(16, 0), 512));
+        // Symmetric on the negative side.
+        assert!(!GenFillIO::chunk_outside_border(Vector2::new(-16, 0), 512));
+        assert!(GenFillIO::chunk_outside_border(Vector2::new(-17, 0), 512));
+        // The Z axis behaves the same way as X.
+        assert!(GenFillIO::chunk_outside_border(Vector2::new(0, 16), 512));
+        assert!(!GenFillIO::chunk_outside_border(Vector2::new(0, -16), 512));
     }
 
     #[test]

@@ -5,6 +5,13 @@
 //  2. Bitmap + flat array — replaces BTreeMap, eliminates serialization overhead
 //  3. All stored chunk NBT concatenated into one contiguous buffer before zstd
 //
+// `EasyRegionData` below is the *wire* layout (what gets postcard-encoded and
+// zstd-compressed): optimized for compression ratio, not point updates — a
+// single-chunk change means splicing the shared `chunks_data` buffer.
+// `EasyWorldFile` keeps the *live* copy as a plain index -> bytes map instead
+// (O(1) update/remove), and only pays the O(region bytes) cost of building
+// the wire layout once, in `write()`, instead of once per updated chunk.
+//
 // File extension: .easy
 // File naming:    r.{region_x}.{region_z}.easy
 
@@ -13,6 +20,7 @@ use std::{marker::PhantomData, path::PathBuf};
 use bytes::Bytes;
 use pumpkin_data::block_properties::is_air;
 use pumpkin_util::math::vector2::Vector2;
+use rustc_hash::FxHashMap;
 use ruzstd::{
     decoding::StreamingDecoder,
     encoding::{CompressionLevel, compress_to_vec},
@@ -62,6 +70,27 @@ impl EasyRegionData {
         }
     }
 
+    /// Builds a fresh wire-format region from a live `index -> bytes` map in
+    /// one O(total stored bytes) pass — the batch counterpart to calling
+    /// `upsert_chunk` once per chunk, which is O(region bytes) *each* call
+    /// because it keeps the shared `chunks_data` buffer in bitmap order.
+    pub(crate) fn from_chunks(
+        region_x: i32,
+        region_z: i32,
+        chunks: &FxHashMap<u32, Bytes>,
+    ) -> Self {
+        let mut region = Self::new(region_x, region_z);
+        let mut indices: Vec<u32> = chunks.keys().copied().collect();
+        indices.sort_unstable();
+        for index in indices {
+            let bytes = &chunks[&index];
+            region.set_chunk(index);
+            region.chunk_sizes.push(bytes.len() as u32);
+            region.chunks_data.extend_from_slice(bytes);
+        }
+        region
+    }
+
     /// Returns true if the bit for chunk `index` (0..1023) is set.
     fn has_chunk(&self, index: u32) -> bool {
         let byte = self.chunk_bitmap[(index / 8) as usize];
@@ -73,97 +102,9 @@ impl EasyRegionData {
         self.chunk_bitmap[(index / 8) as usize] |= 1 << (index % 8);
     }
 
-    /// Clear the bit for chunk `index`.
-    fn clear_chunk(&mut self, index: u32) {
-        self.chunk_bitmap[(index / 8) as usize] &= !(1u8 << (index % 8));
-    }
-
-    /// Number of stored chunks with an index lower than `index`.
-    /// This is the position of chunk `index` inside `chunk_sizes`
-    /// (bitmap order), whether or not it is stored itself.
-    fn stored_before(&self, index: u32) -> usize {
-        (0..index).filter(|&i| self.has_chunk(i)).count()
-    }
-
-    /// Byte offset into `chunks_data` where the chunk at `stored_idx` starts.
-    fn offset_of_stored(&self, stored_idx: usize) -> usize {
-        self.chunk_sizes[..stored_idx]
-            .iter()
-            .map(|&s| s as usize)
-            .sum()
-    }
-
-    /// Returns (`byte_offset`, `size`, `stored_index`) for a stored chunk.
-    /// Returns `None` if the chunk is not stored or the region data is
-    /// internally inconsistent (defensive against corrupted input).
-    fn chunk_info(&self, index: u32) -> Option<(usize, u32, usize)> {
-        if !self.has_chunk(index) {
-            return None;
-        }
-        let stored_idx = self.stored_before(index);
-        let size = *self.chunk_sizes.get(stored_idx)?;
-        let offset = self.offset_of_stored(stored_idx);
-        if offset + size as usize > self.chunks_data.len() {
-            return None;
-        }
-        Some((offset, size, stored_idx))
-    }
-
-    /// Get a chunk's raw NBT bytes by its region-relative index.
-    /// Returns `None` if the chunk is not stored (pruned or missing).
-    pub(crate) fn get_chunk_bytes(&self, index: u32) -> Option<Vec<u8>> {
-        let (offset, size, _) = self.chunk_info(index)?;
-        Some(self.chunks_data[offset..offset + size as usize].to_vec())
-    }
-
-    /// Insert or update a chunk.  Called during `update_chunk`.
-    ///
-    /// `chunk_sizes`/`chunks_data` are kept in bitmap (index) order, so new
-    /// chunks must be spliced in at their ordered position — appending would
-    /// desync the size table from the bitmap for every later lookup.
-    pub(crate) fn upsert_chunk(&mut self, index: u32, raw_nbt: &[u8]) {
-        let new_size = raw_nbt.len() as u32;
-
-        if let Some((offset, old_size, stored_idx)) = self.chunk_info(index) {
-            // Replace the existing data range in place.
-            self.chunks_data
-                .splice(offset..offset + old_size as usize, raw_nbt.iter().copied());
-            self.chunk_sizes[stored_idx] = new_size;
-        } else {
-            // Insert at the bitmap-ordered position.
-            let stored_idx = self.stored_before(index);
-            let offset = self.offset_of_stored(stored_idx);
-            self.set_chunk(index);
-            self.chunk_sizes.insert(stored_idx, new_size);
-            self.chunks_data
-                .splice(offset..offset, raw_nbt.iter().copied());
-        }
-    }
-
-    /// Remove a stored chunk (used by the `ChunkPruner` so an emptied chunk
-    /// does not resurrect its old contents on the next load).
-    /// Returns `true` if the chunk existed.
-    pub(crate) fn remove_chunk(&mut self, index: u32) -> bool {
-        match self.chunk_info(index) {
-            Some((offset, size, stored_idx)) => {
-                self.chunks_data.drain(offset..offset + size as usize);
-                self.chunk_sizes.remove(stored_idx);
-                self.clear_chunk(index);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Number of chunks currently stored.
-    const fn stored_count(&self) -> usize {
-        self.chunk_sizes.len()
-    }
-
     /// Byte spans `(offset, size)` of every stored chunk, indexed by
-    /// region-relative chunk index. One O(1024) prefix-sum pass replaces the
-    /// O(N)-per-lookup scans of `stored_before`/`offset_of_stored` on
-    /// read-heavy paths (batch loads, template building).
+    /// region-relative chunk index. One O(1024) prefix-sum pass over the
+    /// bitmap, used by every read path (batch loads, template building).
     pub(crate) fn chunk_spans(&self) -> Box<[Option<(usize, usize)>]> {
         let mut spans = vec![None; 1024].into_boxed_slice();
         let mut stored_idx = 0usize;
@@ -192,6 +133,16 @@ impl EasyRegionData {
         (0..1024u32).filter_map(move |i| {
             spans[i as usize].map(|(offset, size)| (i, &self.chunks_data[offset..offset + size]))
         })
+    }
+
+    /// Inverse of `from_chunks`: materializes this wire-format region into a
+    /// live `index -> bytes` map, the representation every read path (file
+    /// load, `MySQL` region-cache fill) actually works against — O(1) lookup
+    /// per chunk instead of re-walking the bitmap for each one.
+    pub(crate) fn to_chunks_map(&self) -> FxHashMap<u32, Bytes> {
+        self.stored_chunks()
+            .map(|(index, bytes)| (index, Bytes::copy_from_slice(bytes)))
+            .collect()
     }
 
     /// Structural consistency check for data loaded from disk or database.
@@ -263,7 +214,13 @@ pub(crate) fn decode_region_bytes(raw: &[u8]) -> Result<EasyRegionData, ChunkRea
 // ─── ChunkSerializer implementation ────────────────────────────────────
 
 pub struct EasyWorldFile<D> {
-    data: EasyRegionData,
+    region_x: i32,
+    region_z: i32,
+    /// Live per-chunk storage, keyed by region-relative index (0..1024).
+    /// `update_chunk` is a plain O(1) map insert/remove; the wire-format
+    /// `EasyRegionData` (bitmap + concatenated bytes) is only built when
+    /// actually serializing in `write()`.
+    chunks: FxHashMap<u32, Bytes>,
     /// Set on the first actual mutation; a clean region skips the
     /// whole-region recompress + rewrite entirely on flush.
     dirty: std::sync::atomic::AtomicBool,
@@ -273,11 +230,21 @@ pub struct EasyWorldFile<D> {
 impl<D> Default for EasyWorldFile<D> {
     fn default() -> Self {
         Self {
-            data: EasyRegionData::new(0, 0),
+            region_x: 0,
+            region_z: 0,
+            chunks: FxHashMap::default(),
             dirty: std::sync::atomic::AtomicBool::new(false),
             _phantom: PhantomData,
         }
     }
+}
+
+/// Region-relative chunk index (0..1024) for a chunk at world position `(x, z)`.
+/// Shared with `easy_mysql.rs` so both backends compute it identically.
+pub(crate) const fn region_relative_index(x: i32, z: i32) -> u32 {
+    let rel_x = x.rem_euclid(32);
+    let rel_z = z.rem_euclid(32);
+    (rel_x + rel_z * 32) as u32
 }
 
 impl<D> ChunkSerializer for EasyWorldFile<D>
@@ -307,19 +274,24 @@ where
             return Ok(());
         }
 
-        let serialized = postcard::to_allocvec(&self.data)
+        let region = EasyRegionData::from_chunks(self.region_x, self.region_z, &self.chunks);
+        let serialized = postcard::to_allocvec(&region)
             .map_err(|e| std::io::Error::other(format!("postcard serialize: {e}")))?;
         let raw_len = serialized.len();
 
         // Region compression is CPU-bound — keep it off the async workers.
+        // EMBER: `ruzstd` only implements `Uncompressed`/`Fastest` — any other
+        // level (including `Default`, used here until this fix) hits
+        // `unimplemented!()` and panics on every call. Match pump.rs/linear.rs,
+        // which already use the only working compressing level.
         let compressed = tokio::task::spawn_blocking(move || {
-            compress_to_vec(&*serialized, CompressionLevel::Default)
+            compress_to_vec(&*serialized, CompressionLevel::Fastest)
         })
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
         debug!(
             "EasyWorld v2: {} chunks → {} B raw → {} B zstd for {}",
-            self.data.stored_count(),
+            self.chunks.len(),
             raw_len,
             compressed.len(),
             backend.display(),
@@ -339,9 +311,11 @@ where
     }
 
     fn read(r: Bytes) -> Result<Self, ChunkReadingError> {
-        let data = decode_region_bytes(&r)?;
+        let region = decode_region_bytes(&r)?;
         Ok(Self {
-            data,
+            region_x: region.region_x,
+            region_z: region.region_z,
+            chunks: region.to_chunks_map(),
             dirty: std::sync::atomic::AtomicBool::new(false),
             _phantom: PhantomData,
         })
@@ -353,11 +327,9 @@ where
         _chunk_config: &Self::ChunkConfig,
     ) -> Result<(), ChunkWritingError> {
         let (x, z) = chunk_data.position();
-        self.data.region_x = x >> 5;
-        self.data.region_z = z >> 5;
-        let rel_x = x.rem_euclid(32);
-        let rel_z = z.rem_euclid(32);
-        let index = (rel_x + rel_z * 32) as u32;
+        self.region_x = x >> 5;
+        self.region_z = z >> 5;
+        let index = region_relative_index(x, z);
 
         // ChunkPruner: skip chunks that are entirely air with no block entities.
         // We downcast via Any to check the concrete type.  This only applies when
@@ -368,7 +340,7 @@ where
             trace!("EasyWorld: pruning empty chunk ({x},{z}) index {index}");
             // Remove any previously stored version, otherwise a chunk that was
             // mined out to all air would resurrect its old contents on reload.
-            if self.data.remove_chunk(index) {
+            if self.chunks.remove(&index).is_some() {
                 self.dirty.store(true, std::sync::atomic::Ordering::Release);
             }
             return Ok(());
@@ -379,7 +351,7 @@ where
             .await
             .map_err(|e| ChunkWritingError::ChunkSerializingError(e.to_string()))?;
 
-        self.data.upsert_chunk(index, &bytes);
+        self.chunks.insert(index, bytes);
         self.dirty.store(true, std::sync::atomic::Ordering::Release);
 
         Ok(())
@@ -390,25 +362,21 @@ where
         chunks: Vec<Vector2<i32>>,
         stream: tokio::sync::mpsc::Sender<LoadedData<Self::Data, ChunkReadingError>>,
     ) {
-        // One O(1024) pass, then O(1) per requested chunk.
-        let spans = self.data.chunk_spans();
+        // Direct O(1) map lookup per requested chunk — no region-wide pass needed.
         for pos in chunks {
-            let rel_x = pos.x.rem_euclid(32);
-            let rel_z = pos.y.rem_euclid(32);
-            let index = (rel_x + rel_z * 32) as usize;
-
-            if let Some((offset, size)) = spans[index] {
-                let bytes = Bytes::copy_from_slice(&self.data.chunks_data[offset..offset + size]);
-                match D::from_bytes(&bytes, pos) {
+            let index = region_relative_index(pos.x, pos.y);
+            match self.chunks.get(&index) {
+                Some(bytes) => match D::from_bytes(bytes, pos) {
                     Ok(data) => {
                         let _ = stream.send(LoadedData::Loaded(data)).await;
                     }
                     Err(e) => {
                         let _ = stream.send(LoadedData::Error((pos, e))).await;
                     }
+                },
+                None => {
+                    let _ = stream.send(LoadedData::Missing(pos)).await;
                 }
-            } else {
-                let _ = stream.send(LoadedData::Missing(pos)).await;
             }
         }
     }
@@ -435,79 +403,46 @@ pub(crate) fn try_prune_chunk_any<D: 'static>(chunk_data: &D) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::EasyRegionData;
+    use bytes::Bytes;
 
-    #[test]
-    fn upsert_out_of_order_keeps_bitmap_order() {
-        let mut r = EasyRegionData::new(0, 0);
-        // Insert with descending indices: sizes/data must stay in bitmap order.
-        r.upsert_chunk(900, &[9u8; 10]);
-        r.upsert_chunk(300, &[3u8; 7]);
-        r.upsert_chunk(5, &[5u8; 4]);
-        assert!(r.is_consistent());
-        assert_eq!(r.get_chunk_bytes(5).unwrap(), vec![5u8; 4]);
-        assert_eq!(r.get_chunk_bytes(300).unwrap(), vec![3u8; 7]);
-        assert_eq!(r.get_chunk_bytes(900).unwrap(), vec![9u8; 10]);
-        assert!(r.get_chunk_bytes(0).is_none());
-        assert!(r.get_chunk_bytes(1023).is_none());
-    }
+    use super::{EasyRegionData, FxHashMap};
 
-    #[test]
-    fn upsert_existing_resizes_in_place() {
-        let mut r = EasyRegionData::new(0, 0);
-        r.upsert_chunk(10, &[1u8; 8]);
-        r.upsert_chunk(20, &[2u8; 8]);
-        // Grow the first chunk, shrink the second: neighbours must survive.
-        r.upsert_chunk(10, &[7u8; 20]);
-        r.upsert_chunk(20, &[8u8; 2]);
-        assert!(r.is_consistent());
-        assert_eq!(r.get_chunk_bytes(10).unwrap(), vec![7u8; 20]);
-        assert_eq!(r.get_chunk_bytes(20).unwrap(), vec![8u8; 2]);
-    }
-
-    #[test]
-    fn remove_chunk_shifts_later_chunks() {
-        let mut r = EasyRegionData::new(0, 0);
-        r.upsert_chunk(1, &[1u8; 3]);
-        r.upsert_chunk(2, &[2u8; 5]);
-        r.upsert_chunk(3, &[3u8; 7]);
-        assert!(r.remove_chunk(2));
-        assert!(!r.remove_chunk(2)); // already gone
-        assert!(r.is_consistent());
-        assert!(r.get_chunk_bytes(2).is_none());
-        assert_eq!(r.get_chunk_bytes(1).unwrap(), vec![1u8; 3]);
-        assert_eq!(r.get_chunk_bytes(3).unwrap(), vec![3u8; 7]);
+    /// Builds a region the same way production code does — via `from_chunks`
+    /// — instead of point mutation, since the wire format is now write-once
+    /// per flush (no more incremental `upsert_chunk`/`remove_chunk`).
+    fn region_from(region_x: i32, region_z: i32, entries: &[(u32, &[u8])]) -> EasyRegionData {
+        let map: FxHashMap<u32, Bytes> = entries
+            .iter()
+            .map(|&(index, data)| (index, Bytes::copy_from_slice(data)))
+            .collect();
+        EasyRegionData::from_chunks(region_x, region_z, &map)
     }
 
     #[test]
     fn postcard_roundtrip() {
-        let mut r = EasyRegionData::new(-3, 7);
-        r.upsert_chunk(0, &[42u8; 16]);
-        r.upsert_chunk(1023, &[43u8; 32]);
+        let r = region_from(-3, 7, &[(0, &[42u8; 16]), (1023, &[43u8; 32])]);
         let bytes = postcard::to_allocvec(&r).unwrap();
         let back: EasyRegionData = postcard::from_bytes(&bytes).unwrap();
         assert!(back.is_consistent());
         assert_eq!(back.region_x, -3);
         assert_eq!(back.region_z, 7);
-        assert_eq!(back.get_chunk_bytes(0).unwrap(), vec![42u8; 16]);
-        assert_eq!(back.get_chunk_bytes(1023).unwrap(), vec![43u8; 32]);
+        let stored: FxHashMap<u32, &[u8]> = back.stored_chunks().collect();
+        assert_eq!(stored[&0], &[42u8; 16][..]);
+        assert_eq!(stored[&1023], &[43u8; 32][..]);
     }
 
     #[test]
-    fn spans_agree_with_lookup() {
-        let mut r = EasyRegionData::new(0, 0);
-        r.upsert_chunk(900, &[9u8; 10]);
-        r.upsert_chunk(300, &[3u8; 7]);
-        r.upsert_chunk(5, &[5u8; 4]);
+    fn chunk_spans_and_stored_chunks_agree() {
+        // Out-of-order insertion: sizes/data must land in bitmap order.
+        let r = region_from(0, 0, &[(900, &[9u8; 10]), (300, &[3u8; 7]), (5, &[5u8; 4])]);
+        assert!(r.is_consistent());
+
         let spans = r.chunk_spans();
-        for i in 0..1024u32 {
-            match (spans[i as usize], r.get_chunk_bytes(i)) {
-                (Some((offset, size)), Some(bytes)) => {
-                    assert_eq!(&r.chunks_data[offset..offset + size], &bytes[..]);
-                }
-                (None, None) => {}
-                _ => panic!("span/lookup disagree at index {i}"),
-            }
+        assert!(spans[0].is_none());
+        assert!(spans[1023].is_none());
+        for (index, bytes) in r.stored_chunks() {
+            let (offset, size) = spans[index as usize].expect("span must exist for a stored chunk");
+            assert_eq!(&r.chunks_data[offset..offset + size], bytes);
         }
         let stored: Vec<u32> = r.stored_chunks().map(|(i, _)| i).collect();
         assert_eq!(stored, vec![5, 300, 900]);
@@ -515,11 +450,168 @@ mod tests {
 
     #[test]
     fn corrupted_data_is_rejected_not_panicking() {
-        let mut r = EasyRegionData::new(0, 0);
-        r.upsert_chunk(4, &[1u8; 4]);
+        let mut r = region_from(0, 0, &[(4, &[1u8; 4])]);
         // Corrupt: drop the size table entry while the bit stays set.
         r.chunk_sizes.clear();
         assert!(!r.is_consistent());
-        assert!(r.get_chunk_bytes(4).is_none()); // must not panic
+        assert!(r.chunk_spans()[4].is_none()); // must not panic
+        assert!(r.stored_chunks().next().is_none()); // must not panic
+    }
+
+    #[test]
+    fn from_chunks_empty_map_is_consistent_and_empty() {
+        let empty = FxHashMap::default();
+        let region = EasyRegionData::from_chunks(0, 0, &empty);
+        assert!(region.is_consistent());
+        assert!(region.stored_chunks().next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod easy_world_file_tests {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use bytes::Bytes;
+    use pumpkin_util::math::vector2::Vector2;
+    use serde::{Deserialize, Serialize};
+    use temp_dir::TempDir;
+
+    use super::EasyWorldFile;
+    use crate::chunk::format::anvil::SingleChunkDataSerializer;
+    use crate::chunk::io::{ChunkSerializer, Dirtiable, LoadedData};
+    use crate::chunk::{ChunkReadingError, ChunkSerializingError};
+
+    #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+    struct MockChunk {
+        x: i32,
+        z: i32,
+        payload: Vec<u8>,
+    }
+
+    impl Dirtiable for MockChunk {
+        fn is_dirty(&self) -> bool {
+            true
+        }
+        fn mark_dirty(&self, _: bool) {}
+    }
+
+    impl SingleChunkDataSerializer for MockChunk {
+        fn to_bytes(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Bytes, ChunkSerializingError>> + Send + '_>>
+        {
+            let mut buf = Vec::new();
+            pumpkin_nbt::to_bytes_unnamed(self, &mut buf).unwrap();
+            let bytes = Bytes::from(buf);
+            Box::pin(async move { Ok(bytes) })
+        }
+        fn from_bytes(bytes: &Bytes, pos: Vector2<i32>) -> Result<Self, ChunkReadingError> {
+            let mut mock: Self = pumpkin_nbt::from_bytes_unnamed(std::io::Cursor::new(bytes))
+                .map_err(|e| {
+                    ChunkReadingError::ParsingError(
+                        crate::chunk::ChunkParsingError::ErrorDeserializingChunk(e.to_string()),
+                    )
+                })?;
+            mock.x = pos.x;
+            mock.z = pos.y;
+            Ok(mock)
+        }
+        fn position(&self) -> (i32, i32) {
+            (self.x, self.z)
+        }
+    }
+
+    fn chunk_at(x: i32, z: i32, payload: &[u8]) -> MockChunk {
+        MockChunk {
+            x,
+            z,
+            payload: payload.to_vec(),
+        }
+    }
+
+    async fn collect(
+        file: &EasyWorldFile<MockChunk>,
+        positions: Vec<Vector2<i32>>,
+    ) -> Vec<LoadedData<MockChunk, ChunkReadingError>> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(positions.len().max(1));
+        file.get_chunks(positions, tx).await;
+        let mut out = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            out.push(item);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn update_chunk_is_visible_before_any_flush() {
+        let mut file = EasyWorldFile::<MockChunk>::default();
+        file.update_chunk(&chunk_at(1, 2, b"hello"), &())
+            .await
+            .unwrap();
+        file.update_chunk(&chunk_at(3, 4, b"world"), &())
+            .await
+            .unwrap();
+
+        // No write() has happened yet: reads must still see both chunks
+        // (this is the correctness property the O(1) live map has to
+        // preserve now that update_chunk no longer mutates a shared,
+        // eagerly-serialized wire buffer).
+        let loaded = collect(
+            &file,
+            vec![
+                Vector2::new(1, 2),
+                Vector2::new(3, 4),
+                Vector2::new(9, 9), // never written -> Missing
+            ],
+        )
+        .await;
+
+        assert_eq!(loaded.len(), 3);
+        assert!(matches!(&loaded[0], LoadedData::Loaded(c) if c.payload == b"hello"));
+        assert!(matches!(&loaded[1], LoadedData::Loaded(c) if c.payload == b"world"));
+        assert!(matches!(&loaded[2], LoadedData::Missing(_)));
+    }
+
+    #[tokio::test]
+    async fn write_then_read_roundtrips_all_chunks() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.child("r.0.0.easy");
+
+        let mut file = EasyWorldFile::<MockChunk>::default();
+        for i in 0..10i32 {
+            file.update_chunk(&chunk_at(i, 0, &[i as u8; 3]), &())
+                .await
+                .unwrap();
+        }
+        file.write(&path).await.unwrap();
+
+        // `read()` decompresses internally (see `decode_region_bytes`), so the
+        // raw on-disk bytes go straight in — matching how `file_manager.rs`
+        // and the `pump.rs` equivalent test call it.
+        let bytes = tokio::fs::read(&path).await.unwrap();
+        let reloaded = EasyWorldFile::<MockChunk>::read(Bytes::from(bytes)).unwrap();
+
+        let positions: Vec<Vector2<i32>> = (0..10i32).map(|i| Vector2::new(i, 0)).collect();
+        let loaded = collect(&reloaded, positions).await;
+        assert_eq!(loaded.len(), 10);
+        for (i, item) in loaded.into_iter().enumerate() {
+            match item {
+                LoadedData::Loaded(c) => {
+                    assert_eq!(c.x, i as i32);
+                    assert_eq!(c.payload, vec![i as u8; 3]);
+                }
+                _ => panic!("expected Loaded at index {i}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn clean_region_skips_write() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.child("r.0.0.easy");
+        let file = EasyWorldFile::<MockChunk>::default(); // never mutated -> not dirty
+        file.write(&path).await.unwrap();
+        assert!(!path.exists(), "write() must be a no-op on a clean region");
     }
 }

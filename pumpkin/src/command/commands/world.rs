@@ -21,6 +21,7 @@ use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry
 use pumpkin_util::text::{TextComponent, color::NamedColor};
 
 use crate::command::argument_builder::{ArgumentBuilder, argument, command, literal};
+use crate::command::argument_types::core::integer::IntegerArgumentType;
 use crate::command::argument_types::core::string::StringArgumentType;
 use crate::command::context::command_context::CommandContext;
 use crate::command::node::dispatcher::CommandDispatcher;
@@ -270,15 +271,19 @@ impl CommandExecutor for WorldPrewarmExecutor {
 }
 
 const ARG_FORMAT: &str = "format";
+const ARG_BORDER: &str = "border";
 
 /// Converts every dimension tree of a world folder; returns
-/// `(regions, chunks, entity chunks, skipped)` or the first error.
+/// `(regions, chunks, entity chunks, skipped, regions_cropped)` or the
+/// first error.
 async fn convert_dimension_trees(
     resolved: &pumpkin_config::world::LevelConfig,
     dims: Vec<pumpkin_world::level::LevelFolder>,
     target: &ChunkConfig,
-) -> Result<(usize, usize, usize, usize), String> {
-    let (mut regions, mut chunks, mut entities, mut skipped) = (0usize, 0usize, 0usize, 0usize);
+    border: Option<i32>,
+) -> Result<(usize, usize, usize, usize, usize), String> {
+    let (mut regions, mut chunks, mut entities, mut skipped, mut cropped) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
     for folder in dims {
         // Per-dimension source: the on-disk format that is NOT the target
         // (robust against reruns after a partial conversion). A DB-backed
@@ -296,24 +301,44 @@ async fn convert_dimension_trees(
         let Some(from) = from else {
             continue; // nothing stored (or already converted)
         };
-        let stats = pumpkin_world::chunk::convert::convert_world(&folder, &from, target)
+        let stats = pumpkin_world::chunk::convert::convert_world(&folder, &from, target, border)
             .await
             .map_err(|e| format!("in {}: {e}", folder.dim_folder.display()))?;
         regions += stats.regions;
         chunks += stats.chunks;
         entities += stats.entity_chunks;
         skipped += stats.skipped;
+        cropped += stats.regions_cropped;
     }
-    Ok((regions, chunks, entities, skipped))
+    Ok((regions, chunks, entities, skipped, cropped))
 }
 
-struct WorldConvertExecutor;
+/// `border > 0` crops the conversion to a `border`-side-length square
+/// centered on the origin (0, 0) — same units/center as `ember-world.toml`'s
+/// `border` — and pins that same value into the resulting sidecar.
+struct WorldConvertExecutor {
+    cropped: bool,
+}
+
+/// Feedback suffix describing a crop, or empty when the conversion wasn't cropped.
+fn crop_note(border: Option<i32>, cropped_regions: usize) -> String {
+    border.map_or_else(String::new, |b| {
+        format!(
+            " Cropped to a {b}-block border ({cropped_regions} region(s) outside it skipped); \
+             border pinned in ember-world.toml."
+        )
+    })
+}
 
 impl CommandExecutor for WorldConvertExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let format = StringArgumentType::get(context, ARG_FORMAT)?.to_string();
+            let border = self
+                .cropped
+                .then(|| IntegerArgumentType::get(context, ARG_BORDER))
+                .transpose()?;
             let server = context.server().clone();
 
             let Some(target) = pumpkin_world::chunk::convert::config_for_name(&format) else {
@@ -375,8 +400,8 @@ impl CommandExecutor for WorldConvertExecutor {
 
             let global = &server.advanced_config.world;
             let resolved = pumpkin_config::ember_world::resolve_level_config(global, &root);
-            let (regions, chunks, entities, skipped) =
-                match convert_dimension_trees(&resolved, dims, &target).await {
+            let (regions, chunks, entities, skipped, cropped) =
+                match convert_dimension_trees(&resolved, dims, &target, border).await {
                     Ok(stats) => stats,
                     Err(e) => {
                         feedback(context, err_text(format!("Conversion failed {e}"))).await;
@@ -385,9 +410,12 @@ impl CommandExecutor for WorldConvertExecutor {
                 };
 
             // Make the migrated format explicit on disk so later default
-            // changes can never flip this world again.
+            // changes can never flip this world again; a crop border is
+            // pinned the same way so the world stays bounded (and gets the
+            // small-map prewarm treatment) after this conversion.
             let sidecar = pumpkin_config::ember_world::EmberWorldConfig {
                 chunk: Some(target.clone()),
+                border,
                 ..Default::default()
             };
             if let Err(e) = pumpkin_config::ember_world::write_sidecar(&root, &sidecar) {
@@ -406,7 +434,8 @@ impl CommandExecutor for WorldConvertExecutor {
                 TextComponent::text(format!(
                     "World '{name}' converted to '{format}': {regions} region(s), \
                      {chunks} chunk(s), {entities} entity chunk(s), {skipped} skipped. \
-                     Old files renamed to *.bak; format pinned in ember-world.toml."
+                     Old files renamed to *.bak; format pinned in ember-world.toml.{}",
+                    crop_note(border, cropped)
                 ))
                 .color_named(NamedColor::Green),
             )
@@ -477,7 +506,14 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                 literal("convert").then(
                     argument(ARG_NAME, StringArgumentType::SingleWord).then(
                         argument(ARG_FORMAT, StringArgumentType::SingleWord)
-                            .executes(WorldConvertExecutor),
+                            // `/world convert <name> <format>` — convert everything stored.
+                            .executes(WorldConvertExecutor { cropped: false })
+                            // `/world convert <name> <format> <border>` — also crop to a
+                            // border-side-length square centered on the origin.
+                            .then(
+                                argument(ARG_BORDER, IntegerArgumentType::with_min(1))
+                                    .executes(WorldConvertExecutor { cropped: true }),
+                            ),
                     ),
                 ),
             )

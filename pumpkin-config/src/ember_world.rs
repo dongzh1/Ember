@@ -75,7 +75,9 @@ pub struct EmberRuntime {
     pub source: Option<String>,
     /// Terrain generation mode.
     pub generate: GenerateMode,
-    /// Max world border in blocks (side length); `None` = unbounded.
+    /// Max world border in blocks (side length), centered on the origin;
+    /// also caps generation/storage there, not just player movement —
+    /// see [`EmberWorldConfig::border`]. `None` = unbounded.
     pub border: Option<i32>,
 }
 
@@ -83,10 +85,14 @@ pub struct EmberRuntime {
 #[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct EmberWorldConfig {
-    /// Max world border in blocks (side length). When set, the world border
-    /// is clamped to it (players cannot build past it) and a value
-    /// `<= SMALL_MAP_MAX_BORDER` marks the world as a small map. `None`
-    /// leaves the border unbounded (a big map).
+    /// Max world border in blocks (side length), centered on the world
+    /// origin. When set: the vanilla world border clamps to it (players
+    /// cannot walk/build past it), storage/generation also stop there
+    /// (chunks entirely outside it are always void, never really
+    /// generated or persisted, regardless of `generate` — see
+    /// `chunk::gen_fill::GenFillIO`), and a value `<= SMALL_MAP_MAX_BORDER`
+    /// marks the world as a small map. `None` leaves the border unbounded
+    /// (a big map, infinite vanilla-style generation under `generate = seed`).
     pub border: Option<i32>,
     /// Terrain generation mode (see [`GenerateMode`]).
     pub generate: GenerateMode,

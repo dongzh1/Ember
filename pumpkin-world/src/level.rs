@@ -97,18 +97,23 @@ fn build_easy_chunk_saver(
         EasyBackend::Mysql => Arc::new(EasyMysqlStorage::new(&cfg.mysql(ember.mode))),
     };
 
-    // Non-seed worlds synthesize void/ocean for ungenerated chunks instead
-    // of running the terrain generator.
-    let saver: Arc<dyn FileIO<Data = SyncChunk>> = if ember.generate == GenerateMode::Seed {
-        inner
-    } else {
-        Arc::new(GenFillIO {
-            inner,
-            mode: ember.generate,
-            min_y,
-            height,
-        })
-    };
+    // Non-seed worlds synthesize void/ocean for ungenerated chunks instead of
+    // running the terrain generator; a bordered world (even under `Seed`)
+    // needs the same wrapping so chunks outside the border are voided
+    // instead of really generated/stored — the border alone (see
+    // `pumpkin::world::border`) only stops player movement, not generation.
+    let saver: Arc<dyn FileIO<Data = SyncChunk>> =
+        if ember.generate == GenerateMode::Seed && ember.border.is_none() {
+            inner
+        } else {
+            Arc::new(GenFillIO {
+                inner,
+                mode: ember.generate,
+                min_y,
+                height,
+                border: ember.border,
+            })
+        };
 
     // A read_only world that reaches here has no source template (the source
     // branch returned above). Wrap the saver so block/chunk writes are never

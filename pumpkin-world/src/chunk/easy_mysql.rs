@@ -29,6 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use futures::future::join_all;
 use pumpkin_util::math::vector2::Vector2;
+use rustc_hash::FxHashMap;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, trace, warn};
 
@@ -124,9 +125,13 @@ fn unix_now() -> i64 {
 fn serialize_region(region: &EasyRegionData) -> Result<Vec<u8>, ChunkWritingError> {
     let raw = postcard::to_allocvec(region)
         .map_err(|e| ChunkWritingError::ChunkSerializingError(e.to_string()))?;
+    // EMBER: `ruzstd` only implements `Uncompressed`/`Fastest` — any other
+    // level (including `Default`, used here until this fix) hits
+    // `unimplemented!()` and panics on every single call. Match pump.rs/
+    // linear.rs, which already use the only working compressing level.
     Ok(ruzstd::encoding::compress_to_vec(
         &*raw,
-        ruzstd::encoding::CompressionLevel::Default,
+        ruzstd::encoding::CompressionLevel::Fastest,
     ))
 }
 
@@ -464,12 +469,14 @@ type RegionSaveBatch = Vec<(Vector2<i32>, Arc<crate::chunk::ChunkData>)>;
 /// a full region load ("void wall").
 const PREFETCH_MARGIN: i32 = 4;
 
-/// Bounded LRU of decompressed regions. A dense region's raw NBT buffer
-/// can take tens of MB, so residency must be capped — eviction drops the
-/// least recently touched region (it reloads from the database on demand).
+/// Bounded LRU of decompressed regions, held as the same live `index -> bytes`
+/// map `EasyWorldFile` (the file backend) keeps resident — not the wire
+/// format — so a cache hit is an O(1) lookup per chunk instead of an
+/// O(region index) bitmap scan, and a dense region's raw NBT buffer is
+/// capped in the same way.
 ///
-/// Regions are held behind `Arc` so a cache hit shares the buffer instead
-/// of deep-copying it on every fetch. Recency is tracked with atomics so a
+/// Regions are held behind `Arc` so a cache hit shares the map instead of
+/// deep-copying it on every fetch. Recency is tracked with atomics so a
 /// cache hit needs only a shared borrow — many players loading chunks of
 /// the same world (hub teleport storms) no longer serialize on the outer
 /// `RwLock`'s writer path.
@@ -480,7 +487,7 @@ struct RegionCache {
 }
 
 struct CacheEntry {
-    region: Arc<EasyRegionData>,
+    chunks: Arc<FxHashMap<u32, Bytes>>,
     last_used: std::sync::atomic::AtomicU64,
 }
 
@@ -494,11 +501,11 @@ impl RegionCache {
     }
 
     /// Cache hit under a shared borrow (callers hold only the read lock).
-    fn get(&self, key: &RegionKey) -> Option<Arc<EasyRegionData>> {
+    fn get(&self, key: &RegionKey) -> Option<Arc<FxHashMap<u32, Bytes>>> {
         let entry = self.map.get(key)?;
         let tick = self.tick.fetch_add(1, Ordering::Relaxed) + 1;
         entry.last_used.store(tick, Ordering::Relaxed);
-        Some(entry.region.clone())
+        Some(entry.chunks.clone())
     }
 
     fn contains(&self, key: &RegionKey) -> bool {
@@ -524,20 +531,20 @@ impl RegionCache {
     }
 
     /// Authoritative insert (post-save): always replaces the entry.
-    fn put(&mut self, key: RegionKey, region: Arc<EasyRegionData>) {
+    fn put(&mut self, key: RegionKey, chunks: Arc<FxHashMap<u32, Bytes>>) {
         let last_used = self.next_tick();
-        self.map.insert(key, CacheEntry { region, last_used });
+        self.map.insert(key, CacheEntry { chunks, last_used });
         self.evict_to_cap();
     }
 
     /// Non-authoritative insert (loaded/prefetched from the DB): only fills
     /// an empty slot, so it can never clobber a fresher post-save entry.
-    fn put_if_absent(&mut self, key: RegionKey, region: Arc<EasyRegionData>) {
+    fn put_if_absent(&mut self, key: RegionKey, chunks: Arc<FxHashMap<u32, Bytes>>) {
         if self.map.contains_key(&key) {
             return;
         }
         let last_used = self.next_tick();
-        self.map.insert(key, CacheEntry { region, last_used });
+        self.map.insert(key, CacheEntry { chunks, last_used });
         self.evict_to_cap();
     }
 
@@ -776,10 +783,10 @@ impl EasyMysqlStorage {
     }
 
     /// Compute the region-relative chunk index (0..1023).
+    /// Shared with the `.easy` file backend (`EasyWorldFile`) so both
+    /// backends index chunks identically — see `format::easy::region_relative_index`.
     const fn chunk_index(pos: Vector2<i32>) -> u32 {
-        let rx = pos.x.rem_euclid(32);
-        let rz = pos.y.rem_euclid(32);
-        (rx + rz * 32) as u32
+        crate::chunk::format::easy::region_relative_index(pos.x, pos.y)
     }
 
     async fn get_region(
@@ -787,26 +794,26 @@ impl EasyMysqlStorage {
         world_key: &str,
         rx: i32,
         rz: i32,
-    ) -> Result<Arc<EasyRegionData>, ChunkReadingError> {
+    ) -> Result<Arc<FxHashMap<u32, Bytes>>, ChunkReadingError> {
         let key = (world_key.to_string(), rx, rz);
         // Hit path only needs the read lock (recency is atomic).
         let cached = self.region_cache.read().await.get(&key);
-        if let Some(region) = cached {
-            return Ok(region);
+        if let Some(chunks) = cached {
+            return Ok(chunks);
         }
         let pool = self.ensure_pool().await?;
-        let region = Arc::new(
+        let chunks = Arc::new(
             pool.load_region(world_key, rx, rz)
                 .await?
-                .unwrap_or_else(|| EasyRegionData::new(rx, rz)),
+                .map_or_else(FxHashMap::default, |region| region.to_chunks_map()),
         );
         // `put_if_absent`: a concurrent save may have inserted a fresher
         // post-save region while we were loading — never clobber it.
         self.region_cache
             .write()
             .await
-            .put_if_absent(key, region.clone());
-        Ok(region)
+            .put_if_absent(key, chunks.clone());
+        Ok(chunks)
     }
 
     /// Background-prefetch a region into the LRU cache (no-op when already
@@ -829,7 +836,10 @@ impl EasyMysqlStorage {
                     trace!("EasyWorld: prefetched region ({rx},{rz}) of {world_key}");
                     // Never clobber a fresher post-save entry that landed
                     // while this prefetch was loading.
-                    cache.write().await.put_if_absent(key, Arc::new(region));
+                    cache
+                        .write()
+                        .await
+                        .put_if_absent(key, Arc::new(region.to_chunks_map()));
                 }
                 Ok(None) => {}
                 Err(e) => debug!("EasyWorld: prefetch of ({rx},{rz}) failed: {e}"),
@@ -895,8 +905,8 @@ impl FileIO for EasyMysqlStorage {
                 let stream = stream.clone();
                 let world_key = world_key.clone();
                 async move {
-                    let region = match self.get_region(&world_key, rx, rz).await {
-                        Ok(r) => r,
+                    let chunks = match self.get_region(&world_key, rx, rz).await {
+                        Ok(c) => c,
                         Err(e) => {
                             // Every requested chunk needs a response, or the
                             // consumer waits forever for the missing ones.
@@ -911,12 +921,14 @@ impl FileIO for EasyMysqlStorage {
                         }
                     };
 
+                    // Direct O(1) map lookup per requested chunk — no
+                    // region-wide bitmap scan needed (mirrors the file
+                    // backend's `EasyWorldFile::get_chunks`).
                     for pos in coords {
                         let index = Self::chunk_index(pos);
-                        match region.get_chunk_bytes(index) {
-                            Some(raw_bytes) => {
-                                let bytes = Bytes::from(raw_bytes);
-                                match <crate::chunk::ChunkData as SingleChunkDataSerializer>::from_bytes(&bytes, pos) {
+                        match chunks.get(&index) {
+                            Some(bytes) => {
+                                match <crate::chunk::ChunkData as SingleChunkDataSerializer>::from_bytes(bytes, pos) {
                                     Ok(data) => {
                                         let _ =
                                             stream.send(LoadedData::Loaded(Arc::new(data))).await;
@@ -994,8 +1006,13 @@ impl FileIO for EasyMysqlStorage {
                         error!("Failed to load region ({rx},{rz}) for write: {e}");
                         ChunkWritingError::IoError(std::io::Error::other(e.to_string()))
                     })?;
-                    // Copy-on-write: mutate an owned copy, then re-share it.
-                    let mut region = (*cached).clone();
+                    // Copy-on-write over the same live index -> bytes map the
+                    // cache and the `.easy` file backend (`EasyWorldFile`)
+                    // both keep resident: O(1) per-chunk update instead of an
+                    // O(region bytes) splice/drain per chunk. Cloning only
+                    // copies the map's (index, refcounted `Bytes`) entries,
+                    // not the underlying chunk bytes themselves.
+                    let mut chunks: FxHashMap<u32, Bytes> = (*cached).clone();
 
                     let mut changed = false;
                     for (pos, chunk) in &entries {
@@ -1003,18 +1020,24 @@ impl FileIO for EasyMysqlStorage {
                         // ChunkPruner: an emptied chunk is removed instead of
                         // stored, so its old contents cannot resurrect.
                         if crate::chunk::format::easy::is_prunable_chunk(chunk) {
-                            changed |= region.remove_chunk(index);
+                            changed |= chunks.remove(&index).is_some();
                             continue;
                         }
                         let bytes = chunk
                             .to_bytes()
                             .await
                             .map_err(|e| ChunkWritingError::ChunkSerializingError(e.to_string()))?;
-                        region.upsert_chunk(index, &bytes);
+                        chunks.insert(index, bytes);
                         changed = true;
                     }
 
                     if changed {
+                        // Rebuild the wire format once (O(total bytes))
+                        // instead of once per updated chunk — the same batch
+                        // rebuild `EasyWorldFile::write()` uses on the file
+                        // backend. Only needed to actually persist; the
+                        // cache below stores the live map directly.
+                        let region = EasyRegionData::from_chunks(rx, rz, &chunks);
                         let pool = self.ensure_pool().await.map_err(|e| {
                             ChunkWritingError::IoError(std::io::Error::other(e.to_string()))
                         })?;
@@ -1031,7 +1054,7 @@ impl FileIO for EasyMysqlStorage {
                     // the definitive post-save state, so it must win over any
                     // concurrent load/prefetch of the same region.
                     let key = (world_key.clone(), rx, rz);
-                    self.region_cache.write().await.put(key, Arc::new(region));
+                    self.region_cache.write().await.put(key, Arc::new(chunks));
 
                     debug!("Saved region ({rx},{rz}) for world {world_key}");
                     Ok(())
@@ -1090,7 +1113,41 @@ impl FileIO for EasyMysqlStorage {
 
     fn block_and_await_ongoing_tasks(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            trace!("EasyMysqlStorage: block_and_await_ongoing_tasks (no-op)");
+            trace!("EasyMysqlStorage: block_and_await_ongoing_tasks");
+            // Synchronously release any write lock we hold. Both callers
+            // (`Level::shutdown` and the one-shot `convert_world`, which
+            // documents that "the world must NOT be loaded") await this
+            // right before retiring this instance for good — without it,
+            // the only release path is `Drop`, which can't await and merely
+            // spawns a background task. A world unloaded/converted and then
+            // immediately reloaded (fresh `EasyMysqlStorage`, new owner id)
+            // can race that still-pending release: the reload's lock
+            // acquire sees our row (owner mismatch, heartbeat still fresh)
+            // and spuriously degrades to read-only until the stale row's
+            // heartbeat expires.
+            //
+            // Stop the heartbeat task first — otherwise it can re-acquire
+            // the very lock we are about to release on its next tick.
+            self.shutdown.store(true, Ordering::Relaxed);
+
+            let Some(pool) = self.pool.get().cloned() else {
+                return;
+            };
+            let held: Vec<String> = {
+                let map = self.world_write_locks.read().await;
+                map.iter()
+                    .filter(|&(_, &h)| h)
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            };
+            for key in held {
+                pool.release_lock(&key, &self.owner_id).await;
+                self.world_write_locks
+                    .write()
+                    .await
+                    .insert(key.clone(), false);
+                info!("EasyWorld: released write lock for {key}");
+            }
         })
     }
 

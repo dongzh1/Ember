@@ -182,6 +182,23 @@ pub struct ConvertStats {
     pub entity_chunks: usize,
     /// Chunks that failed to read from the source (corrupt) and were skipped.
     pub skipped: usize,
+    /// Source regions entirely outside `border` and left uncoverted (crop).
+    pub regions_cropped: usize,
+}
+
+/// Whether region `(rx, rz)` (a 512×512-block area) has no overlap at all
+/// with a `border`-side-length box centered on the world origin (0, 0) —
+/// i.e. it is entirely outside the crop and can be skipped during
+/// conversion. Straddling regions (partially inside) are always kept whole
+/// rather than split at the chunk level.
+#[must_use]
+fn region_outside_border(rx: i32, rz: i32, border: i32) -> bool {
+    let half = f64::from(border) / 2.0;
+    let min_x = f64::from(rx) * 512.0;
+    let min_z = f64::from(rz) * 512.0;
+    let max_x = min_x + 512.0;
+    let max_z = min_z + 512.0;
+    max_x <= -half || min_x >= half || max_z <= -half || min_z >= half
 }
 
 fn chunk_saver_for(config: &ChunkConfig) -> Arc<dyn FileIO<Data = SyncChunk>> {
@@ -290,6 +307,10 @@ fn backup_files(dir: &Path, ext: &str) -> usize {
 
 /// Converts one dimension tree of a world from `from` to `to`.
 ///
+/// Optionally crops to a `border`-side-length square centered on the origin
+/// (same units/center as `ember-world.toml`'s `border`) — source regions
+/// entirely outside it are left out of the target instead of being copied.
+///
 /// The world must NOT be loaded. Source region files are renamed to
 /// `*.bak` after a successful conversion (database sources are left
 /// untouched).
@@ -302,6 +323,7 @@ pub async fn convert_world(
     folder: &LevelFolder,
     from: &ChunkConfig,
     to: &ChunkConfig,
+    border: Option<i32>,
 ) -> Result<ConvertStats, String> {
     let from_ext = extension_of(from);
     let to_ext = extension_of(to);
@@ -317,9 +339,19 @@ pub async fn convert_world(
     let mut stats = ConvertStats::default();
 
     // ── Chunk data ──
-    let regions = match from_ext {
+    let all_regions = match from_ext {
         Some(ext) => scan_regions(&folder.region_folder, ext),
         None => from_chunks.list_regions(folder).await,
+    };
+    let regions: Vec<(i32, i32)> = match border {
+        Some(b) => {
+            let (kept, cropped): (Vec<_>, Vec<_>) = all_regions
+                .into_iter()
+                .partition(|&(rx, rz)| !region_outside_border(rx, rz, b));
+            stats.regions_cropped = cropped.len();
+            kept
+        }
+        None => all_regions,
     };
     for (rx, rz) in regions {
         let (mut loaded, skipped) = pull_region(&from_chunks, folder, rx, rz, |c: &SyncChunk| {
@@ -345,8 +377,15 @@ pub async fn convert_world(
 
     // ── Entity data ──
     let entity_from_ext = entity_extension_of(from);
-    let entity_regions =
+    let all_entity_regions =
         entity_from_ext.map_or_else(Vec::new, |ext| scan_regions(&folder.entities_folder, ext));
+    let entity_regions: Vec<(i32, i32)> = match border {
+        Some(b) => all_entity_regions
+            .into_iter()
+            .filter(|&(rx, rz)| !region_outside_border(rx, rz, b))
+            .collect(),
+        None => all_entity_regions,
+    };
     for (rx, rz) in entity_regions {
         let (mut loaded, skipped) =
             pull_region(&from_entities, folder, rx, rz, |c: &SyncEntityChunk| {
@@ -431,6 +470,20 @@ pub fn discover_dimension_folders(world_root: &Path) -> Vec<LevelFolder> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn region_outside_border_basics() {
+        // Region (0,0) covers blocks [0,512)x[0,512) -- overlaps a centered
+        // 512 border (half = 256).
+        assert!(!region_outside_border(0, 0, 512));
+        // Region (-1,-1) covers [-512,0)x[-512,0) -- also overlaps.
+        assert!(!region_outside_border(-1, -1, 512));
+        // Region (1,0) covers [512,1024)x[0,512) -- entirely past the edge.
+        assert!(region_outside_border(1, 0, 512));
+        assert!(region_outside_border(-2, 0, 512));
+        // A large enough border keeps everything.
+        assert!(!region_outside_border(5, -5, 100_000));
+    }
 
     #[test]
     fn extension_mapping_roundtrips() {
