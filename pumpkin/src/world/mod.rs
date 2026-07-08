@@ -3875,6 +3875,7 @@ impl World {
             .collect()
     }
 
+    // EMBER start - line-of-sight check for AI targeting/melee goals
     /// Whether `from` has an unobstructed line of sight to `to`, casting a
     /// ray between their eye positions and stopping at the first solid block.
     /// Used by targeting/attacking so mobs cannot see through walls.
@@ -3890,6 +3891,7 @@ impl World {
         .await
         .is_none()
     }
+    // EMBER end
 
     pub fn get_closest_player(&self, pos: Vector3<f64>, radius: f64) -> Option<Arc<Player>> {
         let players = self.get_nearby_players(pos, radius);
