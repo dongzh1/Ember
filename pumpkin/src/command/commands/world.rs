@@ -1,7 +1,11 @@
 // EMBER - /world command: runtime world management
 //
 //   /world list                - list loaded worlds with player counts
-//   /world load <name>         - load (or create) a world at runtime
+//   /world load <name>         - load (or create) a world at runtime; a name
+//                                ending in `_nether`/`_end` creates that
+//                                dimension instead of an overworld (see
+//                                `dimension_for_world_name` and the portal
+//                                pairing lookup in `Server::get_paired_world`)
 //   /world unload <name>       - evacuate players, save and unload a world
 //   /world tp <name>           - teleport yourself to a world's spawn
 //   /world clone <src> <dst> [save|readonly] - clone a world: `save` (default)
@@ -43,6 +47,23 @@ fn find_world(server: &Server, name: &str) -> Option<Arc<World>> {
         .find(|w| w.get_world_name() == name)
         .cloned()
 }
+
+// EMBER start - dimension-by-suffix world naming convention (nether/end pairing)
+/// A world named `<x>_nether`/`<x>_end` is created as that dimension instead
+/// of an overworld, so it can pair with a world named `<x>` for portal
+/// routing (see `Server::get_paired_world`). Anything else (including the
+/// default world) is an overworld, unchanged from before this convention
+/// existed.
+fn dimension_for_world_name(name: &str) -> Dimension {
+    if name.ends_with("_nether") {
+        Dimension::THE_NETHER
+    } else if name.ends_with("_end") {
+        Dimension::THE_END
+    } else {
+        Dimension::OVERWORLD
+    }
+}
+// EMBER end
 
 fn spawn_of(world: &World) -> Vector3<f64> {
     let info = world.level_info.load();
@@ -115,8 +136,10 @@ impl CommandExecutor for WorldLoadExecutor {
                 return Ok(0);
             }
 
+            // EMBER: `_nether`/`_end`-suffixed names create that dimension
+            // instead of an overworld, see `dimension_for_world_name`.
             let world = server
-                .create_world(name.clone(), Dimension::OVERWORLD)
+                .create_world(name.clone(), dimension_for_world_name(&name))
                 .await;
             feedback(
                 context,

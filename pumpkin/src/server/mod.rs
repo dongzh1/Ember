@@ -438,6 +438,51 @@ impl Server {
             })
     }
 
+    // EMBER start - portal pairing by world-name convention (<x>/<x>_nether/<x>_end)
+    /// Resolves a portal's destination world, preferring an explicitly paired
+    /// world over `get_world_from_dimension`'s "first loaded world of that
+    /// dimension" default.
+    ///
+    /// A world named `<x>_nether`/`<x>_end` pairs with the world named `<x>`
+    /// (see `dimension_for_world_name` in the `/world load` command); this
+    /// strips a `_nether`/`_end` suffix off `current`'s name (if present) to
+    /// get `<x>`, builds the expected name for `target_dimension`, and looks
+    /// for a *loaded* world matching both that name and that dimension. If
+    /// none is loaded — no pairing was ever set up for this world, or it's
+    /// unloaded right now — this falls back to `get_world_from_dimension`,
+    /// same as before this pairing convention existed (in practice: the
+    /// default world's own nether/end, since nothing else creates one
+    /// without being asked to via the naming convention).
+    pub fn get_paired_world(
+        &self,
+        current: &Arc<World>,
+        target_dimension: &Dimension,
+    ) -> Arc<World> {
+        let current_name = current.get_world_name();
+        let base_name = current_name
+            .strip_suffix("_nether")
+            .or_else(|| current_name.strip_suffix("_end"))
+            .unwrap_or(current_name);
+        let paired_name = if target_dimension.minecraft_name == Dimension::THE_NETHER.minecraft_name
+        {
+            format!("{base_name}_nether")
+        } else if target_dimension.minecraft_name == Dimension::THE_END.minecraft_name {
+            format!("{base_name}_end")
+        } else {
+            base_name.to_string()
+        };
+        self.worlds
+            .load()
+            .iter()
+            .find(|w| {
+                w.dimension.minecraft_name == target_dimension.minecraft_name
+                    && w.get_world_name() == paired_name
+            })
+            .cloned()
+            .unwrap_or_else(|| self.get_world_from_dimension(target_dimension))
+    }
+    // EMBER end
+
     pub async fn create_world(self: &Arc<Self>, name: String, dimension: Dimension) -> Arc<World> {
         // EMBER start - delegate to create_world_with (per-world config)
         self.create_world_with(name, dimension, None).await

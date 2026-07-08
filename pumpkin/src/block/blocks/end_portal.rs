@@ -14,11 +14,15 @@ pub struct EndPortalBlock;
 impl BlockBehaviour for EndPortalBlock {
     fn on_entity_collision<'a>(&'a self, args: OnEntityCollisionArgs<'a>) -> BlockFuture<'a, ()> {
         Box::pin(async move {
+            // EMBER: prefer an explicitly paired world (see
+            // Server::get_paired_world) over the first-loaded-world default.
             let target_world =
                 if args.world.dimension.minecraft_name == Dimension::THE_END.minecraft_name {
-                    args.server.get_world_from_dimension(&Dimension::OVERWORLD)
+                    args.server
+                        .get_paired_world(args.world, &Dimension::OVERWORLD)
                 } else {
-                    args.server.get_world_from_dimension(&Dimension::THE_END)
+                    args.server
+                        .get_paired_world(args.world, &Dimension::THE_END)
                 };
             if Arc::ptr_eq(&target_world, args.world) {
                 return;
