@@ -103,6 +103,9 @@ world/*
 logs/
 crash-reports/
 
+# Local build/download output (build-windows.ps1, build-remote.ps1)
+dist/
+
 # docker-compose
 data/*
 

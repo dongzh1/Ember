@@ -95,11 +95,12 @@ Get-ChildItem -Recurse $dest -File | ForEach-Object {
 #    查一下刚发的是哪个版本,把直链打印出来,省得再去网页翻。
 Write-Host ""
 Write-Host "[4/4] 查询本次自动发布的 Release..." -ForegroundColor Cyan
-$release = gh release list -R $repoSlug --limit 1 --json tagName,name,url -q '.[0]' 2>$null | ConvertFrom-Json
+$release = gh release list -R $repoSlug --limit 1 --json tagName,name -q '.[0]' | ConvertFrom-Json
 if ($release) {
+    $releaseUrl = "https://github.com/$repoSlug/releases/tag/$($release.tagName)"
     Write-Host ""
     Write-Host "=== 已发布: $($release.name) ===" -ForegroundColor Green
-    Write-Host "  $($release.url)" -ForegroundColor Yellow
+    Write-Host "  $releaseUrl" -ForegroundColor Yellow
 } else {
     Write-Host "[警告] 没查到 Release,去 Actions 页面确认一下 release job 是否成功。" -ForegroundColor Yellow
 }
