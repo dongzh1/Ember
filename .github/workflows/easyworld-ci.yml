@@ -136,13 +136,14 @@ jobs:
           TEMP_DIR=$(mktemp -d)
           cd "$TEMP_DIR"
 
-          # 配置说明见 file-mode;MySQL 变体在 [world.chunk] 里带 url
+          # 配置说明见 file-mode;MySQL 变体是同一个 "easy" type,backend = "mysql"
           cat > pumpkin.toml << 'TOML'
           java_edition_address = "0.0.0.0:25567"
           bedrock_edition = false
 
           [world.chunk]
-          type = "easy_mysql"
+          type = "easy"
+          backend = "mysql"
           url = "mysql://root:ember_test@127.0.0.1:3306/ember"
 
           [plugins]
@@ -194,14 +195,20 @@ jobs:
           echo "=== read_only mode check (SlimeWorld-style reader) ==="
           RO_DIR=$(mktemp -d)
           cd "$RO_DIR"
+          # mode 是每个世界的设置,走 world/ember-world.toml 旁车配置,
+          # 不是 [world.chunk] 的字段(那里只有 backend/url/key_prefix/max_cached_regions)
+          mkdir -p world
+          cat > world/ember-world.toml << 'TOML'
+          mode = "read_only"
+          TOML
           cat > pumpkin.toml << 'TOML'
           java_edition_address = "0.0.0.0:25568"
           bedrock_edition = false
 
           [world.chunk]
-          type = "easy_mysql"
+          type = "easy"
+          backend = "mysql"
           url = "mysql://root:ember_test@127.0.0.1:3306/ember"
-          mode = "read_only"
 
           [plugins]
           auto_approve_permissions = true
