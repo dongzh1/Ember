@@ -107,6 +107,12 @@ pub struct Server {
     /// `Level`s would write the same data concurrently.
     pub pending_world_unloads: std::sync::Mutex<std::collections::HashSet<String>>,
     // EMBER end
+    // EMBER start - shared chunk-generation thread pool
+    /// Rayon pool used for chunk generation, shared by every world (the
+    /// startup dimensions and any created later via `create_world_with`) so
+    /// dynamically created worlds don't each spin up their own pool/threads.
+    pub gen_pool: Arc<rayon::ThreadPool>,
+    // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
     /// Assigns unique IDs to containers.
@@ -251,6 +257,16 @@ impl Server {
                 .collect::<Vec<_>>()
         );
 
+        // EMBER: moved up from after `Arc::new(server)` below so the pool can
+        // be stored on the struct itself (see `gen_pool` field) instead of
+        // only living in this function's closures.
+        let gen_pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .thread_name(|i| format!("Gen-Pool-{i}"))
+                .build()
+                .expect("Failed to build generation thread pool"),
+        );
+
         let server = Self {
             basic_config,
             advanced_config,
@@ -293,15 +309,9 @@ impl Server {
             mojang_public_keys: ArcSwap::from_pointee(Vec::new()),
             world_info_writer: Arc::new(AnvilLevelInfo),
             level_info,
+            gen_pool: gen_pool.clone(),
         };
         let server = Arc::new(server);
-
-        let gen_pool = Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .thread_name(|i| format!("Gen-Pool-{i}"))
-                .build()
-                .expect("Failed to build generation thread pool"),
-        );
 
         let server_clone = server.clone();
         tokio::spawn(async move {
@@ -317,7 +327,7 @@ impl Server {
             let l_info = server.level_info.clone(); // Access from struct
             let weak = Arc::downgrade(&server);
             let config = Arc::new(server.advanced_config.world.clone());
-            let pool = gen_pool.clone();
+            let pool = server.gen_pool.clone();
 
             tokio::task::spawn_blocking(move || {
                 info!(
@@ -353,7 +363,12 @@ impl Server {
             server.mojang_public_keys.store(Arc::new(k));
         }
 
-        // EMBER start - sidecar residency prewarm for startup worlds
+        // EMBER start - sidecar residency prewarm + worldborder for startup worlds
+        // `create_world_with` applies a sidecar's `border` to worlds it
+        // creates at runtime; startup worlds (the default world's own
+        // dimensions) never went through that path, so without this their
+        // configured border was silently storage/generation-only — enforced
+        // against players in none of them, however-configured.
         for world in server.worlds.load().iter() {
             let root = world.level.level_folder.root_folder.clone();
             if let Some(sidecar) = pumpkin_config::ember_world::EmberWorldConfig::load(&root) {
@@ -363,6 +378,15 @@ impl Server {
                     tokio::spawn(async move {
                         level.prewarm_storage(cap).await;
                     });
+                }
+                if let Some(border) = sidecar.border
+                    && border > 0
+                {
+                    let spawn = world.level_info.load();
+                    let (cx, cz) = (f64::from(spawn.spawn_x), f64::from(spawn.spawn_z));
+                    let mut wb = world.worldborder.lock().await;
+                    wb.set_center(world, cx, cz);
+                    wb.set_diameter(world, f64::from(border), None);
                 }
             }
         }
@@ -477,19 +501,23 @@ impl Server {
         let world = tokio::task::spawn_blocking(move || {
             let world_path = server.basic_config.get_world_path().join(name_clone);
             let registry = server.block_registry.clone();
-            let l_info = server.level_info.clone();
+            // EMBER: each world loads its own level.dat instead of reusing
+            // the default world's `level_info` — otherwise every world
+            // created here (dungeon instances, `/world load`, clones) would
+            // inherit the default world's spawn point/seed/game rules
+            // regardless of what its own level.dat (if any) actually says.
+            let l_info = load_world_level_info(&world_path, server.basic_config.seed);
             let weak = Arc::downgrade(&server);
             let config =
                 Arc::new(level_config.unwrap_or_else(|| server.advanced_config.world.clone()));
-            let seed = server.level_info.load().world_gen_settings.seed;
+            let seed = l_info.load().world_gen_settings.seed;
 
-            // TODO: gen_pool should be reused
             let level = pumpkin_world::dimension::into_level(
                 dimension.clone(),
                 &config,
                 world_path,
                 seed,
-                None,
+                Some(server.gen_pool.clone()),
             );
             let world: World = World::load(level.clone(), l_info, dimension, registry, weak);
             let world = Arc::new(world);
@@ -533,7 +561,7 @@ impl Server {
     }
     // EMBER end
 
-    // EMBER start - dynamic world unload
+    // EMBER start - dynamic world management (unload/clone/clone_readonly/delete/list_world_folders)
     /// Unloads a world at runtime: evacuates its players to `fallback`,
     /// removes it from the tick loop, then saves and stops it.
     ///
@@ -1570,15 +1598,59 @@ impl Server {
     }
 }
 
+// EMBER start - per-world level.dat load (create_world_with, startup border)
+/// Loads (or creates a fresh default for) the `level.dat` at `world_path`,
+/// independently of any other world's `level_info`. `Server::new` loads this
+/// once, for the default world's own dimensions to share (they're one save);
+/// every *other* world — dungeon instances, `/world load`, clones — needs its
+/// own, or they'd all inherit the default world's spawn point/seed/game rules.
+///
+/// Unlike `Server::new`, a read failure here never panics the whole server
+/// over one world: a missing file gets a fresh default (written to disk, same
+/// as at startup); any other error (corrupt/unsupported file) logs and falls
+/// back to an in-memory default for this session only, leaving the file on
+/// disk untouched rather than risk overwriting something possibly recoverable.
+fn load_world_level_info(
+    world_path: &std::path::Path,
+    seed: pumpkin_util::world_seed::Seed,
+) -> Arc<ArcSwap<LevelData>> {
+    let info = match AnvilLevelInfo.read_world_info(world_path) {
+        Ok(info) => info,
+        Err(WorldInfoError::InfoNotFound) => {
+            let default_data = LevelData::default(seed);
+            if let Err(err) = AnvilLevelInfo.write_world_info(&default_data, world_path) {
+                error!(
+                    "Failed to save new level.dat at {}: {err}",
+                    world_path.display()
+                );
+            }
+            default_data
+        }
+        Err(err) => {
+            error!(
+                "Failed to load level.dat at {}: {err}. Using in-memory defaults for this \
+                 session without touching the file on disk.",
+                world_path.display()
+            );
+            LevelData::default(seed)
+        }
+    };
+    Arc::new(ArcSwap::new(Arc::new(info)))
+}
+// EMBER end
+
 // EMBER start - world name validation (guards path-building primitives)
 /// Rejects a world name that could escape the worlds directory once joined
 /// into a filesystem path. A valid name is exactly one normal path component:
 /// no empty string, no `.`/`..`, no `/`/`\`/NUL separators, no absolute path
-/// or drive prefix. Guards the destructive primitives (`delete_world`,
-/// `clone_world`) so neither a command with a trailing space nor a plugin
-/// passing a raw name can `remove_dir_all` the worlds container or the server
-/// root; also reused by the `/world load` command so an empty name can't
-/// create a stray dimension tree at the container root.
+/// or drive prefix, and not made up entirely of trailing `.`/` ` (Windows'
+/// legacy, non-`\\?\`-prefixed path handling silently strips those from the
+/// final component, so a name like `"..."` or `"   "` would otherwise resolve
+/// to the parent directory itself). Guards the destructive primitives
+/// (`delete_world`, `clone_world`) so neither a command with a trailing space
+/// nor a plugin passing a raw name can `remove_dir_all` the worlds container
+/// or the server root; also reused by the `/world load` command so an empty
+/// name can't create a stray dimension tree at the container root.
 pub(crate) fn validate_world_name(name: &str) -> Result<(), String> {
     use std::path::Component;
     let mut components = std::path::Path::new(name).components();
@@ -1586,7 +1658,13 @@ pub(crate) fn validate_world_name(name: &str) -> Result<(), String> {
         (components.next(), components.next()),
         (Some(Component::Normal(_)), None)
     );
-    if single_normal && !name.contains('/') && !name.contains('\\') && !name.contains('\0') {
+    let all_trailing_junk = name.trim_end_matches(['.', ' ']).is_empty();
+    if single_normal
+        && !all_trailing_junk
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+    {
         Ok(())
     } else {
         Err(format!(
