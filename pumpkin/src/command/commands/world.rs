@@ -345,7 +345,7 @@ impl CommandExecutor for WorldConvertExecutor {
                 feedback(
                     context,
                     err_text(format!(
-                        "Unknown format '{format}'. Valid: anvil, linear, pump, easy, easy_shard."
+                        "Unknown format '{format}'. Valid: anvil, linear, pump, easy."
                     )),
                 )
                 .await;
