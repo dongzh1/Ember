@@ -81,8 +81,8 @@ deliberately with `/world convert <name> <format>` while the world is unloaded; 
 kept as `*.bak` and the new format is pinned in the world's `ember-world.toml`.
 
 > Note: `easy` prunes all-air chunks, so a chunk mined out to pure air regenerates on reload
-> in generator-backed worlds. For void/skyblock-style maps use dungeon templates or a
-> non-pruning format (`anvil`/`pump`).
+> in generator-backed worlds. For void/skyblock-style maps use a `generate = "void"` sidecar
+> or a non-pruning format (`anvil`/`pump`).
 
 One format, two backends. The loading strategy is chosen automatically by map size — you only
 pick the backend. Full guide: [`docs/easyworld.md`](docs/easyworld.md).
@@ -132,23 +132,6 @@ without the terrain generator.
 
 Permission: `ember:command.world` (OP level 3 by default). Loading/unloading and cloning never
 stall the tick loop — saves run in the background.
-
-### Dungeon instances
-
-Run any number of throwaway copies of one template world — the template (an `easy` or
-`easy_mysql` world) is decompressed into memory once and shared by every instance; per-instance
-changes live in RAM and are discarded on stop:
-
-```
-/dungeon prewarm <template>        # load the template into shared memory
-/dungeon start <template>          # open a new instance world and teleport in
-/dungeon stop <instance>           # unload an instance, discarding its changes
-/dungeon list                      # resident templates + running instances
-/dungeon reload <template>         # drop the cached template (next start reloads it)
-```
-
-Permission: `ember:command.dungeon` (OP level 3 by default). Starting an instance copies no
-data (it shares the template's memory), so instances open and close instantly.
 
 ### Plugin permissions
 

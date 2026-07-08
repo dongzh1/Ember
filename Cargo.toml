@@ -12,7 +12,6 @@ members = [
     "pumpkin-data",
     "pumpkin-plugin-api",
     "pumpkin-codecs",
-    "easyworld"
 ]
 exclude = ["pumpkin-codegen", "npc-plugin"]
 

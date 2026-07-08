@@ -39,16 +39,6 @@ use crate::level::LevelFolder;
 use crate::tick::scheduler::ChunkTickScheduler;
 use pumpkin_data::chunk::ChunkStatus;
 
-/// `"namespace/name"` path segment of a dimension inside a world folder
-/// (mirrors `Level::from_root_folder`'s layout).
-#[must_use]
-pub fn dimension_path(minecraft_name: &str) -> String {
-    match minecraft_name.split_once(':') {
-        Some((ns, n)) => format!("{ns}/{n}"),
-        None => format!("minecraft/{minecraft_name}"),
-    }
-}
-
 /// Where a read-only instance reads its source world's stored data.
 #[derive(Clone)]
 pub enum TemplateSource {
@@ -201,49 +191,6 @@ impl TemplateRegistry {
         .await
         .cloned()
     }
-}
-
-/// Preloads a template into the shared registry (`/dungeon prewarm`).
-/// Returns `(regions, chunks)` of the resident template.
-pub async fn prewarm_template(
-    id: &str,
-    source: &TemplateSource,
-    dim_path: &str,
-) -> Result<(usize, usize), String> {
-    let template = REGISTRY.get_or_load(id, source, dim_path).await?;
-    Ok((template.regions.len(), template.chunk_count))
-}
-
-/// Drops a template from the registry so the next instance reloads it from
-/// its source. Running instances keep serving their existing copy.
-/// Returns `true` when the template was resident.
-pub async fn reload_template(id: &str) -> bool {
-    // Drop every per-dimension entry for this id. The map is keyed by
-    // (id, dim_path), so a plain remove(id) would match nothing.
-    let mut map = REGISTRY.map.write().await;
-    let before = map.len();
-    map.retain(|(k_id, _), _| k_id != id);
-    map.len() != before
-}
-
-/// `(id, regions, chunks, live handles)` of every resident template.
-/// `live handles` counts `Arc` clones beyond the registry's own (≈ open
-/// instances plus in-flight loads).
-pub async fn list_templates() -> Vec<(String, usize, usize, usize)> {
-    let map = REGISTRY.map.read().await;
-    let mut out = Vec::new();
-    for ((id, _dim), cell) in map.iter() {
-        if let Some(template) = cell.get() {
-            out.push((
-                id.clone(),
-                template.regions.len(),
-                template.chunk_count,
-                Arc::strong_count(template).saturating_sub(1),
-            ));
-        }
-    }
-    out.sort();
-    out
 }
 
 // ─── Void chunk synthesis ──────────────────────────────────────────────

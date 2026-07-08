@@ -60,9 +60,6 @@ mod whitelist;
 // EMBER start - /world command
 mod world;
 // EMBER end
-// EMBER start - /dungeon command
-mod dungeon;
-// EMBER end
 mod worldborder;
 
 #[must_use]
@@ -165,9 +162,6 @@ pub async fn default_dispatcher(
     advancement::register(&mut dispatcher, registry);
     // EMBER start - /world command
     world::register(&mut dispatcher, registry);
-    // EMBER end
-    // EMBER start - /dungeon command
-    dungeon::register(&mut dispatcher, registry);
     // EMBER end
     dispatcher
 }
