@@ -119,7 +119,7 @@ TOML
 
 # ─── 步骤 4: MySQL 模式验证 ────────────────────────────────────────────
 verify_mysql_mode() {
-  echo -e "\n${INFO} === 验证 MySQL 模式 (type=easy_mysql) ==="
+  echo -e "\n${INFO} === 验证 MySQL 模式 (type=easy, backend=mysql) ==="
 
   # 检查 Docker
   if ! command -v docker &>/dev/null; then
@@ -160,7 +160,8 @@ java_edition_address = "0.0.0.0:25567"
 bedrock_edition = false
 
 [world.chunk]
-type = "easy_mysql"
+type = "easy"
+backend = "mysql"
 url = "mysql://root:ember_test@127.0.0.1:3307/ember"
 
 [plugins]

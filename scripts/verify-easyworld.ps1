@@ -121,7 +121,7 @@ auto_approve_permissions = true
 # =========================================================================
 
 function Verify-MysqlMode {
-    Write-Info "=== MySQL mode (type=easy_mysql) ==="
+    Write-Info "=== MySQL mode (type=easy, backend=mysql) ==="
 
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Write-Fail "Docker not found. Skipping MySQL verification."
@@ -164,7 +164,8 @@ java_edition_address = "0.0.0.0:25567"
 bedrock_edition = false
 
 [world.chunk]
-type = "easy_mysql"
+type = "easy"
+backend = "mysql"
 url = "mysql://root:ember_test@127.0.0.1:3307/ember"
 
 [plugins]
