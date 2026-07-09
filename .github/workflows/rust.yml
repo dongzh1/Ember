@@ -95,6 +95,11 @@ jobs:
     name: Build project in release
     runs-on: ${{ matrix.os }}
     needs: [build_and_test]
+    # EMBER start - `secrets` isn't allowed in step `if:` conditions (GitHub restricts
+    # it there), so route it through a job-level env var, which step `if:` can read.
+    env:
+      HAS_SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+    # EMBER end
     strategy:
       matrix:
         os:
@@ -139,7 +144,7 @@ jobs:
         # EMBER start - this fork has no SignPath account/secrets configured; upstream's
         # step has no such guard and hard-fails here with "Input required and not
         # supplied: organization-id" on every push. Skip instead of failing the build.
-        if: runner.os == 'Windows' && secrets.SIGNPATH_API_TOKEN != ''
+        if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
         # EMBER end
         uses: signpath/github-action-submit-signing-request@v2
         with:
@@ -153,7 +158,7 @@ jobs:
 
       - name: Overwrite with signed version (Windows only)
         # EMBER start - matches the guard above; nothing to overwrite if signing was skipped
-        if: runner.os == 'Windows' && secrets.SIGNPATH_API_TOKEN != ''
+        if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
         # EMBER end
         shell: bash
         run: |
