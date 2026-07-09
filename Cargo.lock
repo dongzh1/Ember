@@ -3045,6 +3045,7 @@ dependencies = [
  "syn",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "ureq",
  "uuid",
 ]

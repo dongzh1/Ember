@@ -233,10 +233,20 @@ impl Context {
             .node
             .starts_with(&format!("{}:", self.metadata.name))
         {
-            return Err(format!(
+            let err = format!(
                 "Permission {} must use the plugin's namespace ({})",
                 permission.node, self.metadata.name
-            ));
+            );
+            // EMBER start - warn on failed permission registration
+            // Returned as an `Err` to the plugin too, but plugins don't always check
+            // (or log) it, so a registration failure would otherwise go unnoticed
+            // until someone reports the permission as "missing even for OP".
+            tracing::warn!(
+                "Plugin \"{}\" failed to register permission: {err}",
+                self.metadata.name
+            );
+            // EMBER end
+            return Err(err);
         }
 
         let registry = &self.permission_manager.read().await.registry;

@@ -309,12 +309,27 @@ impl PermissionManager {
         }
 
         // Fall back to the default permission value
-        reg.get_permission(permission_node)
-            .is_some_and(|permission| match permission.default {
+        reg.get_permission(permission_node).map_or_else(
+            || {
+                // EMBER start - warn on unregistered permission checks
+                // No `Permission` was ever registered for this node, so it silently
+                // denies everyone, including OP. This almost always means a plugin
+                // forgot to call `register_permission` (or it failed) for a node it
+                // then goes on to check.
+                tracing::warn!(
+                    "Permission \"{permission_node}\" was checked but is not registered with \
+                     any default; denying by default (OP included). If you're a plugin author, \
+                     make sure to call register_permission for this node."
+                );
+                // EMBER end
+                false
+            },
+            |permission| match permission.default {
                 PermissionDefault::Allow => true,
                 PermissionDefault::Deny => false,
                 PermissionDefault::Op(required_level) => player_op_level >= required_level,
-            })
+            },
+        )
     }
 }
 

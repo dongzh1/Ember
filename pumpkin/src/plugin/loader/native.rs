@@ -35,9 +35,14 @@ impl PluginLoader for NativePluginLoader {
             }
 
             // 2. Extract Metadata (METADATA)
+            // `pumpkin-api-macros::plugin_impl` exports `METADATA` as a
+            // `LazyLock<PluginMetadata>` (see pumpkin-api-macros/src/lib.rs), not a raw
+            // `*const PluginMetadata`. Reading it as the latter reinterprets the
+            // LazyLock's internal state as a pointer, which silently yields a bogus
+            // PluginMetadata (empty name/version/etc.) instead of crashing outright.
             let metadata = unsafe {
                 &**library
-                    .get::<*const PluginMetadata>(b"METADATA")
+                    .get::<std::sync::LazyLock<PluginMetadata>>(b"METADATA")
                     .map_err(|_| LoaderError::MetadataMissing)?
             };
 
