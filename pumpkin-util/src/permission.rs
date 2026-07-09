@@ -383,6 +383,11 @@ impl<'de> Deserialize<'de> for PermissionLvl {
         let value = u8::deserialize(deserializer)?;
         match value {
             0 => Ok(Self::Zero),
+            // EMBER start - fix missing PermissionLvl::One deserialize arm
+            // Upstream never matched 1, so `op_permission_level = 1` in
+            // pumpkin.toml (a valid PermissionLvl discriminant) failed to parse.
+            1 => Ok(Self::One),
+            // EMBER end
             2 => Ok(Self::Two),
             3 => Ok(Self::Three),
             4 => Ok(Self::Four),

@@ -130,6 +130,7 @@ without the terrain generator.
 /world clone <source> <dest> [save|readonly]  # save copy, or read-only in-memory instance
 /world prewarm <name>              # load a world's stored regions into memory
 /world convert <name> <format>     # migrate an unloaded world's storage format
+/world delete <name>               # delete an unloaded world (folder + DB rows + locks)
 ```
 
 Permission: `ember:command.world` (OP level 3 by default). Loading/unloading and cloning never
@@ -277,6 +278,7 @@ source   = "arena"       # 只读克隆：读另一个世界的数据
 /world clone <源> <目标> [save|readonly] # 保存克隆 / 只读内存克隆
 /world prewarm <名字>                    # 把世界区域预热进内存
 /world convert <名字> <格式>             # 迁移未加载世界的存储格式
+/world delete <名字>                     # 删除未加载世界(文件夹+数据库行+锁)
 ```
 
 权限：`ember:command.world`（默认 OP 3 级）。加载/卸载/克隆都不会卡服 —— 存盘在后台进行。

@@ -372,7 +372,7 @@ where
 
                     // EMBER start - per-format watched-flush policy
                     // Formats may opt into flushing while still watched
-                    // (EasyShard's incremental durable autosave); everyone
+                    // (a format with incremental durable autosave); everyone
                     // else keeps the defer-until-unwatch behaviour
                     // (`should_write(true)` is `false` for them).
                     let should_flush = if is_watched {
