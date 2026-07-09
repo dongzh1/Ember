@@ -136,7 +136,11 @@ jobs:
           retention-days: 1
 
       - name: Submit SignPath signing request (Windows only)
-        if: runner.os == 'Windows'
+        # EMBER start - this fork has no SignPath account/secrets configured; upstream's
+        # step has no such guard and hard-fails here with "Input required and not
+        # supplied: organization-id" on every push. Skip instead of failing the build.
+        if: runner.os == 'Windows' && secrets.SIGNPATH_API_TOKEN != ''
+        # EMBER end
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -148,7 +152,9 @@ jobs:
           output-artifact-directory: dist/signed/
 
       - name: Overwrite with signed version (Windows only)
-        if: runner.os == 'Windows'
+        # EMBER start - matches the guard above; nothing to overwrite if signing was skipped
+        if: runner.os == 'Windows' && secrets.SIGNPATH_API_TOKEN != ''
+        # EMBER end
         shell: bash
         run: |
           cp dist/signed/* dist/
