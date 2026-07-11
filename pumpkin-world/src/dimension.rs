@@ -3,6 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use pumpkin_config::world::LevelConfig;
 use pumpkin_data::dimension::Dimension;
 
+use crate::chunk_system::GenPoolBudget;
 use crate::level::Level;
 
 #[must_use]
@@ -12,6 +13,9 @@ pub fn into_level(
     mut base_directory: PathBuf,
     seed: i64,
     gen_pool: Option<Arc<rayon::ThreadPool>>,
+    // EMBER start - cross-world gen_pool admission control
+    gen_budget: Option<Arc<GenPoolBudget>>,
+    // EMBER end
 ) -> Arc<Level> {
     // EMBER start - per-world sidecar config (ember-world.toml)
     // Resolved at the world root, before any dimension sub-path, so one
@@ -25,5 +29,12 @@ pub fn into_level(
     } else if dimension.minecraft_name == Dimension::THE_END.minecraft_name {
         base_directory.push("DIM1");
     }
-    Level::from_root_folder(level_config, base_directory, seed, dimension, gen_pool)
+    Level::from_root_folder(
+        level_config,
+        base_directory,
+        seed,
+        dimension,
+        gen_pool,
+        gen_budget, // EMBER
+    )
 }

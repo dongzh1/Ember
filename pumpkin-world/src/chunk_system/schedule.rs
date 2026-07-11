@@ -18,7 +18,8 @@ use slotmap::Key;
 use std::cmp::{Ordering, max};
 use std::collections::{BinaryHeap, HashMap};
 use std::mem::swap;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -48,6 +49,58 @@ impl Ord for TaskHeapNode {
     }
 }
 
+// EMBER start - cross-world admission control for the shared gen_pool
+/// Cross-world admission control for the shared `gen_pool`.
+///
+/// Each world's `GenerationSchedule` computes its own `max_in_flight`
+/// independently, with no awareness of other worlds sharing the same
+/// `gen_pool` (see `Server::gen_pool`). Without this, N worlds can together
+/// submit far more concurrent jobs than the pool has real OS threads for.
+/// `cap == 0` disables the check entirely (today's unbounded behavior).
+pub struct GenPoolBudget {
+    inflight: AtomicU32,
+    cap: u32,
+}
+
+impl GenPoolBudget {
+    #[must_use]
+    pub const fn new(cap: u32) -> Self {
+        Self {
+            inflight: AtomicU32::new(0),
+            cap,
+        }
+    }
+
+    /// Tries to reserve one slot. On success the caller must call
+    /// `release()` exactly once, whether or not the job actually runs.
+    #[must_use]
+    pub fn try_acquire(&self) -> bool {
+        if self.cap == 0 {
+            return true;
+        }
+        loop {
+            let cur = self.inflight.load(Acquire);
+            if cur >= self.cap {
+                return false;
+            }
+            if self
+                .inflight
+                .compare_exchange_weak(cur, cur + 1, AcqRel, Acquire)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    pub fn release(&self) {
+        if self.cap != 0 {
+            self.inflight.fetch_sub(1, AcqRel);
+        }
+    }
+}
+// EMBER end
+
 pub struct GenerationSchedule {
     queue: BinaryHeap<TaskHeapNode>,
     graph: DAG,
@@ -75,12 +128,20 @@ pub struct GenerationSchedule {
     generate: crossfire::compat::MTx<(ChunkPos, Cache, StagedChunkEnum)>,
     send_chunk: crossfire::compat::MTx<(ChunkPos, RecvChunk)>,
     gen_pool: Option<Arc<rayon::ThreadPool>>,
+    // EMBER start - cross-world gen_pool admission control
+    gen_budget: Option<Arc<GenPoolBudget>>,
+    // EMBER end
     listener: Arc<ChunkListener>,
     lighting_config: LightingEngineConfig,
     last_unload: std::time::Instant,
 }
 
 impl GenerationSchedule {
+    // EMBER start - gen_budget is the one EMBER-added parameter that pushed
+    // this over clippy's default limit; the rest are pre-existing upstream
+    // construction parameters.
+    #[expect(clippy::too_many_arguments)]
+    // EMBER end
     pub fn create(
         io_read_thread_count: usize,
         gen_thread_count: usize,
@@ -89,6 +150,9 @@ impl GenerationSchedule {
         listener: Arc<ChunkListener>,
         thread_tracker: &mut Vec<thread::JoinHandle<()>>,
         gen_pool: Option<Arc<rayon::ThreadPool>>,
+        // EMBER start - cross-world gen_pool admission control
+        gen_budget: Option<Arc<GenPoolBudget>>,
+        // EMBER end
     ) {
         let (send_chunk, recv_chunk) = crossfire::compat::mpmc::unbounded_blocking();
 
@@ -167,6 +231,7 @@ impl GenerationSchedule {
                     generate: send_gen,
                     send_chunk,
                     gen_pool,
+                    gen_budget, // EMBER
                     listener,
                     chunk_map: HashMap::default(),
                     lighting_config,
@@ -1076,6 +1141,12 @@ impl GenerationSchedule {
 
             // 4. Process ready tasks in the queue (up to max_in_flight)
             let mut io_batch = Vec::with_capacity(16);
+            // EMBER start - tracks whether this pass exited solely because a
+            // concurrency cap (local or cross-world) was full, so we know to
+            // back off briefly below instead of immediately re-scanning the
+            // same non-empty queue at full speed.
+            let mut capacity_exhausted = false;
+            // EMBER end
             'out2: while let Some(task) = self.queue.pop() {
                 if level.shut_down_chunk_system.load(Relaxed) {
                     self.queue.push(task);
@@ -1086,6 +1157,7 @@ impl GenerationSchedule {
 
                 if self.running_task_count >= self.max_in_flight {
                     self.queue.push(task);
+                    capacity_exhausted = true; // EMBER
                     break 'out2;
                 }
 
@@ -1156,6 +1228,19 @@ impl GenerationSchedule {
                             break 'out2;
                         }
                     } else {
+                        // EMBER start - cross-world admission control: reject before
+                        // doing any work for this task (io_batch flush, all_ready scan,
+                        // cache swap) so a rejection is a clean requeue with no state
+                        // to unwind. Only gates the shared-gen_pool path below; the
+                        // legacy per-world fallback thread doesn't touch gen_pool.
+                        if let Some(budget) = &self.gen_budget
+                            && !budget.try_acquire()
+                        {
+                            self.queue.push(task);
+                            capacity_exhausted = true;
+                            break 'out2;
+                        }
+                        // EMBER end
                         // Send any pending IO batch before starting generation
                         if !io_batch.is_empty()
                             && self.io_read.send(std::mem::take(&mut io_batch)).is_err()
@@ -1198,6 +1283,12 @@ impl GenerationSchedule {
                                 // If so, check_waiting_tasks() will immediately re-queue it
                                 // so it isn't stranded with running_task_count==0.
                                 self.check_waiting_tasks();
+                                // EMBER: this task won't reach pool.spawn this
+                                // round after all - release the slot acquired
+                                // above so it doesn't leak until re-tried.
+                                if let Some(budget) = &self.gen_budget {
+                                    budget.release();
+                                }
                                 continue;
                             }
                         }
@@ -1273,11 +1364,18 @@ impl GenerationSchedule {
                             let level = level.clone();
                             let settings =
                                 GenerationSettings::from_dimension(&level.world_gen.dimension);
+                            // EMBER: release the shared-pool slot acquired above once
+                            // this job finishes. `run_generation` already catches
+                            // panics internally, so this always runs.
+                            let gen_budget = self.gen_budget.clone();
 
                             pool.spawn(move || {
                                 let result = crate::chunk_system::worker_logic::run_generation(
                                     pos, cache, stage, &level, settings,
                                 );
+                                if let Some(budget) = &gen_budget {
+                                    budget.release();
+                                }
                                 let _ = send_chunk.send((pos, result));
                             });
                         } else if self.generate.send((node.pos, cache, node.stage)).is_err() {
@@ -1295,6 +1393,25 @@ impl GenerationSchedule {
                 info!("IO read thread closed, saving remaining chunks...");
                 self.save_all_chunk(true);
             }
+
+            // EMBER start - a task was requeued purely because a concurrency
+            // cap (local `max_in_flight` or the cross-world `gen_budget`) was
+            // full, which leaves `self.queue` non-empty. Without this, the
+            // outer loop would immediately re-scan the same non-empty queue
+            // at full speed until capacity frees up, busy-spinning this OS
+            // thread. Give it a moment - a completing job will wake this up
+            // immediately via `recv_chunk` rather than waiting the full 5ms.
+            if capacity_exhausted {
+                match self.recv_chunk.recv_timeout(Duration::from_millis(5)) {
+                    Ok((pos, data)) => {
+                        self.receive_chunk(pos, data);
+                        self.resort_work(self.send_level.get());
+                    }
+                    Err(crossfire::compat::RecvTimeoutError::Timeout) => {}
+                    Err(crossfire::compat::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            // EMBER end
 
             // 3. If queue is empty, wait for work or results
             if self.queue.is_empty() {

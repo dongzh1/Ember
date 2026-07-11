@@ -45,9 +45,12 @@ use rsa::RsaPublicKey;
 use std::collections::HashSet;
 use std::fs;
 use std::net::IpAddr;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32};
 use std::{future::Future, sync::atomic::Ordering, time::Duration};
+// EMBER: tick soft-budget isolation (`tick_worlds`)
+use futures::FutureExt;
 use tokio::sync::{Mutex, OnceCell, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::task::TaskTracker;
@@ -112,6 +115,10 @@ pub struct Server {
     /// startup dimensions and any created later via `create_world_with`) so
     /// dynamically created worlds don't each spin up their own pool/threads.
     pub gen_pool: Arc<rayon::ThreadPool>,
+    /// Cross-world admission control for `gen_pool`: each world computes its
+    /// own local in-flight cap independently, with no awareness of other
+    /// worlds sharing the same pool. See `GenPoolBudget` doc comment.
+    pub gen_budget: Arc<pumpkin_world::chunk_system::GenPoolBudget>,
     // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
@@ -271,6 +278,11 @@ impl Server {
                 .build()
                 .expect("Failed to build generation thread pool"),
         );
+        // EMBER start - cross-world admission control for the shared gen_pool
+        let gen_budget = Arc::new(pumpkin_world::chunk_system::GenPoolBudget::new(
+            advanced_config.performance.max_concurrent_world_gen_jobs,
+        ));
+        // EMBER end
 
         let server = Self {
             basic_config,
@@ -315,6 +327,7 @@ impl Server {
             world_info_writer: Arc::new(AnvilLevelInfo),
             level_info,
             gen_pool: gen_pool.clone(),
+            gen_budget: gen_budget.clone(), // EMBER
         };
         let server = Arc::new(server);
 
@@ -333,6 +346,7 @@ impl Server {
             let weak = Arc::downgrade(&server);
             let config = Arc::new(server.advanced_config.world.clone());
             let pool = server.gen_pool.clone();
+            let budget = server.gen_budget.clone(); // EMBER
 
             tokio::task::spawn_blocking(move || {
                 info!(
@@ -341,7 +355,7 @@ impl Server {
                         .color_named(NamedColor::DarkGreen)
                         .to_pretty_console()
                 );
-                let level = into_level(dim.clone(), &config, path, seed, Some(pool));
+                let level = into_level(dim.clone(), &config, path, seed, Some(pool), Some(budget));
                 let world = Arc::new(World::load(level.clone(), l_info, dim, registry, weak));
                 let portal: Arc<dyn WorldPortalExt> = Arc::new(WorldPortal(world.clone()));
                 level.world_portal.store(Arc::new(Some(portal)));
@@ -568,6 +582,7 @@ impl Server {
                 world_path,
                 seed,
                 Some(server.gen_pool.clone()),
+                Some(server.gen_budget.clone()), // EMBER
             );
             let world: World = World::load(level.clone(), l_info, dimension, registry, weak);
             let world = Arc::new(world);
@@ -616,6 +631,38 @@ impl Server {
     /// removes it from the tick loop, then saves and stops it.
     ///
     /// The default world (first in the list) cannot be unloaded.
+    // EMBER start - tick soft-budget isolation: wait out a straggler tick
+    // before tearing a world down.
+    //
+    // `tick_worlds`'s soft budget can leave a world's previous tick still
+    // running in the background after that world stops being scheduled
+    // (removed from `self.worlds`, or the whole server shutting down). That
+    // straggler task holds its own `Arc<World>`/`Arc<Level>` clone and keeps
+    // touching the world's Schedule/IO threads and chunk state; tearing the
+    // `Level` down underneath it (`Level::shutdown` cancels those threads and
+    // flushes storage) races with whatever the straggler is doing mid-tick.
+    // Every caller of `World::shutdown` must wait for `ticking` to clear
+    // first. Bounded with the same 3s timeout style `Level::shutdown` itself
+    // already uses for joining its OS threads: proceed anyway on timeout
+    // (never block a shutdown forever on a wedged world) but log it.
+    async fn wait_for_tick_to_finish(world: &Arc<World>) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while world.ticking.load(Ordering::Acquire) {
+            let notified = world.ticking_notify.notified();
+            if !world.ticking.load(Ordering::Acquire) {
+                break;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                warn!(
+                    "Timed out waiting for world at {} to finish its in-flight tick before shutdown",
+                    world.level.level_folder.root_folder.display()
+                );
+                break;
+            }
+        }
+    }
+    // EMBER end
+
     pub async fn unload_world(
         self: &Arc<Self>,
         world: &Arc<World>,
@@ -695,6 +742,7 @@ impl Server {
         let world = world.clone();
         let server = self.clone();
         tokio::spawn(async move {
+            Self::wait_for_tick_to_finish(&world).await; // EMBER
             world.shutdown().await;
             // Break the Level -> World back-reference so the World can drop.
             world.level.world_portal.store(Arc::new(None));
@@ -1073,6 +1121,7 @@ impl Server {
 
         info!("Starting worlds");
         for world in self.worlds.load().iter() {
+            Self::wait_for_tick_to_finish(world).await; // EMBER
             world.shutdown().await;
         }
         let level_data = self.level_info.load();
@@ -1376,24 +1425,94 @@ impl Server {
                 });
             }
         }
-        set.join_all().await;
+        // EMBER start - a panicking player tick must not propagate: join_all()
+        // re-panics on the first failed task, which would kill the fire-and-
+        // forget Ticker task and silently freeze every world's ticking forever.
+        while let Some(res) = set.join_next().await {
+            if let Err(e) = res {
+                error!("Player tick task failed: {e}");
+            }
+        }
+        // EMBER end
     }
     /// Ticks the game logic for all worlds. This is the part that is affected by `/tick freeze`.
+    // EMBER start - tick soft-budget isolation
+    //
+    // Goal: a world whose tick overruns its budget (stuck, or just doing a
+    // lot of work) must not hold back the other worlds' tick progress or the
+    // server's overall tick pacing.
+    //
+    // `ticking` on each `World` (an `Arc<AtomicBool>`) guards against
+    // spawning a second overlapping tick for a world whose previous tick is
+    // still running in the background - `World::tick` assumes it is never
+    // called concurrently with itself (unsynchronized `flush_*` queues,
+    // `chunk_loading.lock().unwrap()`, etc.), so this guard is required for
+    // correctness, not just bookkeeping.
+    //
+    // Released via a local `TickingGuard` drop-guard rather than "the line
+    // after `.await` completes": `World::tick` has real panic paths (e.g.
+    // that same `chunk_loading.lock().unwrap()` poisoning on any earlier
+    // panic), and a plain post-await release would be skipped by an
+    // unwinding panic, stranding the world's `ticking` flag at `true`
+    // forever with no indication why. Drop runs during unwinding (this
+    // workspace does not set `panic = "abort"`), so the guard is reliable
+    // either way. `catch_unwind` around the tick call additionally turns the
+    // panic into a logged error - without it, the panic would still be
+    // contained by the guard, but silently.
+    //
+    // Plain `tokio::spawn` (NOT `JoinSet`) is required for the tasks
+    // themselves: dropping a `JoinSet` aborts every task still inside it,
+    // which would kill exactly the straggler task this mechanism is meant to
+    // let keep running. Dropping a bare `JoinHandle` - which is what happens
+    // below when `timeout` wins the race and the `join_all` future is
+    // discarded - only detaches it: the task keeps running to completion on
+    // its own, and the next `tick_worlds` cycle will skip that world (via
+    // `ticking`) until it finishes.
+    //
+    // Trade-off callers must know about: `ServerTickEndEvent`/
+    // `tick_duration_nanos`/`tick_count` no longer guarantee "every world
+    // finished this tick" - only "every world within budget finished".
     pub async fn tick_worlds(self: &Arc<Self>) {
-        self.task_scheduler.tick(self).await;
-
-        let mut set = JoinSet::new();
-
-        for world in self.worlds.load().iter() {
-            let world = world.clone();
-            let server = self.clone();
-
-            set.spawn(async move {
-                world.tick(server).await;
-            });
+        struct TickingGuard(Arc<World>);
+        impl Drop for TickingGuard {
+            fn drop(&mut self) {
+                self.0.ticking.store(false, Ordering::Release);
+                self.0.ticking_notify.notify_waiters();
+            }
         }
 
-        set.join_all().await;
+        self.task_scheduler.tick(self).await;
+
+        let mut handles = Vec::new();
+        for world in self.worlds.load().iter() {
+            if world.ticking.swap(true, Ordering::AcqRel) {
+                warn!(
+                    "World at {} is still ticking from a previous cycle - skipping it this tick",
+                    world.level.level_folder.root_folder.display()
+                );
+                continue;
+            }
+            let world = world.clone();
+            let server = self.clone();
+            handles.push(tokio::spawn(async move {
+                let _guard = TickingGuard(world.clone());
+                if let Err(e) = AssertUnwindSafe(world.tick(server)).catch_unwind().await {
+                    error!("World tick task panicked: {e:?}");
+                }
+            }));
+        }
+
+        let budget = Duration::from_nanos(self.tick_rate_manager.nanoseconds_per_tick() as u64);
+        if tokio::time::timeout(budget, futures::future::join_all(handles))
+            .await
+            .is_err()
+        {
+            debug!(
+                "tick_worlds: one or more worlds are still ticking past this tick's budget; \
+                 continuing without waiting for them"
+            );
+        }
+        // EMBER end
 
         // Global tasks
         if let Err(e) = self.player_data_storage.tick(self).await {

@@ -25,6 +25,16 @@ Pumpkin 是南瓜，Ember 是把它点亮的那团火。
 - `upstream` → `https://github.com/Pumpkin-MC/Pumpkin`（只拉不推）
 - `origin` → `https://github.com/dongzh1/Ember`
 
+**⚠️ 本地 `master` 推到 `origin` 时改名为 `upstream-mirror`**（`git push origin
+master:upstream-mirror`），不再用 `master` 这个远程分支名。原因：上游
+`.github/workflows/rust.yml` 的 SignPath 签名步骤写死判断
+`github.ref == 'refs/heads/master'`（且没有 `HAS_SIGNPATH` 这类守卫，因为
+`master` 分支的 workflow 文件必须和上游字节级一致），Ember 没配 SignPath
+密钥，只要真把某个分支推成 GitHub 上名叫 `master` 的 ref 就必炸
+（`Error: Input required and not supplied: organization-id`）。本地分支名不受
+影响，`--ff-only` 校验、`git show master:README.md` 这些本地操作照常用
+`master`，只有推到云端这一步换了目标分支名。
+
 ## 同步上游（建议每周一次，小步高频）
 
 **首选：双击仓库根目录的 `sync-upstream.bat`。**
@@ -35,7 +45,7 @@ Pumpkin 是南瓜，Ember 是把它点亮的那团火。
 
 ```bash
 git fetch upstream
-git checkout master && git merge --ff-only upstream/master && git push origin master
+git checkout master && git merge --ff-only upstream/master && git push origin master:upstream-mirror
 git checkout main   && git merge master
 # 解决冲突（冲突只会出现在 EMBER 标记块附近，见下）
 git push origin main

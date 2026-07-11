@@ -10,7 +10,9 @@ use crate::chunk::gen_fill::GenFillIO;
 use pumpkin_config::chunk::{EasyBackend, EasyConfig, EasyWorldMode};
 use pumpkin_config::ember_world::{EmberRuntime, GenerateMode};
 // EMBER end
-use crate::chunk_system::{ChunkListener, ChunkLoading, GenerationSchedule, LevelChannel};
+use crate::chunk_system::{
+    ChunkListener, ChunkLoading, GenPoolBudget, GenerationSchedule, LevelChannel,
+};
 use crate::generation::generator::VanillaGenerator;
 use crate::lighting::DynamicLightEngine;
 use crate::{
@@ -181,6 +183,9 @@ pub struct Level {
     pub thread_tracker: Mutex<Vec<thread::JoinHandle<()>>>,
     pub chunk_listener: Arc<ChunkListener>,
     pub gen_pool: Option<Arc<rayon::ThreadPool>>,
+    // EMBER start - cross-world gen_pool admission control
+    pub gen_budget: Option<Arc<GenPoolBudget>>,
+    // EMBER end
 
     // EMBER start - ephemeral worlds (dungeon instances) persist nothing
     /// `true` for RAM-backed instance worlds: no folders are created and
@@ -221,6 +226,9 @@ impl Level {
         seed: i64,
         dimension: Dimension,
         gen_pool: Option<Arc<rayon::ThreadPool>>,
+        // EMBER start - cross-world gen_pool admission control
+        gen_budget: Option<Arc<GenPoolBudget>>,
+        // EMBER end
     ) -> Arc<Self> {
         let (namespace, name) = match dimension.minecraft_name.split_once(':') {
             Some((ns, n)) => (ns, n),
@@ -342,6 +350,7 @@ impl Level {
             thread_tracker,
             chunk_listener: listener.clone(),
             gen_pool: gen_pool.clone(),
+            gen_budget: gen_budget.clone(), // EMBER
             // EMBER start - ephemeral worlds persist nothing
             ephemeral,
             // EMBER end
@@ -362,6 +371,7 @@ impl Level {
             listener,
             level_ref.thread_tracker.lock().unwrap().as_mut(),
             gen_pool,
+            gen_budget, // EMBER
         );
 
         level_ref
@@ -370,6 +380,19 @@ impl Level {
     pub fn spawn_entity_generation(self: &Arc<Self>, pos: Vector2<i32>) {
         let level = self.clone();
         if let Some(pool) = &self.gen_pool {
+            // EMBER start - best-effort participation in the shared gen_pool
+            // budget. This call site is synchronous (on-demand, not the
+            // continuous bulk terrain-gen path in schedule.rs) with no
+            // queue/retry mechanism of its own, so unlike schedule.rs we
+            // never block or reject here: if a slot is free we hold it for
+            // the job's duration (giving bulk generation accurate cross-world
+            // accounting the common case); if the budget is already full we
+            // just proceed without touching the counter rather than adding
+            // async retry complexity to a hot, synchronous call site.
+            let gen_budget = self
+                .gen_budget
+                .clone()
+                .filter(|budget| budget.try_acquire());
             pool.spawn(move || {
                 let arc_chunk = Arc::new(ChunkEntityData {
                     x: pos.x,
@@ -385,7 +408,12 @@ impl Level {
                         let _ = tx.send(arc_chunk.clone());
                     }
                 }
+
+                if let Some(budget) = gen_budget {
+                    budget.release();
+                }
             });
+            // EMBER end
         } else {
             // Fallback to spawning a new thread if no pool is available (should not happen in production)
             let level_clone = level;

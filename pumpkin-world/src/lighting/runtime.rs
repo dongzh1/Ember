@@ -61,6 +61,25 @@ impl DynamicLightEngine {
         self.perform_sky_light_updates(level);
     }
 
+    // EMBER start - per-tick batched lighting
+    /// Queues the lighting work triggered by a block change without
+    /// performing the (potentially large) BFS convergence immediately.
+    ///
+    /// `set_block_state` is called up to tens of thousands of times per tick
+    /// (e.g. `/fill`) and previously ran the full synchronous convergence
+    /// inline on the caller's tokio worker thread on every single call. A
+    /// large light source removed/placed can trigger a convergence spanning
+    /// many chunks; batching the drain into one `spawn_blocking` call per
+    /// tick (see `World::tick`'s `flush_lighting_updates` call) keeps that
+    /// cost off the small shared pool of async worker threads without adding
+    /// a thread-hop for every single block change. The `check_*` calls here
+    /// are cheap, bounded queue pushes - only the drain is deferred.
+    pub fn queue_lighting_update(&self, level: &Arc<Level>, pos: BlockPos) {
+        self.check_block_light_updates(level, pos);
+        self.check_sky_light_updates(level, pos);
+    }
+    // EMBER end
+
     pub fn queue_block_light_decrease(&self, pos: BlockPos, level: u8) {
         self.block_decrease.push((pos, level));
     }

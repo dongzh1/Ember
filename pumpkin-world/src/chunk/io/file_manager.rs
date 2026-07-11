@@ -58,7 +58,7 @@ struct ChunkSerializerLazyLoader<S: ChunkSerializer<WriteBackend = PathBuf>> {
     internal: OnceCell<Arc<RwLock<S>>>,
 }
 
-impl<S: ChunkSerializer<WriteBackend = PathBuf>> ChunkSerializerLazyLoader<S> {
+impl<S: ChunkSerializer<WriteBackend = PathBuf> + 'static> ChunkSerializerLazyLoader<S> {
     fn new(path: PathBuf) -> Self {
         Self {
             path,
@@ -101,7 +101,16 @@ impl<S: ChunkSerializer<WriteBackend = PathBuf>> ChunkSerializerLazyLoader<S> {
 
         match tokio::fs::read(&self.path).await {
             Ok(bytes) => {
-                let value = S::read(bytes.into())?;
+                // EMBER start - decompression/deserialization is CPU-bound and was
+                // previously running inline on the shared tokio worker threads,
+                // where it could stall unrelated worlds' tasks. Move it off to the
+                // blocking pool, matching the write-side compression path.
+                let value = tokio::task::spawn_blocking(move || S::read(bytes.into()))
+                    .await
+                    .map_err(|e| {
+                        ChunkReadingError::IoError(std::io::Error::other(e.to_string()))
+                    })??;
+                // EMBER end
                 trace!("Successfully read file from disk: {}", self.path.display());
                 Ok(value)
             }
@@ -124,7 +133,7 @@ impl<S: ChunkSerializer<WriteBackend = PathBuf>> ChunkFileManager<S> {
     }
 }
 
-impl<S: ChunkSerializer<WriteBackend = PathBuf>> ChunkFileManager<S> {
+impl<S: ChunkSerializer<WriteBackend = PathBuf> + 'static> ChunkFileManager<S> {
     /// Returns the serializer for `path`, inserting a lazy-loader if absent.
     ///
     /// Uses an optimistic read-first pattern: in the common case (cache hit)
@@ -189,7 +198,7 @@ impl<S: ChunkSerializer<WriteBackend = PathBuf>> ChunkFileManager<S> {
 impl<P, S> FileIO for ChunkFileManager<S>
 where
     P: PathFromLevelFolder + Send + Sync + Sized + Dirtiable + 'static,
-    S: ChunkSerializer<Data = P, WriteBackend = PathBuf>,
+    S: ChunkSerializer<Data = P, WriteBackend = PathBuf> + 'static,
     S::ChunkConfig: Send + Sync,
 {
     type Data = Arc<S::Data>;

@@ -108,8 +108,13 @@ if ($LASTEXITCODE -ne 0) {
 $after = git rev-parse master
 $newCount = [int](git rev-list --count "$before..$after")
 
-git push -u origin master
-if ($LASTEXITCODE -ne 0) { Fail "推送 master 到 origin 失败。" }
+# 推到 origin 时改名为 upstream-mirror (不叫 master): 上游 rust.yml 的 SignPath
+# 签名步骤写死判断 `github.ref == 'refs/heads/master'`, Ember 没配 SignPath 密钥,
+# 只要真的把哪个分支推成 GitHub 上叫 master 的 ref, 这一步就必炸。本地分支仍然
+# 叫 master (fast-forward 校验和这个名字无关), 只是远程展示名换掉, 避免撞上这个
+# 上游写死的条件。
+git push origin master:upstream-mirror
+if ($LASTEXITCODE -ne 0) { Fail "推送 master 镜像到 origin/upstream-mirror 失败。" }
 
 if ($newCount -eq 0) {
     git checkout -q main

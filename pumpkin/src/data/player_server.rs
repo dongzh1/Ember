@@ -11,6 +11,7 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+use tokio::task::JoinSet;
 use tracing::{debug, error};
 
 /// Helper for managing player data in the server context.
@@ -78,27 +79,38 @@ impl ServerPlayerData {
 
         if should_save && self.storage.is_save_enabled() {
             self.last_save.store(now);
-            // Save all online players periodically across all worlds
+            // EMBER start - save every player concurrently instead of a
+            // sequential cross-world loop: one slow disk write no longer
+            // delays every other world's player-data save (and, since this
+            // runs at the end of `tick_worlds`, that tick's completion).
+            let mut set = JoinSet::new();
             for world in server.worlds.load().iter() {
                 for player in world.players.load().iter() {
-                    let mut nbt = NbtCompound::new();
-                    player.write_nbt(&mut nbt).await;
-
+                    let player = player.clone();
                     let storage = self.storage.clone();
-                    let uuid = player.gameprofile.id;
-                    // Save to disk periodically to prevent data loss on server crash
-                    if let Err(e) =
-                        tokio::task::spawn_blocking(move || storage.save_player_data(&uuid, nbt))
-                            .await
-                            .expect("Player data periodic save panicked")
-                    {
-                        error!(
-                            "Failed to save player data for {}: {e}",
-                            player.gameprofile.id,
-                        );
-                    }
+                    set.spawn(async move {
+                        let mut nbt = NbtCompound::new();
+                        player.write_nbt(&mut nbt).await;
+
+                        let uuid = player.gameprofile.id;
+                        // Save to disk periodically to prevent data loss on server crash
+                        if let Err(e) = tokio::task::spawn_blocking(move || {
+                            storage.save_player_data(&uuid, nbt)
+                        })
+                        .await
+                        .expect("Player data periodic save panicked")
+                        {
+                            error!("Failed to save player data for {uuid}: {e}");
+                        }
+                    });
                 }
             }
+            while let Some(res) = set.join_next().await {
+                if let Err(e) = res {
+                    error!("Player data save task failed: {e}");
+                }
+            }
+            // EMBER end
 
             debug!("Periodic player data save completed");
         }

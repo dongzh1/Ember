@@ -37,4 +37,4 @@ pub use chunk_state::{Chunk, StagedChunkEnum};
 pub use dag::DAG;
 pub use generation::generate_single_chunk;
 pub use generation_cache::Cache;
-pub use schedule::GenerationSchedule;
+pub use schedule::{GenPoolBudget, GenerationSchedule};

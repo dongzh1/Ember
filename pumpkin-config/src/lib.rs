@@ -26,6 +26,9 @@ pub use networking::rcon::RCONConfig;
 pub use plugins::PluginsConfig;
 pub use pvp::PVPConfig;
 pub use server_links::ServerLinksConfig;
+// EMBER start - server-wide concurrency tuning
+pub use performance::PerformanceConfig;
+// EMBER end
 
 mod commands;
 
@@ -38,6 +41,9 @@ pub mod lighting;
 pub mod op;
 
 mod advancement;
+// EMBER start - server-wide concurrency tuning
+mod performance;
+// EMBER end
 mod player_data;
 mod pvp;
 mod server_links;
@@ -105,6 +111,10 @@ pub struct AdvancedConfiguration {
     pub plugins: PluginsConfig,
     /// Advancement configuration
     pub advancement: AdvancementConfig,
+    // EMBER start - server-wide concurrency tuning
+    /// Performance/concurrency tuning for shared, process-wide resources.
+    pub performance: PerformanceConfig,
+    // EMBER end
 }
 
 /// Basic configuration for core server settings.

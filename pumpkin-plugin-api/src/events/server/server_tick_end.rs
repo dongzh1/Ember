@@ -10,6 +10,12 @@ use super::super::FromIntoEvent;
 ///   the ticker iteration to just after `Server::tick` returned.
 ///
 /// This event is non-cancellable.
+// EMBER start - tick soft-budget isolation
+/// A world whose tick overruns its budget is skipped rather than waited for
+/// (see `Server::tick_worlds` on the server side), so this event does NOT
+/// guarantee every loaded world finished its tick logic when it fires - only
+/// that every world within budget did.
+// EMBER end
 pub struct ServerTickEndEvent;
 impl FromIntoEvent for ServerTickEndEvent {
     const EVENT_TYPE: EventType = EventType::ServerTickEndEvent;

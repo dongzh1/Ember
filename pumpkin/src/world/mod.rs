@@ -224,6 +224,18 @@ pub struct World {
     /// Block entities indexed by chunk, so ticking only visits the currently
     /// active chunks instead of scanning every loaded block entity each tick.
     pub block_entities: DashMap<Vector2<i32>, FxHashMap<BlockPos, Arc<dyn BlockEntity>>>,
+    // EMBER start - tick soft-budget isolation
+    /// `true` while a tick task for this world is in flight. Guards against
+    /// `tick_worlds` spawning a second overlapping tick for the same world
+    /// when the previous one is still running past its budget. Released via
+    /// a drop-guard (see `server::mod::TickingGuard`) so it clears even if
+    /// the tick task panics.
+    pub ticking: Arc<std::sync::atomic::AtomicBool>,
+    /// Notified whenever `ticking` transitions to `false`, so shutdown paths
+    /// (`Server::unload_world`, `Server::shutdown`) can wait for a straggler
+    /// tick to finish instead of tearing the world down underneath it.
+    pub ticking_notify: Arc<tokio::sync::Notify>,
+    // EMBER end
 }
 
 impl PartialEq for World {
@@ -311,6 +323,10 @@ impl World {
             active_chunks: ArcSwap::new(Arc::new(FxHashSet::default())),
             server,
             block_entities: DashMap::new(),
+            // EMBER start - tick soft-budget isolation
+            ticking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ticking_notify: Arc::new(tokio::sync::Notify::new()),
+            // EMBER end
         }
     }
 
@@ -886,6 +902,7 @@ impl World {
 
         self.flush_block_updates().await;
         self.flush_synced_block_events().await;
+        self.flush_lighting_updates().await; // EMBER
         self.update_active_chunks();
         self.tick_environment().await;
 
@@ -1120,6 +1137,23 @@ impl World {
             }
         }
     }
+
+    // EMBER start - per-tick batched lighting (see `queue_lighting_update`)
+    /// Drains the lighting updates queued this tick by `set_block_state` via
+    /// `queue_lighting_update`. The BFS convergence is CPU-bound and
+    /// potentially large (a big light source removed/placed can cascade
+    /// across many chunks), so it runs on the blocking pool rather than
+    /// inline on a shared tokio worker thread on every single block change.
+    pub async fn flush_lighting_updates(&self) {
+        let level = self.level.clone();
+        tokio::task::spawn_blocking(move || {
+            level.light_engine.perform_block_light_updates(&level);
+            level.light_engine.perform_sky_light_updates(&level);
+        })
+        .await
+        .expect("Lighting flush task panicked");
+    }
+    // EMBER end
 
     async fn tick_environment(&self) {
         let (world_age, is_night, time_of_day) = {
@@ -4409,9 +4443,12 @@ impl World {
 
         let (_chunk_coordinate, _) = position.chunk_and_chunk_relative_position();
 
+        // EMBER: queue-only - the actual convergence is batched once per
+        // tick in `flush_lighting_updates` instead of running inline here on
+        // every single block change (see `queue_lighting_update` doc comment).
         self.level
             .light_engine
-            .update_lighting_at(&self.level, *position);
+            .queue_lighting_update(&self.level, *position);
 
         replaced_block_state_id
     }
