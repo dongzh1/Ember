@@ -132,12 +132,15 @@ git push origin main
 | 原生对话框 + 磁盘世界枚举 | `pumpkin/src/entity/player.rs`（`show_dialog`/`clear_dialog`）、`pumpkin/src/server/mod.rs`（`list_world_folders`、`delete_world`）、`pumpkin-world/src/chunk/easy_mysql.rs`（`delete_world_data`） | `Player::show_dialog`/`clear_dialog` 原生发服务端对话框(原来只有 WASM 有);`Server::list_world_folders` 枚举磁盘未加载世界;`delete_world` 删世界(文件夹+库行+锁)。前两者可 PR 上游 |
 | Mannequin NPC 实体 + WASM 控制 API | `pumpkin/src/entity/decoration/mannequin.rs`、`pumpkin-protocol/src/lib.rs`（`ResolvableProfile`）、`pumpkin/src/entity/decoration/mod.rs`、`pumpkin/src/entity/type.rs`、`ember-wit/ember.wit`、`pumpkin-plugin-api/src/lib.rs`、`pumpkin/src/plugin/loader/wasm/wasm_host/wit/v0_1/{entity,mod}.rs` | 上游已有 `MANNEQUIN` 实体类型 id 但无 Rust 实现,Ember 补上装饰实体 + `PROFILE` 元数据(`ResolvableProfile`)。WASM 控制面(`set-skin`/`set-description`/`set-immovable`)首次用**覆盖包技术**扩展 WIT 契约:`ember-wit/ember.wit` 声明独立的 `package ember:plugin`,其 `world` 用 `include` 整体引入上游 `pumpkin:plugin/plugin` 再 `import` 自己的 `mannequin` interface;bindgen 的 `path` 传数组同时读上游目录和 `ember-wit/`。**`pumpkin-plugin-wit` 已不是 git 子模块**(commit `bf24eac4` 起改为普通 vendored 文件,专为支撑这套叠加技术;内容仍要求与上游保持字节级不变,现在靠人工同步纪律而非 git 子模块机制保证)。**易错点**:一旦 `with` 里出现任意一条映射,wit-bindgen 就要求`include`进来的上游 world 触达的**全部** interface(不只是 mannequin 直接用到的)都显式给出 `with` 答案,否则 proc-macro panic;完整清单見两处 bindgen 调用旁的注释 |
 | 多世界传送门配对 | `pumpkin/src/server/mod.rs`（`Server::get_paired_world`）、`pumpkin/src/block/blocks/nether_portal.rs`、`pumpkin/src/block/blocks/end_portal.rs`、`pumpkin/src/command/commands/world.rs`（`dimension_for_world_name`） | 上游 `get_world_from_dimension` 只取"第一个已加载的同维度世界",多世界下所有世界的下界/末地传送门都会通向默认世界(唯一有下界/末地的世界)。现按命名约定配对:`/world load <x>_nether`/`<x>_end` 建对应维度而非主世界;传送门优先找"同前缀+对应维度"的已加载世界,找不到再退回默认世界的下界/末地(未配对时行为不变) |
+| 内置经济系统（多货币，`MySQL`） | `pumpkin-config/src/economy.rs`、`pumpkin/src/server/economy.rs`（`EconomyManager`）、`pumpkin/src/command/commands/economy.rs`（`/balance`、`/pay`、`/eco`） | `[economy] enabled=false` 默认关闭,开启需配 `MySQL` `url`。纯整数金额,**懒创建账户**(查询未命中直接回落 `starting_balance`,不写库;第一次真正写入才 upsert 出行)。扣款原子性:`UPDATE ... WHERE balance >= ?` + 判 `rows_affected()`(仿 EasyWorld `easy_mysql.rs` 的 `REFRESH_LOCK` 模式),转账(跨两账户)用 `sqlx` 事务——是仓库里第一次用事务,单条语句表达不了跨行原子性。货币在配置里定义,不是数据库表。**故意不做插件层**(native/WASM 都没有专属 API 封装):`economy_manager` 是 `Server` 的公开字段,native 插件天生能直接调,没有另外接线 |
 
 （新增功能时更新此表。）
 
 ## 服务端 vs 插件边界（架构原则）
 
-**服务端负责原语**（存储格式、世界加载/卸载/克隆/实例/预热 API、生命周期事件）;**插件负责业务**（副本准入、排队、经济、消息）。
+**服务端负责原语**（存储格式、世界加载/卸载/克隆/实例/预热 API、生命周期事件）;**插件负责业务**（副本准入、排队、消息）。
+
+**例外:内置经济系统**(见上表)。这条原则原本把"经济"也算作插件业务,但经济系统被判定为要长期维护、放服务端和放插件维护成本相同,所以直接写进了服务端——这是有意识的偏离,不是原则失效,以后遇到类似"反正要一直维护"的功能可以参照这个先例判断,但不代表以后所有业务功能都该往服务端塞。
 
 - **Native 插件**:`Context.server` 是公开的 `Arc<Server>`,无需任何额外改动即可调用全部原语（`create_world_with`/`unload_world`/`clone_world`/`is_world_unloading`/`prewarm_storage`）+ 监听/否决 `WorldLoad`/`WorldUnload` 事件——写业务适配插件无需任何新增 API。
 - **WASM 插件**:世界管理 API 仍缺（只有 `create-world`,无 unload/clone/instance;无生命周期事件)。要让沙箱/热重载的 WASM 插件也能驱动,需扩展 WIT 契约——**不必 fork `pumpkin-plugin-wit`**:参照 mannequin 的先例,在 `ember-wit/` 开一个独立的 `ember:plugin` 包,`world` 用 `include` 叠加上游 `plugin` world 再加自己的 interface,bindgen 的 `path` 传数组同时读两个目录,上游目录保持字节级不变(见下表 mannequin 行)。世界管理 API 的扩展本身**仍未做**,待排期。

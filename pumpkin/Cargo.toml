@@ -30,6 +30,9 @@ pumpkin-protocol = { workspace = true, features = ["default"] }
 pumpkin-macros.workspace = true
 pumpkin-codecs.workspace = true
 
+# EMBER: built-in economy system storage
+sqlx.workspace = true
+
 dashmap.workspace = true
 crossbeam.workspace = true
 uuid.workspace = true

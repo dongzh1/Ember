@@ -60,6 +60,9 @@ mod whitelist;
 // EMBER start - /world command
 mod world;
 // EMBER end
+// EMBER start - built-in economy system
+mod economy;
+// EMBER end
 mod worldborder;
 
 #[must_use]
@@ -162,6 +165,9 @@ pub async fn default_dispatcher(
     advancement::register(&mut dispatcher, registry);
     // EMBER start - /world command
     world::register(&mut dispatcher, registry);
+    // EMBER end
+    // EMBER start - built-in economy system
+    economy::register(&mut dispatcher, registry);
     // EMBER end
     dispatcher
 }

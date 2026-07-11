@@ -29,6 +29,9 @@ pub use server_links::ServerLinksConfig;
 // EMBER start - server-wide concurrency tuning
 pub use performance::PerformanceConfig;
 // EMBER end
+// EMBER start - built-in economy system
+pub use economy::EconomyConfig;
+// EMBER end
 
 mod commands;
 
@@ -43,6 +46,9 @@ pub mod op;
 mod advancement;
 // EMBER start - server-wide concurrency tuning
 mod performance;
+// EMBER end
+// EMBER start - built-in economy system
+mod economy;
 // EMBER end
 mod player_data;
 mod pvp;
@@ -114,6 +120,10 @@ pub struct AdvancedConfiguration {
     // EMBER start - server-wide concurrency tuning
     /// Performance/concurrency tuning for shared, process-wide resources.
     pub performance: PerformanceConfig,
+    // EMBER end
+    // EMBER start - built-in economy system
+    /// Built-in multi-currency economy system (`MySQL`-backed, off by default).
+    pub economy: EconomyConfig,
     // EMBER end
 }
 

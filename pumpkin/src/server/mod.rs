@@ -56,6 +56,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::task::TaskTracker;
 
 mod connection_cache;
+// EMBER start - built-in economy system
+pub mod economy;
+// EMBER end
 mod key_store;
 pub mod recipe;
 pub mod scheduler;
@@ -64,6 +67,9 @@ pub mod tick_rate_manager;
 pub mod ticker;
 
 pub use recipe::RecipeManager;
+// EMBER start - built-in economy system
+pub use economy::EconomyManager;
+// EMBER end
 
 use crate::command::args::entities::{
     EntityFilter, EntityFilterSort, EntitySelectorType, TargetSelector, ValueCondition,
@@ -119,6 +125,11 @@ pub struct Server {
     /// own local in-flight cap independently, with no awareness of other
     /// worlds sharing the same pool. See `GenPoolBudget` doc comment.
     pub gen_budget: Arc<pumpkin_world::chunk_system::GenPoolBudget>,
+    // EMBER end
+    // EMBER start - built-in economy system
+    /// Multi-currency, `MySQL`-backed economy system. Off (all operations
+    /// return `EconomyError::Disabled`) unless `[economy] enabled = true`.
+    pub economy_manager: Arc<economy::EconomyManager>,
     // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
@@ -283,6 +294,9 @@ impl Server {
             advanced_config.performance.max_concurrent_world_gen_jobs,
         ));
         // EMBER end
+        // EMBER start - built-in economy system
+        let economy_manager = Arc::new(economy::EconomyManager::new(&advanced_config.economy));
+        // EMBER end
 
         let server = Self {
             basic_config,
@@ -328,6 +342,7 @@ impl Server {
             level_info,
             gen_pool: gen_pool.clone(),
             gen_budget: gen_budget.clone(), // EMBER
+            economy_manager,                // EMBER
         };
         let server = Arc::new(server);
 
