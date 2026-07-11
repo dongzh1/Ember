@@ -12,6 +12,8 @@ pub mod advancement_data;
 pub mod banlist_serializer;
 pub mod banned_ip;
 pub mod banned_player;
+// EMBER: packet-only NPC storage (data/npcs.json)
+pub mod npc;
 pub mod player_server;
 pub mod usercache;
 pub mod whitelist;

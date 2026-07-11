@@ -60,6 +60,9 @@ mod connection_cache;
 pub mod economy;
 // EMBER end
 mod key_store;
+// EMBER start - packet-only NPC manager
+pub mod npc;
+// EMBER end
 pub mod recipe;
 pub mod scheduler;
 pub mod seasonal_events;
@@ -69,6 +72,9 @@ pub mod ticker;
 pub use recipe::RecipeManager;
 // EMBER start - built-in economy system
 pub use economy::EconomyManager;
+// EMBER end
+// EMBER start - packet-only NPC manager
+pub use npc::NpcManager;
 // EMBER end
 
 use crate::command::args::entities::{
@@ -130,6 +136,11 @@ pub struct Server {
     /// Multi-currency, `MySQL`-backed economy system. Off (all operations
     /// return `EconomyError::Disabled`) unless `[economy] enabled = true`.
     pub economy_manager: Arc<economy::EconomyManager>,
+    // EMBER end
+    // EMBER start - packet-only NPC manager
+    /// Packet-only NPCs (`data/npcs.json`): never real world entities, spawned
+    /// per-viewer purely via packets. See `npc::NpcManager` doc comment.
+    pub npc_manager: Arc<npc::NpcManager>,
     // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
@@ -297,6 +308,9 @@ impl Server {
         // EMBER start - built-in economy system
         let economy_manager = Arc::new(economy::EconomyManager::new(&advanced_config.economy));
         // EMBER end
+        // EMBER start - packet-only NPC manager
+        let npc_manager = Arc::new(npc::NpcManager::new());
+        // EMBER end
 
         let server = Self {
             basic_config,
@@ -343,6 +357,7 @@ impl Server {
             gen_pool: gen_pool.clone(),
             gen_budget: gen_budget.clone(), // EMBER
             economy_manager,                // EMBER
+            npc_manager,                    // EMBER
         };
         let server = Arc::new(server);
 
@@ -1497,6 +1512,7 @@ impl Server {
         }
 
         self.task_scheduler.tick(self).await;
+        self.npc_manager.tick(self).await; // EMBER - packet-only NPC visibility
 
         let mut handles = Vec::new();
         for world in self.worlds.load().iter() {

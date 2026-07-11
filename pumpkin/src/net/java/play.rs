@@ -1866,6 +1866,29 @@ impl JavaClient {
                 }
             }}
         } else {
+            // EMBER start - packet-only NPC click handling
+            //
+            // Ghost NPCs (`server::npc::NpcManager`) are never real entities,
+            // so they always land here. Run the configured click command (if
+            // any) and stop before the unknown-entity event/anti-cheat kick
+            // below, which exists for genuinely invalid client packets, not
+            // our own intentionally-fake entity ids.
+            if let Some(click_command) = server.npc_manager.click_command(entity_id.0).await {
+                if let Some(command) = click_command {
+                    let command = command.replace("%player%", &player.gameprofile.name);
+                    let source = crate::command::CommandSender::Console
+                        .into_source(server)
+                        .await;
+                    server
+                        .command_dispatcher
+                        .read()
+                        .await
+                        .handle_command(&source, &command)
+                        .await;
+                }
+                return;
+            }
+            // EMBER end
             // Entity not found
             send_cancellable! {{
                 server;
