@@ -169,15 +169,21 @@ concurrent spends on the same account can't overdraw it.
 
 ### Packet-only NPCs
 
-Skinned NPCs that render entirely via packets — never a real world entity, so zero save-file
-footprint and no world-simulation cost. Skins are copied from a currently-online player (never
-resolved against Mojang).
+NPCs that render entirely via packets — never a real world entity, so zero save-file footprint
+and no world-simulation cost. Any entity type works, not just fake players: mobs/animals show a
+generic nametag, `mannequin` and `player` support skins, `falling_block`/`item` render correctly
+via their type-specific data.
 
 ```
-/npc create <name> [player]                # spawn at your position, using your (or their) skin
+/npc create <name> [player]                    # spawn as a fake player at your position
+/npc create <name> as <entity-type> [extra]    # spawn as any entity type (extra = player name for
+                                                # player/mannequin skins, block/item name for
+                                                # falling_block/item)
 /npc remove|list|move|skin <name> ...
-/npc setaction <name> <command>            # run a console command on click (%player% placeholder)
+/npc setaction <name> <command>                # run a console command on click (%player% placeholder)
 ```
+
+Skins are always copied from a currently-online player (never resolved against Mojang).
 
 ### Offline-mode login wall
 
@@ -381,14 +387,19 @@ url = "mysql://user:pass@localhost:3306/ember"
 
 ### 发包 NPC
 
-纯靠协议包渲染的带皮肤 NPC——不是真实世界实体，零存档负担，不参与世界模拟。皮肤从当前在线
-玩家复制（不联网解析 Mojang 用户名）。
+纯靠协议包渲染的 NPC——不是真实世界实体，零存档负担，不参与世界模拟。不止能伪装成玩家，
+任意实体类型都支持：普通生物/动物显示通用悬浮名字，`mannequin`、`player` 支持换皮肤，
+`falling_block`/`item` 靠各自的专属数据正确渲染外观。
 
 ```
-/npc create <名字> [玩家]                   # 在你的位置生成,用你(或指定玩家)的皮肤
+/npc create <名字> [玩家]                        # 在你的位置生成一个假玩家,用你(或指定玩家)的皮肤
+/npc create <名字> as <实体类型> [附加参数]       # 生成任意实体类型(附加参数:player/mannequin
+                                                  # 填玩家名换皮肤,falling_block/item 填方块/物品名)
 /npc remove|list|move|skin <名字> ...
-/npc setaction <名字> <命令>                # 点击时以控制台身份执行命令(%player% 占位符)
+/npc setaction <名字> <命令>                     # 点击时以控制台身份执行命令(%player% 占位符)
 ```
+
+皮肤始终从当前在线玩家复制（不联网解析 Mojang 用户名）。
 
 ### 离线模式登录验证
 

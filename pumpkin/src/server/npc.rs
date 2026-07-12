@@ -12,9 +12,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use pumpkin_data::Block;
 use pumpkin_data::entity::EntityType;
+use pumpkin_data::item::Item;
+use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::meta_data_type::MetaDataType;
 use pumpkin_data::tracked_data::TrackedData;
+use pumpkin_protocol::ResolvableProfile;
+use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::java::client::play::{
     CPlayerInfoUpdate, CRemoveEntities, CRemovePlayerInfo, CSetEntityMetadata, CSpawnEntity,
@@ -22,6 +27,7 @@ use pumpkin_protocol::java::client::play::{
 };
 use pumpkin_util::math::vector2::{Vector2, to_chunk_pos};
 use pumpkin_util::math::vector3::Vector3;
+use pumpkin_util::text::TextComponent;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -41,6 +47,58 @@ const VISIBILITY_INTERVAL_TICKS: i32 = 10;
 /// player's byte here mirrors their client-side settings; a fake NPC has no
 /// such source, so it hardcodes "show everything".
 const SKIN_LAYERS_ALL: u8 = 0x7F;
+
+// EMBER start - packet-only NPCs generalized to any entity type
+/// Resolves an [`NpcEntry`]'s stored resource name to a real [`EntityType`].
+///
+/// Falls back to `PLAYER` for a name that no longer resolves (a hand-edited
+/// `npcs.json`, or a name a future data-gen no longer has). Case-insensitive:
+/// `EntityType::from_name` itself is not.
+#[must_use]
+pub fn resolve_entity_type(entry: &NpcEntry) -> &'static EntityType {
+    EntityType::from_name(&entry.entity_type.to_lowercase()).unwrap_or(&EntityType::PLAYER)
+}
+
+/// Whether an NPC needs `PLAYER`-specific handling — a Mojang skin resolved
+/// through the tab list rather than plain metadata.
+fn is_player_kind(entity_type: &EntityType) -> bool {
+    entity_type == &EntityType::PLAYER
+}
+
+/// Whether an NPC's entity type has any concept of a settable skin at all.
+///
+/// Only `player` (tab-list texture) and `mannequin` (`PROFILE` metadata) do.
+/// Shared by `NpcManager::set_skin` and the `/npc create ... as <type>
+/// <player>` command validation so the two can never drift apart.
+#[must_use]
+pub fn supports_skin(entity_type: &EntityType) -> bool {
+    is_player_kind(entity_type) || entity_type == &EntityType::MANNEQUIN
+}
+
+/// Builds the `PROFILE` metadata value from an NPC's stored skin, the same
+/// conversion `MannequinEntity::profile` uses for the real entity.
+fn profile_from_skin(skin: Option<&pumpkin_protocol::Property>) -> ResolvableProfile {
+    skin.map_or_else(ResolvableProfile::empty, |prop| {
+        ResolvableProfile::from_textures(prop.value.clone(), prop.signature.clone())
+    })
+}
+
+/// Sends the despawn packets for one NPC to one client. `is_player` gates
+/// `CRemovePlayerInfo` — every other entity type never entered the tab list
+/// in the first place, so removing it there would be a meaningless no-op at
+/// best and is simply skipped.
+fn send_despawn_packets(
+    client: &crate::net::java::JavaClient,
+    entity_id: i32,
+    fake_uuid: Uuid,
+    is_player: bool,
+) {
+    client.try_enqueue_packet(&CRemoveEntities::new(&[VarInt(entity_id)]));
+    if is_player {
+        client.try_enqueue_packet(&CRemovePlayerInfo::new(&[fake_uuid]));
+    }
+}
+// EMBER end
 
 struct RuntimeNpc {
     fake_uuid: Uuid,
@@ -125,6 +183,7 @@ impl NpcManager {
                 state.entity_id,
                 state.fake_uuid,
                 &state.visible_to,
+                is_player_kind(resolve_entity_type(&removed)),
             );
         }
         Ok(())
@@ -189,6 +248,12 @@ impl NpcManager {
         else {
             return Err(format!("No NPC named '{name}' exists."));
         };
+        if !supports_skin(resolve_entity_type(entry)) {
+            return Err(format!(
+                "NPC '{name}' is a '{}' — that entity type doesn't support skins.",
+                entry.entity_type
+            ));
+        }
         entry.skin = textures;
         let entry = entry.clone();
         config.save();
@@ -241,6 +306,7 @@ impl NpcManager {
                 old.entity_id,
                 old.fake_uuid,
                 &old.visible_to,
+                is_player_kind(resolve_entity_type(entry)),
             );
         }
     }
@@ -251,6 +317,7 @@ impl NpcManager {
         entity_id: i32,
         fake_uuid: Uuid,
         viewers: &HashSet<Uuid>,
+        is_player: bool,
     ) {
         if viewers.is_empty() {
             return;
@@ -269,8 +336,7 @@ impl NpcManager {
                 continue;
             }
             if let ClientPlatform::Java(client) = player.client.as_ref() {
-                client.try_enqueue_packet(&CRemoveEntities::new(&[VarInt(entity_id)]));
-                client.try_enqueue_packet(&CRemovePlayerInfo::new(&[fake_uuid]));
+                send_despawn_packets(client, entity_id, fake_uuid, is_player);
             }
         }
     }
@@ -307,6 +373,7 @@ impl NpcManager {
                 let Some(npc) = runtime.get_mut(&entry.name) else {
                     continue;
                 };
+                let is_player = is_player_kind(resolve_entity_type(entry));
 
                 let mut in_range = HashSet::with_capacity(npc.visible_to.len());
                 for player in players.iter() {
@@ -330,8 +397,7 @@ impl NpcManager {
                         && !in_range.contains(&uuid)
                         && let ClientPlatform::Java(client) = player.client.as_ref()
                     {
-                        client.try_enqueue_packet(&CRemoveEntities::new(&[VarInt(npc.entity_id)]));
-                        client.try_enqueue_packet(&CRemovePlayerInfo::new(&[npc.fake_uuid]));
+                        send_despawn_packets(client, npc.entity_id, npc.fake_uuid, is_player);
                     }
                 }
                 npc.visible_to = in_range;
@@ -340,42 +406,124 @@ impl NpcManager {
     }
 
     fn send_spawn(client: &crate::net::java::JavaClient, npc: &RuntimeNpc, entry: &NpcEntry) {
-        let properties: Vec<_> = entry.skin.clone().into_iter().collect();
-        client.try_enqueue_packet(&CPlayerInfoUpdate::new(
-            (PlayerInfoFlags::ADD_PLAYER | PlayerInfoFlags::UPDATE_LISTED).bits(),
-            &[InfoPlayer {
-                uuid: npc.fake_uuid,
-                actions: &[
-                    PlayerAction::AddPlayer {
-                        name: &entry.name,
-                        properties: &properties,
-                    },
-                    PlayerAction::UpdateListed(false),
-                ],
-            }],
-        ));
+        let entity_type = resolve_entity_type(entry);
+        let is_player = is_player_kind(entity_type);
+
+        // PLAYER needs tab-list registration before it spawns, or the
+        // client has no profile (and thus no skin) to render it with.
+        if is_player {
+            let properties: Vec<_> = entry.skin.clone().into_iter().collect();
+            client.try_enqueue_packet(&CPlayerInfoUpdate::new(
+                (PlayerInfoFlags::ADD_PLAYER | PlayerInfoFlags::UPDATE_LISTED).bits(),
+                &[InfoPlayer {
+                    uuid: npc.fake_uuid,
+                    actions: &[
+                        PlayerAction::AddPlayer {
+                            name: &entry.name,
+                            properties: &properties,
+                        },
+                        PlayerAction::UpdateListed(false),
+                    ],
+                }],
+            ));
+        }
+
+        // EMBER: `falling_block`'s appearance is carried in the spawn
+        // packet's own `data` field (a block-state id) rather than
+        // metadata — every other entity type just leaves it at 0.
+        let data = if entity_type == &EntityType::FALLING_BLOCK {
+            i32::from(
+                entry
+                    .block
+                    .as_deref()
+                    .and_then(|name| Block::from_name(&name.to_lowercase()))
+                    .unwrap_or(&Block::SAND)
+                    .default_state
+                    .id
+                    .as_u16(),
+            )
+        } else {
+            0
+        };
 
         client.try_enqueue_packet(&CSpawnEntity::new(
             VarInt(npc.entity_id),
             npc.fake_uuid,
-            VarInt(i32::from(EntityType::PLAYER.id)),
+            VarInt(i32::from(entity_type.id)),
             Vector3::new(entry.x, entry.y, entry.z),
             entry.pitch,
             entry.yaw,
             entry.yaw,
-            VarInt(0),
+            VarInt(data),
             Vector3::new(0.0, 0.0, 0.0),
         ));
 
+        let version = client.version.load();
         let mut buf = Vec::new();
-        if Metadata::new(
-            TrackedData::PLAYER_MODE_CUSTOMISATION,
-            MetaDataType::BYTE,
-            SKIN_LAYERS_ALL,
+
+        if is_player {
+            if Metadata::new(
+                TrackedData::PLAYER_MODE_CUSTOMISATION,
+                MetaDataType::BYTE,
+                SKIN_LAYERS_ALL,
+            )
+            .write(&mut buf, &version)
+            .is_ok()
+            {
+                buf.push(0xFF);
+                client.try_enqueue_packet(&CSetEntityMetadata::new(
+                    VarInt(npc.entity_id),
+                    buf.into(),
+                ));
+            }
+            return;
+        }
+
+        // Every non-player kind needs its name sent explicitly: a player
+        // gets a nametag "for free" from its tab-list username, nothing
+        // else does.
+        let mut ok = Metadata::new(
+            TrackedData::CUSTOM_NAME,
+            MetaDataType::OPTIONAL_TEXT_COMPONENT,
+            Some(TextComponent::text(entry.name.clone())),
         )
-        .write(&mut buf, &client.version.load())
-        .is_ok()
-        {
+        .write(&mut buf, &version)
+        .is_ok();
+        ok &= Metadata::new(
+            TrackedData::CUSTOM_NAME_VISIBLE,
+            MetaDataType::BOOLEAN,
+            true,
+        )
+        .write(&mut buf, &version)
+        .is_ok();
+
+        if entity_type == &EntityType::MANNEQUIN {
+            ok &= Metadata::new(
+                TrackedData::PROFILE,
+                MetaDataType::RESOLVABLE_PROFILE,
+                profile_from_skin(entry.skin.as_ref()),
+            )
+            .write(&mut buf, &version)
+            .is_ok();
+            ok &= Metadata::new(TrackedData::IMMOVABLE, MetaDataType::BOOLEAN, true)
+                .write(&mut buf, &version)
+                .is_ok();
+        } else if entity_type == &EntityType::ITEM {
+            let item = entry
+                .item
+                .as_deref()
+                .and_then(|name| Item::from_registry_key(&name.to_lowercase()))
+                .unwrap_or(&Item::STONE);
+            ok &= Metadata::new(
+                TrackedData::ITEM,
+                MetaDataType::ITEM_STACK,
+                &ItemStackSerializer::from(ItemStack::new(1, item)),
+            )
+            .write(&mut buf, &version)
+            .is_ok();
+        }
+
+        if ok {
             buf.push(0xFF);
             client.try_enqueue_packet(&CSetEntityMetadata::new(VarInt(npc.entity_id), buf.into()));
         }
