@@ -133,8 +133,12 @@ pub struct MarketSlotTier {
 /// The list of configured shops, `shop/shops.toml`. A separate file from
 /// `shop/shop.toml` since it's an arbitrarily-long named list, not fixed
 /// settings - same reasoning as `NpcConfig`/`npc/npcs.json`.
+///
+/// Deliberately **not** `#[serde(transparent)]` (unlike `NpcConfig`,
+/// `#[serde(transparent)]` around a bare `Vec` serializes as a bare array at
+/// the document root - valid JSON, but TOML documents must be a table at
+/// the root, so `toml::to_string` rejects it with `UnsupportedType`.
 #[derive(Deserialize, Serialize, Default, Clone)]
-#[serde(transparent)]
 pub struct ShopListConfig {
     pub shops: Vec<ShopConfig>,
 }
@@ -180,9 +184,9 @@ const fn default_limit() -> i64 {
 }
 
 /// The list of configured lottery pools, `shop/lottery.toml` - same
-/// "own file, arbitrarily-long named list" reasoning as `ShopListConfig`.
+/// "own file, arbitrarily-long named list" reasoning and **not**
+/// `#[serde(transparent)]` for the same reason as `ShopListConfig`.
 #[derive(Deserialize, Serialize, Default, Clone)]
-#[serde(transparent)]
 pub struct LotteryListConfig {
     pub pools: Vec<LotteryPoolConfig>,
 }
