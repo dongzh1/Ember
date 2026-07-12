@@ -53,6 +53,10 @@ pub struct NpcEntry {
     /// Client-side crouch pose.
     #[serde(default)]
     pub sneaking: bool,
+    /// Random-wander radius (in blocks) around `(x, y, z)`, the NPC's home
+    /// point. `None` means stationary (the default).
+    #[serde(default)]
+    pub wander_radius: Option<f64>,
     // EMBER end
 }
 

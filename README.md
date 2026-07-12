@@ -184,6 +184,8 @@ via their type-specific data.
 /npc lookat <name> on|off                      # continuously face the nearest visible player
 /npc sneak <name> on|off                       # client-side crouch pose
 /npc swing <name>                              # play the swing-main-arm animation once
+/npc moveto <name>                              # walk (not teleport) to your position
+/npc wander <name> on <radius> | off           # randomly wander within <radius> blocks of home
 ```
 
 Skins are always copied from a currently-online player (never resolved against Mojang).
@@ -403,6 +405,8 @@ url = "mysql://user:pass@localhost:3306/ember"
 /npc lookat <名字> on|off                        # 持续朝向最近的可见玩家
 /npc sneak <名字> on|off                         # 客户端下蹲姿态
 /npc swing <名字>                                # 播放一次挥手动画
+/npc moveto <名字>                               # 走(不是瞬移)到你的位置
+/npc wander <名字> on <半径> | off               # 在出生点半径内随机游荡
 ```
 
 皮肤始终从当前在线玩家复制（不联网解析 Mojang 用户名）。

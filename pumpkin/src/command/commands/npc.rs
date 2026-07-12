@@ -15,6 +15,9 @@
 //   /npc lookat <name> on|off       - continuously face the nearest visible player
 //   /npc sneak <name> on|off        - client-side crouch pose
 //   /npc swing <name>               - play the swing-main-arm animation once
+//   /npc moveto <name>              - walk (not teleport) to your position
+//   /npc wander <name> on <radius>  - randomly wander within <radius> blocks of home
+//   /npc wander <name> off          - stop wandering
 
 use pumpkin_data::Block;
 use pumpkin_data::entity::EntityType;
@@ -24,6 +27,7 @@ use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry
 use pumpkin_util::text::{TextComponent, color::NamedColor};
 
 use crate::command::argument_builder::{ArgumentBuilder, argument, command, literal};
+use crate::command::argument_types::core::integer::IntegerArgumentType;
 use crate::command::argument_types::core::string::StringArgumentType;
 use crate::command::argument_types::entity::EntityArgumentType;
 use crate::command::context::command_context::CommandContext;
@@ -43,6 +47,7 @@ const ARG_SKIN_PLAYER: &str = "player";
 const ARG_COMMAND: &str = "command";
 const ARG_ENTITY_TYPE: &str = "entity_type";
 const ARG_EXTRA: &str = "extra";
+const ARG_RADIUS: &str = "radius";
 
 async fn feedback(context: &CommandContext<'_>, msg: TextComponent) {
     context.source.send_feedback(msg, false).await;
@@ -100,6 +105,7 @@ impl CommandExecutor for NpcCreateExecutor {
                 item: None,
                 look_at_nearest_player: false,
                 sneaking: false,
+                wander_radius: None,
             };
 
             let server = context.server();
@@ -218,6 +224,7 @@ impl CommandExecutor for NpcCreateAsExecutor {
                 item,
                 look_at_nearest_player: false,
                 sneaking: false,
+                wander_radius: None,
             };
 
             if let Err(e) = context.server().npc_manager.create(entry).await {
@@ -310,6 +317,65 @@ impl CommandExecutor for NpcMoveExecutor {
         })
     }
 }
+
+// EMBER start - NPC movement (moveto/wander)
+struct NpcMoveToExecutor;
+impl CommandExecutor for NpcMoveToExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let sender = context.source.player_or_err()?;
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let target = sender.get_entity().pos.load();
+
+            match context.server().npc_manager.walk_to(&name, target).await {
+                Ok(()) => {
+                    feedback(context, ok_text(format!("NPC '{name}' is walking over."))).await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(e)).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+
+struct NpcWanderExecutor {
+    enabled: bool,
+}
+impl CommandExecutor for NpcWanderExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let radius = if self.enabled {
+                Some(f64::from(IntegerArgumentType::get(context, ARG_RADIUS)?))
+            } else {
+                None
+            };
+            let server = context.server();
+            let result = server
+                .npc_manager
+                .set_wander_radius(server, &name, radius)
+                .await;
+            match result {
+                Ok(()) => {
+                    let message = radius.map_or_else(
+                        || format!("NPC '{name}' stopped wandering."),
+                        |radius| format!("NPC '{name}' wandering within {radius} blocks of home."),
+                    );
+                    feedback(context, ok_text(message)).await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(e)).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+// EMBER end
 
 struct NpcSkinExecutor;
 impl CommandExecutor for NpcSkinExecutor {
@@ -508,6 +574,9 @@ impl SuggestionProvider for EntityTypeSuggestionProvider {
     }
 }
 
+// EMBER: a long but flat builder chain, not complex logic - splitting it
+// would just scatter one command tree across multiple functions.
+#[expect(clippy::too_many_lines)]
 pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionRegistry) {
     registry.register_permission_or_panic(Permission::new(
         PERMISSION,
@@ -607,6 +676,26 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                     argument(ARG_NAME, StringArgumentType::SingleWord)
                         .suggests(NpcNameSuggestionProvider)
                         .executes(NpcSwingExecutor),
+                ),
+            )
+            .then(
+                literal("moveto").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .executes(NpcMoveToExecutor),
+                ),
+            )
+            .then(
+                literal("wander").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .then(literal("off").executes(NpcWanderExecutor { enabled: false }))
+                        .then(
+                            literal("on").then(
+                                argument(ARG_RADIUS, IntegerArgumentType::with_min(1))
+                                    .executes(NpcWanderExecutor { enabled: true }),
+                            ),
+                        ),
                 ),
             ),
     );

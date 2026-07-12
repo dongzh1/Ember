@@ -22,9 +22,9 @@ use pumpkin_protocol::ResolvableProfile;
 use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::java::client::play::{
-    Animation, CEntityAnimation, CHeadRot, CPlayerInfoUpdate, CRemoveEntities, CRemovePlayerInfo,
-    CSetEntityMetadata, CSpawnEntity, Metadata, Player as InfoPlayer, PlayerAction,
-    PlayerInfoFlags,
+    Animation, CEntityAnimation, CEntityPositionSync, CHeadRot, CPlayerInfoUpdate, CRemoveEntities,
+    CRemovePlayerInfo, CSetEntityMetadata, CSpawnEntity, Metadata, Player as InfoPlayer,
+    PlayerAction, PlayerInfoFlags,
 };
 use pumpkin_util::math::vector2::{Vector2, to_chunk_pos};
 use pumpkin_util::math::vector3::Vector3;
@@ -48,6 +48,18 @@ const VISIBILITY_INTERVAL_TICKS: i32 = 10;
 /// Re-evaluate `look_at_nearest_player` every 4 ticks (5/s) — noticeably
 /// smoother than the visibility interval without re-scanning every tick.
 const LOOK_INTERVAL_TICKS: i32 = 4;
+// EMBER end
+
+// EMBER start - NPC movement (moveto/wander)
+/// Advance active movement every 2 ticks (10/s) — smooth enough for a
+/// walking pace without moving every single tick.
+const MOVEMENT_INTERVAL_TICKS: i32 = 2;
+/// Blocks moved per `MOVEMENT_INTERVAL_TICKS` call (~3 blocks/s), a fixed
+/// walking pace — not currently configurable per NPC.
+const MOVE_STEP_BLOCKS: f64 = 0.3;
+/// How long a wandering NPC waits at each stop before picking a new target.
+const WANDER_PAUSE_MIN_TICKS: i32 = 40;
+const WANDER_PAUSE_MAX_TICKS: i32 = 120;
 // EMBER end
 
 /// All bits set: cape/jacket/sleeves/pants-legs/hat all rendered. A real
@@ -137,7 +149,37 @@ struct RuntimeNpc {
     /// Last head yaw byte sent to viewers, so `look_at_nearest_player`
     /// doesn't spam an identical `CHeadRot` every interval.
     last_sent_head_yaw: Option<u8>,
+    // EMBER start - NPC movement (moveto/wander)
+    /// Live position, distinct from `NpcEntry.x/y/z` (that stays the "home"
+    /// point) while walking. Reset to the entry's stored position whenever
+    /// the runtime state is (re)built, so a restart mid-walk just resumes
+    /// from the last-saved home point rather than the exact mid-stride spot.
+    position: Vector3<f64>,
+    yaw: f32,
+    /// Active walk target, if any. `None` means stationary (whether or not
+    /// wander is enabled — see `wander`'s own pause bookkeeping).
+    goal: Option<MoveGoal>,
+    /// Wander behavior state — present iff `NpcEntry.wander_radius` is
+    /// `Some`, independent of whether a `goal` is currently in progress.
+    wander: Option<WanderState>,
+    // EMBER end
 }
+
+// EMBER start - NPC movement (moveto/wander)
+struct MoveGoal {
+    target: Vector3<f64>,
+    /// Whether reaching the target should re-arm wandering (vs. a one-shot
+    /// `/npc moveto` that just stops).
+    is_wander_leg: bool,
+}
+
+struct WanderState {
+    center: Vector3<f64>,
+    radius: f64,
+    /// Don't pick a new target until `Server::tick_count` reaches this.
+    pause_until_tick: i32,
+}
+// EMBER end
 
 pub struct NpcManager {
     config: RwLock<NpcConfig>,
@@ -174,6 +216,14 @@ impl NpcManager {
             )),
             visible_to: HashSet::new(),
             last_sent_head_yaw: None,
+            position: Vector3::new(entry.x, entry.y, entry.z),
+            yaw: entry.yaw,
+            goal: None,
+            wander: entry.wander_radius.map(|radius| WanderState {
+                center: Vector3::new(entry.x, entry.y, entry.z),
+                radius,
+                pause_until_tick: 0,
+            }),
         }
     }
 
@@ -395,6 +445,56 @@ impl NpcManager {
     }
     // EMBER end
 
+    // EMBER start - NPC movement (moveto/wander)
+    /// One-shot: walks to `target` at the fixed pace, overriding any wander
+    /// leg in progress (wandering resumes on its own once this arrives).
+    /// Runtime-only — a restart loses an in-progress `walk_to`, same as
+    /// every other one-shot action here.
+    pub async fn walk_to(&self, name: &str, target: Vector3<f64>) -> Result<(), String> {
+        let config = self.config.read().await;
+        let Some(entry) = config.find(name) else {
+            return Err(format!("No NPC named '{name}' exists."));
+        };
+        let canonical_name = entry.name.clone();
+        drop(config);
+
+        let mut runtime = self.runtime.write().await;
+        if let Some(npc) = runtime.get_mut(&canonical_name) {
+            npc.goal = Some(MoveGoal {
+                target,
+                is_wander_leg: false,
+            });
+        }
+        Ok(())
+    }
+
+    /// Enables/disables random wandering within `radius` blocks of the NPC's
+    /// home point (`x`/`y`/`z`). Forces a respawn (like `set_sneaking`) so
+    /// wandering state resets cleanly from the persisted config.
+    pub async fn set_wander_radius(
+        &self,
+        server: &Arc<Server>,
+        name: &str,
+        radius: Option<f64>,
+    ) -> Result<(), String> {
+        let mut config = self.config.write().await;
+        let Some(entry) = config
+            .npcs
+            .iter_mut()
+            .find(|n| n.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("No NPC named '{name}' exists."));
+        };
+        entry.wander_radius = radius;
+        let entry = entry.clone();
+        config.save();
+        drop(config);
+
+        self.reset_runtime_and_despawn(server, &entry).await;
+        Ok(())
+    }
+    // EMBER end
+
     /// Given an entity id from an interact packet the world doesn't
     /// recognize, returns the configured click command (if any) when it
     /// belongs to one of our NPCs. `None` means "not one of ours" — the
@@ -469,7 +569,8 @@ impl NpcManager {
         let tick_count = server.tick_count.load(Ordering::Relaxed);
         let do_visibility = tick_count % VISIBILITY_INTERVAL_TICKS == 0;
         let do_look = tick_count % LOOK_INTERVAL_TICKS == 0;
-        if !do_visibility && !do_look {
+        let do_movement = tick_count % MOVEMENT_INTERVAL_TICKS == 0;
+        if !do_visibility && !do_look && !do_movement {
             return;
         }
 
@@ -528,22 +629,101 @@ impl NpcManager {
                 }
 
                 if do_look && entry.look_at_nearest_player {
-                    Self::update_look_at(npc, entry, &players);
+                    Self::update_look_at(npc, &players);
+                }
+
+                if do_movement && (npc.goal.is_some() || npc.wander.is_some()) {
+                    Self::move_npc(npc, tick_count, &players);
                 }
             }
         }
     }
+
+    // EMBER start - NPC movement (moveto/wander)
+    /// Advances one movement step: starts a new wander leg if idle and past
+    /// its pause, then walks `MOVE_STEP_BLOCKS` toward the active goal
+    /// (snapping to it once within one step), broadcasting the new position
+    /// to current viewers via `CEntityPositionSync`.
+    fn move_npc(npc: &mut RuntimeNpc, tick_count: i32, players: &[Arc<Player>]) {
+        if npc.goal.is_none()
+            && let Some(wander) = &npc.wander
+            && tick_count >= wander.pause_until_tick
+        {
+            let center = wander.center;
+            let radius = wander.radius;
+            let target = Vector3::new(
+                center.x + rand::random_range(-radius..radius),
+                center.y,
+                center.z + rand::random_range(-radius..radius),
+            );
+            npc.goal = Some(MoveGoal {
+                target,
+                is_wander_leg: true,
+            });
+        }
+
+        let Some(goal) = &npc.goal else {
+            return;
+        };
+        let target = goal.target;
+        let is_wander_leg = goal.is_wander_leg;
+
+        let old_position = npc.position;
+        let delta = target.sub(&old_position);
+        let distance = delta.length();
+
+        if distance <= MOVE_STEP_BLOCKS {
+            npc.position = target;
+            npc.goal = None;
+            if is_wander_leg && let Some(wander) = &mut npc.wander {
+                wander.pause_until_tick =
+                    tick_count + rand::random_range(WANDER_PAUSE_MIN_TICKS..WANDER_PAUSE_MAX_TICKS);
+            }
+        } else {
+            let (yaw, _pitch) = yaw_pitch_towards(old_position, target);
+            npc.yaw = yaw;
+            npc.position = Vector3::new(
+                old_position.x + delta.x / distance * MOVE_STEP_BLOCKS,
+                old_position.y + delta.y / distance * MOVE_STEP_BLOCKS,
+                old_position.z + delta.z / distance * MOVE_STEP_BLOCKS,
+            );
+        }
+
+        npc.chunk_pos = to_chunk_pos(&Vector2::new(
+            npc.position.x.floor() as i32,
+            npc.position.z.floor() as i32,
+        ));
+
+        let velocity = npc.position.sub(&old_position);
+        let head_yaw = angle_to_byte(npc.yaw);
+        for player in players {
+            if npc.visible_to.contains(&player.gameprofile.id)
+                && let ClientPlatform::Java(client) = player.client.as_ref()
+            {
+                client.try_enqueue_packet(&CEntityPositionSync::new(
+                    VarInt(npc.entity_id),
+                    npc.position,
+                    velocity,
+                    npc.yaw,
+                    0.0,
+                    true,
+                ));
+                client.try_enqueue_packet(&CHeadRot::new(VarInt(npc.entity_id), head_yaw));
+            }
+        }
+    }
+    // EMBER end
 
     // EMBER start - look-at-nearest-player
     /// Turns `npc` to face its nearest currently-visible viewer, broadcasting
     /// `CHeadRot` to every viewer — one shared head orientation, not a
     /// separate one per viewer (a head-yaw byte can't express "face whoever's
     /// looking at you" individually per client anyway).
-    fn update_look_at(npc: &mut RuntimeNpc, entry: &NpcEntry, players: &[Arc<Player>]) {
+    fn update_look_at(npc: &mut RuntimeNpc, players: &[Arc<Player>]) {
         if npc.visible_to.is_empty() {
             return;
         }
-        let npc_pos = Vector3::new(entry.x, entry.y, entry.z);
+        let npc_pos = npc.position;
         let Some(nearest) = players
             .iter()
             .filter(|p| npc.visible_to.contains(&p.gameprofile.id))
@@ -618,10 +798,10 @@ impl NpcManager {
             VarInt(npc.entity_id),
             npc.fake_uuid,
             VarInt(i32::from(entity_type.id)),
-            Vector3::new(entry.x, entry.y, entry.z),
+            npc.position,
             entry.pitch,
-            entry.yaw,
-            entry.yaw,
+            npc.yaw,
+            npc.yaw,
             VarInt(data),
             Vector3::new(0.0, 0.0, 0.0),
         ));
