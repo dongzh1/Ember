@@ -18,11 +18,20 @@ use tracing::{error, info};
 use crate::{SHOULD_STOP, STOP_INTERRUPT, server::Server};
 
 pub async fn start_query_handler(server: Arc<Server>, query_addr: SocketAddr) {
-    let socket = Arc::new(
-        UdpSocket::bind(query_addr)
-            .await
-            .expect("Unable to bind to address"),
-    );
+    // EMBER: a failed bind here used to `.expect()` (panic), and the crash
+    // handler treats any panic as fatal - a port clash on this optional,
+    // separately-configured query socket would take down the entire game
+    // server. Log and skip query instead; the main game server doesn't
+    // depend on it.
+    let socket = match UdpSocket::bind(query_addr).await {
+        Ok(socket) => Arc::new(socket),
+        Err(e) => {
+            error!(
+                "Failed to bind query socket to {query_addr}: {e}. Query protocol will be unavailable."
+            );
+            return;
+        }
+    };
 
     // Challenge tokens are bound to the IP address and port
     let valid_challenge_tokens = Arc::new(RwLock::new(HashMap::new()));
