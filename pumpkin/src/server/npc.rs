@@ -458,6 +458,19 @@ impl NpcManager {
             Vector3::new(0.0, 0.0, 0.0),
         ));
 
+        Self::send_spawn_metadata(client, npc, entry, entity_type, is_player);
+    }
+
+    /// The metadata half of [`Self::send_spawn`] — split out purely to keep
+    /// each function under clippy's line-count lint; both run unconditionally
+    /// as one logical spawn.
+    fn send_spawn_metadata(
+        client: &crate::net::java::JavaClient,
+        npc: &RuntimeNpc,
+        entry: &NpcEntry,
+        entity_type: &EntityType,
+        is_player: bool,
+    ) {
         let version = client.version.load();
         let mut buf = Vec::new();
 
