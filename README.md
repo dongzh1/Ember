@@ -186,6 +186,9 @@ via their type-specific data.
 /npc swing <name>                              # play the swing-main-arm animation once
 /npc moveto <name>                              # walk (not teleport) to your position
 /npc wander <name> on <radius> | off           # randomly wander within <radius> blocks of home
+/npc hide <name> <player>                      # hide from a specific player regardless of distance
+/npc show <name> <player>                      # undo /npc hide
+/npc distance <name> [blocks]                  # override view distance (omit to reset)
 ```
 
 Skins are always copied from a currently-online player (never resolved against Mojang).
@@ -407,6 +410,9 @@ url = "mysql://user:pass@localhost:3306/ember"
 /npc swing <名字>                                # 播放一次挥手动画
 /npc moveto <名字>                               # 走(不是瞬移)到你的位置
 /npc wander <名字> on <半径> | off               # 在出生点半径内随机游荡
+/npc hide <名字> <玩家>                          # 对指定玩家隐藏,不管距离
+/npc show <名字> <玩家>                          # 撤销 /npc hide
+/npc distance <名字> [格数]                      # 覆盖可见距离(不填则恢复默认)
 ```
 
 皮肤始终从当前在线玩家复制（不联网解析 Mojang 用户名）。

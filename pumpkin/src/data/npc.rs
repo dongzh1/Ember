@@ -1,9 +1,10 @@
 // EMBER start: packet-only NPC storage
-use std::{fs, path::PathBuf};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use pumpkin_protocol::Property;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 /// A single packet-only NPC definition.
 ///
@@ -57,6 +58,13 @@ pub struct NpcEntry {
     /// point. `None` means stationary (the default).
     #[serde(default)]
     pub wander_radius: Option<f64>,
+    /// Players who never see this NPC, regardless of view distance.
+    #[serde(default)]
+    pub hidden_from: HashSet<Uuid>,
+    /// Per-NPC view-distance override, in blocks. `None` uses each viewer's
+    /// normal client view distance (the default).
+    #[serde(default)]
+    pub visible_distance: Option<f64>,
     // EMBER end
 }
 

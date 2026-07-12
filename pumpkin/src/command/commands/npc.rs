@@ -18,6 +18,9 @@
 //   /npc moveto <name>              - walk (not teleport) to your position
 //   /npc wander <name> on <radius>  - randomly wander within <radius> blocks of home
 //   /npc wander <name> off          - stop wandering
+//   /npc hide <name> <player>       - hide from a specific player regardless of distance
+//   /npc show <name> <player>       - undo /npc hide
+//   /npc distance <name> [blocks]   - override view distance (omit to reset to default)
 
 use pumpkin_data::Block;
 use pumpkin_data::entity::EntityType;
@@ -30,6 +33,7 @@ use crate::command::argument_builder::{ArgumentBuilder, argument, command, liter
 use crate::command::argument_types::core::integer::IntegerArgumentType;
 use crate::command::argument_types::core::string::StringArgumentType;
 use crate::command::argument_types::entity::EntityArgumentType;
+use crate::command::argument_types::game_profile::GameProfileArgumentType;
 use crate::command::context::command_context::CommandContext;
 use crate::command::node::dispatcher::CommandDispatcher;
 use crate::command::node::{CommandExecutor, CommandExecutorResult};
@@ -48,6 +52,8 @@ const ARG_COMMAND: &str = "command";
 const ARG_ENTITY_TYPE: &str = "entity_type";
 const ARG_EXTRA: &str = "extra";
 const ARG_RADIUS: &str = "radius";
+const ARG_TARGET: &str = "target";
+const ARG_DISTANCE: &str = "distance";
 
 async fn feedback(context: &CommandContext<'_>, msg: TextComponent) {
     context.source.send_feedback(msg, false).await;
@@ -106,6 +112,8 @@ impl CommandExecutor for NpcCreateExecutor {
                 look_at_nearest_player: false,
                 sneaking: false,
                 wander_radius: None,
+                hidden_from: std::collections::HashSet::new(),
+                visible_distance: None,
             };
 
             let server = context.server();
@@ -225,6 +233,8 @@ impl CommandExecutor for NpcCreateAsExecutor {
                 look_at_nearest_player: false,
                 sneaking: false,
                 wander_radius: None,
+                hidden_from: std::collections::HashSet::new(),
+                visible_distance: None,
             };
 
             if let Err(e) = context.server().npc_manager.create(entry).await {
@@ -363,6 +373,101 @@ impl CommandExecutor for NpcWanderExecutor {
                     let message = radius.map_or_else(
                         || format!("NPC '{name}' stopped wandering."),
                         |radius| format!("NPC '{name}' wandering within {radius} blocks of home."),
+                    );
+                    feedback(context, ok_text(message)).await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(e)).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+// EMBER end
+
+// EMBER start - per-player NPC visibility control
+struct NpcHideExecutor;
+impl CommandExecutor for NpcHideExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let profiles = GameProfileArgumentType::get(context, ARG_TARGET).await?;
+            let Some(target) = profiles.into_iter().next() else {
+                feedback(context, err_text("No matching player.")).await;
+                return Ok(0);
+            };
+            let server = context.server();
+            match server.npc_manager.hide_from(server, &name, target.id).await {
+                Ok(()) => {
+                    feedback(
+                        context,
+                        ok_text(format!("NPC '{name}' is now hidden from {}.", target.name)),
+                    )
+                    .await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(e)).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+
+struct NpcShowExecutor;
+impl CommandExecutor for NpcShowExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let profiles = GameProfileArgumentType::get(context, ARG_TARGET).await?;
+            let Some(target) = profiles.into_iter().next() else {
+                feedback(context, err_text("No matching player.")).await;
+                return Ok(0);
+            };
+            let server = context.server();
+            match server.npc_manager.show_to(server, &name, target.id).await {
+                Ok(()) => {
+                    feedback(
+                        context,
+                        ok_text(format!("NPC '{name}' is visible to {} again.", target.name)),
+                    )
+                    .await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(e)).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+
+struct NpcDistanceExecutor {
+    has_distance: bool,
+}
+impl CommandExecutor for NpcDistanceExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let blocks = if self.has_distance {
+                Some(f64::from(IntegerArgumentType::get(context, ARG_DISTANCE)?))
+            } else {
+                None
+            };
+            let server = context.server();
+            let result = server
+                .npc_manager
+                .set_visible_distance(server, &name, blocks)
+                .await;
+            match result {
+                Ok(()) => {
+                    let message = blocks.map_or_else(
+                        || format!("NPC '{name}' uses each viewer's normal view distance again."),
+                        |blocks| format!("NPC '{name}' visible distance set to {blocks} blocks."),
                     );
                     feedback(context, ok_text(message)).await;
                     Ok(1)
@@ -695,6 +800,37 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                                 argument(ARG_RADIUS, IntegerArgumentType::with_min(1))
                                     .executes(NpcWanderExecutor { enabled: true }),
                             ),
+                        ),
+                ),
+            )
+            .then(
+                literal("hide").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .then(
+                            argument(ARG_TARGET, GameProfileArgumentType).executes(NpcHideExecutor),
+                        ),
+                ),
+            )
+            .then(
+                literal("show").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .then(
+                            argument(ARG_TARGET, GameProfileArgumentType).executes(NpcShowExecutor),
+                        ),
+                ),
+            )
+            .then(
+                literal("distance").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .executes(NpcDistanceExecutor {
+                            has_distance: false,
+                        })
+                        .then(
+                            argument(ARG_DISTANCE, IntegerArgumentType::with_min(1))
+                                .executes(NpcDistanceExecutor { has_distance: true }),
                         ),
                 ),
             ),

@@ -495,6 +495,82 @@ impl NpcManager {
     }
     // EMBER end
 
+    // EMBER start - per-player visibility control
+    /// Hides an NPC from a specific player, regardless of distance,
+    /// persisted across restarts.
+    pub async fn hide_from(
+        &self,
+        server: &Arc<Server>,
+        name: &str,
+        player: Uuid,
+    ) -> Result<(), String> {
+        let mut config = self.config.write().await;
+        let Some(entry) = config
+            .npcs
+            .iter_mut()
+            .find(|n| n.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("No NPC named '{name}' exists."));
+        };
+        entry.hidden_from.insert(player);
+        let entry = entry.clone();
+        config.save();
+        drop(config);
+
+        self.reset_runtime_and_despawn(server, &entry).await;
+        Ok(())
+    }
+
+    /// Undoes `hide_from` — the player is visible again once back in range.
+    pub async fn show_to(
+        &self,
+        server: &Arc<Server>,
+        name: &str,
+        player: Uuid,
+    ) -> Result<(), String> {
+        let mut config = self.config.write().await;
+        let Some(entry) = config
+            .npcs
+            .iter_mut()
+            .find(|n| n.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("No NPC named '{name}' exists."));
+        };
+        entry.hidden_from.remove(&player);
+        let entry = entry.clone();
+        config.save();
+        drop(config);
+
+        self.reset_runtime_and_despawn(server, &entry).await;
+        Ok(())
+    }
+
+    /// Overrides the view distance viewers need this NPC to appear within.
+    /// `None` reverts to each viewer's own client view distance.
+    pub async fn set_visible_distance(
+        &self,
+        server: &Arc<Server>,
+        name: &str,
+        blocks: Option<f64>,
+    ) -> Result<(), String> {
+        let mut config = self.config.write().await;
+        let Some(entry) = config
+            .npcs
+            .iter_mut()
+            .find(|n| n.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("No NPC named '{name}' exists."));
+        };
+        entry.visible_distance = blocks;
+        let entry = entry.clone();
+        config.save();
+        drop(config);
+
+        self.reset_runtime_and_despawn(server, &entry).await;
+        Ok(())
+    }
+    // EMBER end
+
     /// Given an entity id from an interact packet the world doesn't
     /// recognize, returns the configured click command (if any) when it
     /// belongs to one of our NPCs. `None` means "not one of ours" — the
@@ -605,12 +681,22 @@ impl NpcManager {
                         let ClientPlatform::Java(client) = player.client.as_ref() else {
                             continue;
                         };
+                        let uuid = player.gameprofile.id;
+                        if entry.hidden_from.contains(&uuid) {
+                            continue;
+                        }
                         let center = player.get_entity().chunk_pos.load();
-                        let view_distance = get_view_distance(player).get() as i32;
+                        // EMBER: a per-NPC override replaces the viewer's own
+                        // client view distance entirely (not a min/max with
+                        // it) — an operator who sets this wants that exact
+                        // distance, not whichever of the two is smaller.
+                        let view_distance = entry.visible_distance.map_or_else(
+                            || get_view_distance(player).get() as i32,
+                            |blocks| (blocks / 16.0).ceil() as i32,
+                        );
                         if !is_within_view_distance(npc.chunk_pos, center, view_distance) {
                             continue;
                         }
-                        let uuid = player.gameprofile.id;
                         in_range.insert(uuid);
                         if !npc.visible_to.contains(&uuid) {
                             Self::send_spawn(client, npc, entry);
