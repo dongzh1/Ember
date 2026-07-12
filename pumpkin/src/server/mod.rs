@@ -73,6 +73,9 @@ pub mod home;
 // EMBER start - /tpa teleport request system
 pub mod tpa;
 // EMBER end
+// EMBER start - built-in shop/bank/market/lottery system
+pub mod shop;
+// EMBER end
 pub mod recipe;
 pub mod scheduler;
 pub mod seasonal_events;
@@ -177,6 +180,21 @@ pub struct Server {
     // EMBER start - /tpa teleport request system
     /// Pending `/tpa`/`/tpahere` requests awaiting `/tpaaccept`/`/tpadeny`.
     pub tpa_manager: Arc<tpa::TpaManager>,
+    // EMBER end
+    // EMBER start - built-in shop/bank/market/lottery system
+    /// Basic shop: GUI buy/sell/batch-purchase/redeem, dynamic pricing. Off
+    /// (all operations return `ShopError::Disabled`) unless `[shop] enabled
+    /// = true` in `shop/shop.toml`, shared by all four managers below.
+    pub shop_manager: Arc<shop::basic_shop::ShopManager>,
+    /// Bank: deposit/withdraw, permission-tiered compound interest.
+    pub bank_manager: Arc<shop::bank::BankManager>,
+    /// Market/auction: player listings, atomic buy, offline income mailbox.
+    pub market_manager: Arc<shop::market::MarketManager>,
+    /// Lottery: weighted-random draws with pity and daily limits.
+    pub lottery_manager: Arc<shop::lottery::LotteryManager>,
+    /// One-shot chat input capture shared by the bank's "custom amount" and
+    /// the market's "search" - see `shop::chat_capture` doc comment.
+    pub shop_chat_capture: Arc<shop::chat_capture::ChatCaptureManager>,
     // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
@@ -357,6 +375,24 @@ impl Server {
         // EMBER start - /tpa teleport request system
         let tpa_manager = Arc::new(tpa::TpaManager::new());
         // EMBER end
+        // EMBER start - built-in shop/bank/market/lottery system
+        let (shop_config, shop_pool) = shop::load();
+        let shop_manager = Arc::new(shop::basic_shop::ShopManager::new(
+            shop_config.shop,
+            shop_pool.clone(),
+        ));
+        shop_manager.spawn_daily_recovery();
+        let bank_manager = Arc::new(shop::bank::BankManager::new(
+            shop_config.bank,
+            shop_pool.clone(),
+        ));
+        let market_manager = Arc::new(shop::market::MarketManager::new(
+            shop_config.market,
+            shop_pool.clone(),
+        ));
+        let lottery_manager = Arc::new(shop::lottery::LotteryManager::new(shop_pool));
+        let shop_chat_capture = Arc::new(shop::chat_capture::ChatCaptureManager::new());
+        // EMBER end
 
         let server = Self {
             basic_config,
@@ -408,6 +444,11 @@ impl Server {
             login_manager,                  // EMBER
             home_manager,                   // EMBER
             tpa_manager,                    // EMBER
+            shop_manager,                   // EMBER
+            bank_manager,                   // EMBER
+            market_manager,                 // EMBER
+            lottery_manager,                // EMBER
+            shop_chat_capture,              // EMBER
         };
         let server = Arc::new(server);
 

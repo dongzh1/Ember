@@ -74,6 +74,12 @@ mod home;
 mod spawn;
 mod tpa;
 // EMBER end
+// EMBER start - built-in shop/bank/market/lottery system
+mod bank;
+mod lottery;
+mod market;
+mod shop;
+// EMBER end
 mod worldborder;
 
 #[must_use]
@@ -190,6 +196,12 @@ pub async fn default_dispatcher(
     spawn::register(&mut dispatcher, registry);
     home::register(&mut dispatcher, registry);
     tpa::register(&mut dispatcher, registry);
+    // EMBER end
+    // EMBER start - built-in shop/bank/market/lottery system
+    shop::register(&mut dispatcher, registry);
+    bank::register(&mut dispatcher, registry);
+    market::register(&mut dispatcher, registry);
+    lottery::register(&mut dispatcher, registry);
     // EMBER end
     dispatcher
 }

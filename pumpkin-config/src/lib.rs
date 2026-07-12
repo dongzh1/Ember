@@ -38,6 +38,13 @@ pub use auth::LoginConfig;
 // EMBER start - per-player home worlds
 pub use home::HomeConfig;
 // EMBER end
+// EMBER start - built-in shop/bank/market/lottery system
+pub use shop::{
+    BankSettings, BankTier, LotteryListConfig, LotteryPity, LotteryPoolConfig, LotteryPrize,
+    MarketSettings, MarketSlotTier, ShopConfig, ShopItem, ShopListConfig, ShopSettings,
+    ShopSystemConfig,
+};
+// EMBER end
 
 mod commands;
 
@@ -61,6 +68,9 @@ mod auth;
 // EMBER end
 // EMBER start - per-player home worlds
 mod home;
+// EMBER end
+// EMBER start - built-in shop/bank/market/lottery system
+mod shop;
 // EMBER end
 mod player_data;
 mod pvp;

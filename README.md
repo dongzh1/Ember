@@ -43,8 +43,9 @@ come say hi in the QQ group:
 | One-click build & push | — | + `build.bat`, `check.bat`, `push.bat`, `sync-upstream.bat` |
 | CI artifacts | Nightly source builds | + Auto-versioned releases (`ember`, `ember.exe`), one per ship |
 | Built-in economy | — | + Multi-currency, MySQL-backed, atomic balance checks (`/balance`, `/pay`, `/eco`) |
-| Packet-only NPCs | — | + Skinned fake-player NPCs, no plugin needed (`/npc`) |
+| Packet-only NPCs | — | + Skinned fake-player NPCs, no plugin needed (`/npc`), escort/guide, click events |
 | Offline-mode login wall | — | + Register/login verification for `online_mode = false` servers |
+| Built-in shop/bank/market/lottery | — | + Dynamic pricing, tiered interest, player auctions, weighted-random draws |
 
 ## Quick Start
 
@@ -226,6 +227,25 @@ exists, otherwise cloned from an operator-configured template (`home/home.toml`'
 `template_world`) on first visit. `/tpa`/`/tpahere` requests expire after 2 minutes if
 unanswered, and the recipient's chat message includes clickable `[accept]`/`[deny]` buttons
 alongside the plain commands. All five commands are allowed for every player by default.
+
+### Shop, bank, market & lottery
+
+Multi-currency economy plus a full shop system, `MySQL`-backed like the economy system it
+shares a currency with. Off by default; enable in `shop/shop.toml` with a `url`.
+
+```
+/shop [name]                     # list shops, or open one's buy/sell GUI menu
+/bank balance|deposit|withdraw|log [currency]   # deposit/withdraw with compound interest
+/market sell <price> [currency]  # list your held item stack for sale
+/market list|buy <id>|cancel <id>                # browse/buy/cancel auction listings
+/lottery [pool]                  # list pools, or draw once from one
+```
+
+`/shop` is the only one with a full GUI (buy/sell/redeem, dynamic pricing that decays as an
+item sells more and recovers daily); bank/market/lottery are command-driven for now, GUI is a
+planned follow-up. Bank interest tiers can be gated by permission (`shop/shop.toml`'s
+`[bank] tiers`). Market listings never expire and are visible regardless of the seller's
+online status; buying is safe even across multiple Ember instances sharing one database.
 
 ## Inherited Pumpkin Features
 
@@ -451,6 +471,24 @@ url = "mysql://user:pass@localhost:3306/ember"
 模板世界（`home/home.toml` 的 `template_world`）克隆生成。`/tpa`/`/tpahere` 请求 2 分钟内
 无人回应会自动失效，接收方收到的聊天消息里带可点击的 `[接受]`/`[拒绝]` 按钮，也可以直接打
 对应指令。以上五个指令默认所有玩家都能用。
+
+### 商店、银行、市场拍卖行与抽奖
+
+多货币经济系统之上的完整商店体系，和经济系统共用同一套 `MySQL`。默认关闭，在
+`shop/shop.toml` 配置 `url` 后开启。
+
+```
+/shop [名字]                              # 列出商店,或打开某个商店的买卖 GUI 菜单
+/bank balance|deposit|withdraw|log [货币]  # 存取款,带复利利息
+/market sell <价格> [货币]                # 挂牌出售手持物品
+/market list|buy <编号>|cancel <编号>     # 浏览/购买/下架拍卖挂单
+/lottery [奖池]                           # 列出奖池,或抽一次奖
+```
+
+只有 `/shop` 做了完整 GUI（买/卖/赎回，动态定价：卖得越多跌得越多，每天自动回涨）；银行/
+市场/抽奖目前是指令界面，GUI 是后续计划。银行利率可以按权限分档（`shop/shop.toml` 的
+`[bank] tiers`）。市场挂单永不过期，不管卖家是否在线都能查到；就算多个 Ember 实例共享同一
+个数据库，购买也是安全的（原子抢单，不会出现两边都买到同一件商品）。
 
 ## 继承的 Pumpkin 能力
 
