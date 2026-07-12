@@ -35,6 +35,9 @@ pub use economy::EconomyConfig;
 // EMBER start - offline-mode login verification
 pub use auth::LoginConfig;
 // EMBER end
+// EMBER start - per-player home worlds
+pub use home::HomeConfig;
+// EMBER end
 
 mod commands;
 
@@ -55,6 +58,9 @@ mod economy;
 // EMBER end
 // EMBER start - offline-mode login verification
 mod auth;
+// EMBER end
+// EMBER start - per-player home worlds
+mod home;
 // EMBER end
 mod player_data;
 mod pvp;

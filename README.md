@@ -137,7 +137,9 @@ without the terrain generator.
 ```
 
 Permission: `ember:command.world` (OP level 3 by default). Loading/unloading and cloning never
-stall the tick loop — saves run in the background.
+stall the tick loop — saves run in the background. Every world-name/format/border argument
+above tab-completes (loaded worlds, on-disk-but-unloaded worlds, or both, depending on what
+each subcommand requires).
 
 ### Plugin permissions
 
@@ -191,6 +193,22 @@ New joiners drop into a holding world and are prompted to set a password (existi
 prompted to log in instead — Ember tells the two apart automatically). Password entry happens
 over chat, not a form field. A successful login from the same IP is remembered for 24h (configurable),
 so it isn't repeated every join. `/auth reset <player>` recovers a forgotten password. Java only.
+
+### Player navigation
+
+```
+/spawn                       # teleport to the hub world's spawn point
+/home                        # teleport to your personal home world
+/tpa <player>                # request to teleport to another player
+/tpahere <player>            # request another player to teleport to you
+/tpaaccept / /tpadeny        # accept or decline a pending request
+```
+
+Every player gets their own `home_<uuid>` world: loaded straight from disk if it already
+exists, otherwise cloned from an operator-configured template (`home/home.toml`'s
+`template_world`) on first visit. `/tpa`/`/tpahere` requests expire after 2 minutes if
+unanswered, and the recipient's chat message includes clickable `[accept]`/`[deny]` buttons
+alongside the plain commands. All five commands are allowed for every player by default.
 
 ## Inherited Pumpkin Features
 
@@ -334,6 +352,8 @@ source   = "arena"       # 只读克隆：读另一个世界的数据
 ```
 
 权限：`ember:command.world`（默认 OP 3 级）。加载/卸载/克隆都不会卡服 —— 存盘在后台进行。
+以上每个世界名/格式/border 参数都支持 tab 补全（已加载世界、磁盘上未加载的世界，或两者都算，
+取决于各子命令的要求）。
 
 ### 插件权限
 
@@ -383,6 +403,21 @@ url = "mysql://user:pass@localhost:3306/ember"
 新玩家进服会先落入一个隔离的虚空世界，提示设置密码（已有账户则提示登录，服务端自动判断
 两者，不用玩家自己选）。密码通过聊天框输入，不是表单填写。同一 IP 24 小时内验证过可跳过
 （时长可配置）。忘记密码用 `/auth reset <玩家>` 找管理员重置。仅支持 Java 版。
+
+### 玩家导航指令
+
+```
+/spawn                        # 传送到主城世界的出生点
+/home                         # 传送到你的个人家园世界
+/tpa <玩家>                   # 请求传送到另一名玩家那里
+/tpahere <玩家>               # 请求另一名玩家传送到你这里
+/tpaaccept / /tpadeny         # 接受或拒绝待处理的传送请求
+```
+
+每个玩家都有自己的 `home_<uuid>` 世界：已存在就直接从磁盘加载，首次访问则从管理员配置的
+模板世界（`home/home.toml` 的 `template_world`）克隆生成。`/tpa`/`/tpahere` 请求 2 分钟内
+无人回应会自动失效，接收方收到的聊天消息里带可点击的 `[接受]`/`[拒绝]` 按钮，也可以直接打
+对应指令。以上五个指令默认所有玩家都能用。
 
 ## 继承的 Pumpkin 能力
 

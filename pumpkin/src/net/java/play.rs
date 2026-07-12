@@ -1743,6 +1743,29 @@ impl JavaClient {
             .map(|p| Arc::clone(p) as Arc<dyn EntityBase>)
             .or_else(|| world.get_entity_by_id(entity_id.0));
         let Some(target) = target else {
+            // EMBER start - packet-only NPC click handling
+            //
+            // Ghost NPCs (`server::npc::NpcManager`) are never real entities,
+            // so a left-click ("attack") on one always lands here too, not
+            // just the right-click ("interact") path in `handle_interact`.
+            // Run the configured click command and stop before the
+            // unknown-entity anti-cheat kick below.
+            if let Some(click_command) = server.npc_manager.click_command(entity_id.0).await {
+                if let Some(command) = click_command {
+                    let command = command.replace("%player%", &player.gameprofile.name);
+                    let source = crate::command::CommandSender::Console
+                        .into_source(server)
+                        .await;
+                    server
+                        .command_dispatcher
+                        .read()
+                        .await
+                        .handle_command(&source, &command)
+                        .await;
+                }
+                return;
+            }
+            // EMBER end
             self.kick(TextComponent::translate_cross(
                 translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED,
                 translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED,

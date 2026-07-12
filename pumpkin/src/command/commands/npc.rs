@@ -19,6 +19,8 @@ use crate::command::argument_types::entity::EntityArgumentType;
 use crate::command::context::command_context::CommandContext;
 use crate::command::node::dispatcher::CommandDispatcher;
 use crate::command::node::{CommandExecutor, CommandExecutorResult};
+use crate::command::suggestion::provider::{SuggestionProvider, SuggestionProviderResult};
+use crate::command::suggestion::suggestions::SuggestionsBuilder;
 use crate::data::npc::NpcEntry;
 use crate::entity::EntityBase;
 
@@ -255,6 +257,29 @@ impl CommandExecutor for NpcClearActionExecutor {
     }
 }
 
+/// Suggests names of existing NPCs — used by every subcommand that acts on
+/// an already-created NPC (everything except `create`, which names a new one).
+struct NpcNameSuggestionProvider;
+
+impl SuggestionProvider for NpcNameSuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move {
+            let names = context
+                .server()
+                .npc_manager
+                .list()
+                .await
+                .into_iter()
+                .map(|npc| npc.name);
+            builder.filter_and_suggest_iter(names).build()
+        })
+    }
+}
+
 pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionRegistry) {
     registry.register_permission_or_panic(Permission::new(
         PERMISSION,
@@ -280,31 +305,48 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                         ),
                 ),
             )
-            .then(literal("remove").then(
-                argument(ARG_NAME, StringArgumentType::SingleWord).executes(NpcRemoveExecutor),
-            ))
+            .then(
+                literal("remove").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .executes(NpcRemoveExecutor),
+                ),
+            )
             .then(literal("list").executes(NpcListExecutor))
             .then(
                 literal("move").then(
-                    argument(ARG_NAME, StringArgumentType::SingleWord).executes(NpcMoveExecutor),
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .executes(NpcMoveExecutor),
                 ),
             )
             .then(
-                literal("skin").then(argument(ARG_NAME, StringArgumentType::SingleWord).then(
-                    argument(ARG_SKIN_PLAYER, EntityArgumentType::Player).executes(NpcSkinExecutor),
-                )),
+                literal("skin").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .then(
+                            argument(ARG_SKIN_PLAYER, EntityArgumentType::Player)
+                                .executes(NpcSkinExecutor),
+                        ),
+                ),
             )
             .then(
                 literal("setaction").then(
-                    argument(ARG_NAME, StringArgumentType::SingleWord).then(
-                        argument(ARG_COMMAND, StringArgumentType::GreedyPhrase)
-                            .executes(NpcSetActionExecutor),
-                    ),
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .then(
+                            argument(ARG_COMMAND, StringArgumentType::GreedyPhrase)
+                                .executes(NpcSetActionExecutor),
+                        ),
                 ),
             )
-            .then(literal("clearaction").then(
-                argument(ARG_NAME, StringArgumentType::SingleWord).executes(NpcClearActionExecutor),
-            )),
+            .then(
+                literal("clearaction").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .executes(NpcClearActionExecutor),
+                ),
+            ),
     );
 }
 // EMBER end

@@ -67,6 +67,12 @@ mod key_store;
 // EMBER start - packet-only NPC manager
 pub mod npc;
 // EMBER end
+// EMBER start - per-player home worlds
+pub mod home;
+// EMBER end
+// EMBER start - /tpa teleport request system
+pub mod tpa;
+// EMBER end
 pub mod recipe;
 pub mod scheduler;
 pub mod seasonal_events;
@@ -79,6 +85,12 @@ pub use economy::EconomyManager;
 // EMBER end
 // EMBER start - packet-only NPC manager
 pub use npc::NpcManager;
+// EMBER end
+// EMBER start - per-player home worlds
+pub use home::HomeManager;
+// EMBER end
+// EMBER start - /tpa teleport request system
+pub use tpa::TpaManager;
 // EMBER end
 // EMBER start - offline-mode login verification
 pub use auth::LoginManager;
@@ -156,6 +168,15 @@ pub struct Server {
     /// or `online_mode = true`) unless `[auth] enabled = true` in
     /// `auth/auth.toml` and the server is offline-mode.
     pub login_manager: Arc<auth::LoginManager>,
+    // EMBER end
+    // EMBER start - per-player home worlds
+    /// Per-player home worlds (`home/home.toml`): each player's `home_<uuid>`
+    /// world is cloned from a template on first visit. See `home::HomeManager`.
+    pub home_manager: Arc<home::HomeManager>,
+    // EMBER end
+    // EMBER start - /tpa teleport request system
+    /// Pending `/tpa`/`/tpahere` requests awaiting `/tpaaccept`/`/tpadeny`.
+    pub tpa_manager: Arc<tpa::TpaManager>,
     // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
@@ -330,6 +351,12 @@ impl Server {
         // EMBER start - offline-mode login verification
         let login_manager = Arc::new(auth::LoginManager::new());
         // EMBER end
+        // EMBER start - per-player home worlds
+        let home_manager = Arc::new(home::HomeManager::new());
+        // EMBER end
+        // EMBER start - /tpa teleport request system
+        let tpa_manager = Arc::new(tpa::TpaManager::new());
+        // EMBER end
 
         let server = Self {
             basic_config,
@@ -379,6 +406,8 @@ impl Server {
             economy_manager,                // EMBER
             npc_manager,                    // EMBER
             login_manager,                  // EMBER
+            home_manager,                   // EMBER
+            tpa_manager,                    // EMBER
         };
         let server = Arc::new(server);
 

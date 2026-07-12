@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use pumpkin_config::chunk::ChunkConfig;
+use pumpkin_config::ember_world::SMALL_MAP_MAX_BORDER;
 use pumpkin_data::dimension::Dimension;
 use pumpkin_util::PermissionLvl;
 use pumpkin_util::math::vector3::Vector3;
@@ -30,6 +31,8 @@ use crate::command::argument_types::core::string::StringArgumentType;
 use crate::command::context::command_context::CommandContext;
 use crate::command::node::dispatcher::CommandDispatcher;
 use crate::command::node::{CommandExecutor, CommandExecutorResult};
+use crate::command::suggestion::provider::{SuggestionProvider, SuggestionProviderResult};
+use crate::command::suggestion::suggestions::SuggestionsBuilder;
 use crate::server::Server;
 use crate::world::World;
 
@@ -497,6 +500,122 @@ impl CommandExecutor for WorldTpExecutor {
     }
 }
 
+// EMBER start - tab-completion for world names, formats and border sizes
+/// Names of currently loaded worlds — the completion set for subcommands
+/// that require a world already in memory (`unload`, `tp`, `prewarm`).
+fn loaded_world_names(server: &Server) -> Vec<String> {
+    server
+        .worlds
+        .load()
+        .iter()
+        .map(|w| w.get_world_name().to_string())
+        .collect()
+}
+
+/// Names of on-disk worlds that are NOT currently loaded — the completion
+/// set for subcommands that require the world to be absent from memory
+/// (`load`, `delete`, `convert`).
+fn unloaded_world_names(server: &Server) -> Vec<String> {
+    let loaded = loaded_world_names(server);
+    server
+        .list_world_folders()
+        .into_iter()
+        .filter(|name| !loaded.contains(name))
+        .collect()
+}
+
+/// Every world name the server knows about, loaded or not. Used for
+/// `clone`'s `<source>`: a `readonly` clone can read an unloaded world
+/// straight off disk, so both categories are valid completions there.
+fn any_world_names(server: &Server) -> Vec<String> {
+    let mut names = loaded_world_names(server);
+    for name in server.list_world_folders() {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+struct LoadedWorldSuggestionProvider;
+
+impl SuggestionProvider for LoadedWorldSuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move {
+            builder
+                .filter_and_suggest_iter(loaded_world_names(context.server()))
+                .build()
+        })
+    }
+}
+
+struct UnloadedWorldSuggestionProvider;
+
+impl SuggestionProvider for UnloadedWorldSuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move {
+            builder
+                .filter_and_suggest_iter(unloaded_world_names(context.server()))
+                .build()
+        })
+    }
+}
+
+struct AnyWorldSuggestionProvider;
+
+impl SuggestionProvider for AnyWorldSuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move {
+            builder
+                .filter_and_suggest_iter(any_world_names(context.server()))
+                .build()
+        })
+    }
+}
+
+struct WorldFormatSuggestionProvider;
+
+impl SuggestionProvider for WorldFormatSuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        _context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move {
+            builder
+                .filter_and_suggest_iter(["anvil", "linear", "pump", "easy"])
+                .build()
+        })
+    }
+}
+
+/// Suggests only the small-map residency ceiling as a sensible default
+/// border; operators are free to type any other value instead.
+struct BorderSuggestionProvider;
+
+impl SuggestionProvider for BorderSuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        _context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move { builder.suggest(SMALL_MAP_MAX_BORDER).build() })
+    }
+}
+// EMBER end
+
 pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionRegistry) {
     registry.register_permission_or_panic(Permission::new(
         PERMISSION,
@@ -508,50 +627,78 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
         command("world", DESCRIPTION)
             .requires(PERMISSION)
             .then(literal("list").executes(WorldListExecutor))
-            .then(literal("load").then(
-                argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldLoadExecutor),
-            ))
-            .then(literal("unload").then(
-                argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldUnloadExecutor),
-            ))
             .then(
-                literal("tp").then(
-                    argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldTpExecutor),
+                literal("load").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(UnloadedWorldSuggestionProvider)
+                        .executes(WorldLoadExecutor),
                 ),
             )
-            .then(literal("prewarm").then(
-                argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldPrewarmExecutor),
-            ))
-            .then(literal("delete").then(
-                argument(ARG_NAME, StringArgumentType::SingleWord).executes(WorldDeleteExecutor),
-            ))
+            .then(
+                literal("unload").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(LoadedWorldSuggestionProvider)
+                        .executes(WorldUnloadExecutor),
+                ),
+            )
+            .then(
+                literal("tp").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(LoadedWorldSuggestionProvider)
+                        .executes(WorldTpExecutor),
+                ),
+            )
+            .then(
+                literal("prewarm").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(LoadedWorldSuggestionProvider)
+                        .executes(WorldPrewarmExecutor),
+                ),
+            )
+            .then(
+                literal("delete").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(UnloadedWorldSuggestionProvider)
+                        .executes(WorldDeleteExecutor),
+                ),
+            )
             .then(
                 literal("convert").then(
-                    argument(ARG_NAME, StringArgumentType::SingleWord).then(
-                        argument(ARG_FORMAT, StringArgumentType::SingleWord)
-                            // `/world convert <name> <format>` — convert everything stored.
-                            .executes(WorldConvertExecutor { cropped: false })
-                            // `/world convert <name> <format> <border>` — also crop to a
-                            // border-side-length square centered on the origin.
-                            .then(
-                                argument(ARG_BORDER, IntegerArgumentType::with_min(1))
-                                    .executes(WorldConvertExecutor { cropped: true }),
-                            ),
-                    ),
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(UnloadedWorldSuggestionProvider)
+                        .then(
+                            argument(ARG_FORMAT, StringArgumentType::SingleWord)
+                                .suggests(WorldFormatSuggestionProvider)
+                                // `/world convert <name> <format>` — convert everything stored.
+                                .executes(WorldConvertExecutor { cropped: false })
+                                // `/world convert <name> <format> <border>` — also crop to a
+                                // border-side-length square centered on the origin.
+                                .then(
+                                    argument(ARG_BORDER, IntegerArgumentType::with_min(1))
+                                        .suggests(BorderSuggestionProvider)
+                                        .executes(WorldConvertExecutor { cropped: true }),
+                                ),
+                        ),
                 ),
             )
             .then(
                 literal("clone").then(
-                    argument(ARG_SRC, StringArgumentType::SingleWord).then(
-                        argument(ARG_DST, StringArgumentType::SingleWord)
-                            // `/world clone <src> <dst>` — persistent save clone.
-                            .executes(WorldCloneExecutor { readonly: false })
-                            // `/world clone <src> <dst> readonly` — read-only.
-                            .then(
-                                literal("readonly").executes(WorldCloneExecutor { readonly: true }),
-                            )
-                            .then(literal("save").executes(WorldCloneExecutor { readonly: false })),
-                    ),
+                    argument(ARG_SRC, StringArgumentType::SingleWord)
+                        .suggests(AnyWorldSuggestionProvider)
+                        .then(
+                            argument(ARG_DST, StringArgumentType::SingleWord)
+                                // `/world clone <src> <dst>` — persistent save clone.
+                                .executes(WorldCloneExecutor { readonly: false })
+                                // `/world clone <src> <dst> readonly` — read-only.
+                                .then(
+                                    literal("readonly")
+                                        .executes(WorldCloneExecutor { readonly: true }),
+                                )
+                                .then(
+                                    literal("save")
+                                        .executes(WorldCloneExecutor { readonly: false }),
+                                ),
+                        ),
                 ),
             ),
     );

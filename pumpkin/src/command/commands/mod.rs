@@ -69,6 +69,11 @@ mod npc;
 // EMBER start - offline-mode login verification
 mod auth;
 // EMBER end
+// EMBER start - player-facing navigation commands
+mod home;
+mod spawn;
+mod tpa;
+// EMBER end
 mod worldborder;
 
 #[must_use]
@@ -180,6 +185,11 @@ pub async fn default_dispatcher(
     // EMBER end
     // EMBER start - offline-mode login verification
     auth::register(&mut dispatcher, registry);
+    // EMBER end
+    // EMBER start - player-facing navigation commands
+    spawn::register(&mut dispatcher, registry);
+    home::register(&mut dispatcher, registry);
+    tpa::register(&mut dispatcher, registry);
     // EMBER end
     dispatcher
 }
