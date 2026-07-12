@@ -189,6 +189,9 @@ via their type-specific data.
 /npc hide <name> <player>                      # hide from a specific player regardless of distance
 /npc show <name> <player>                      # undo /npc hide
 /npc distance <name> [blocks]                  # override view distance (omit to reset)
+/npc escort <name> <player>                    # follow <player> indefinitely
+/npc escort <name> <player> here               # lead <player> to your position; ends on arrival
+/npc escort <name> stop                        # stop escorting
 ```
 
 Skins are always copied from a currently-online player (never resolved against Mojang).
@@ -413,6 +416,9 @@ url = "mysql://user:pass@localhost:3306/ember"
 /npc hide <名字> <玩家>                          # 对指定玩家隐藏,不管距离
 /npc show <名字> <玩家>                          # 撤销 /npc hide
 /npc distance <名字> [格数]                      # 覆盖可见距离(不填则恢复默认)
+/npc escort <名字> <玩家>                        # 无限期跟随该玩家
+/npc escort <名字> <玩家> here                   # 带该玩家到你的位置,到达后自动结束
+/npc escort <名字> stop                          # 停止护送
 ```
 
 皮肤始终从当前在线玩家复制（不联网解析 Mojang 用户名）。

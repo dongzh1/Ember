@@ -62,6 +62,18 @@ const WANDER_PAUSE_MIN_TICKS: i32 = 40;
 const WANDER_PAUSE_MAX_TICKS: i32 = 120;
 // EMBER end
 
+// EMBER start - NPC escort (guide)
+/// Follow mode: how close behind the escorted player to stay.
+const ESCORT_FOLLOW_DISTANCE: f64 = 3.0;
+/// Lead mode: pause and wait once the player falls this far behind.
+const ESCORT_WAIT_DISTANCE: f64 = 6.0;
+/// Either mode: teleport-catch-up once the player is this far away (a
+/// different world's worth of distance away, or through a portal) rather
+/// than walking the whole way — this system has no collision or pathfinding,
+/// so a long walk back could clip through terrain anyway.
+const ESCORT_CATCHUP_TELEPORT_DISTANCE: f64 = 24.0;
+// EMBER end
+
 /// All bits set: cape/jacket/sleeves/pants-legs/hat all rendered. A real
 /// player's byte here mirrors their client-side settings; a fake NPC has no
 /// such source, so it hardcodes "show everything".
@@ -163,6 +175,13 @@ struct RuntimeNpc {
     /// `Some`, independent of whether a `goal` is currently in progress.
     wander: Option<WanderState>,
     // EMBER end
+    // EMBER start - NPC escort (guide)
+    /// Active escort, if any. Runtime-only, like `goal`: tied to a currently
+    /// online player, so there's nothing sensible to resume across a
+    /// restart. Takes priority over `goal`/`wander` while present; wander
+    /// resumes on its own once escort ends (its config was never touched).
+    escort: Option<EscortState>,
+    // EMBER end
 }
 
 // EMBER start - NPC movement (moveto/wander)
@@ -178,6 +197,17 @@ struct WanderState {
     radius: f64,
     /// Don't pick a new target until `Server::tick_count` reaches this.
     pause_until_tick: i32,
+}
+// EMBER end
+
+// EMBER start - NPC escort (guide)
+struct EscortState {
+    target: Uuid,
+    /// `None` = follow mode (indefinite). `Some` = lead mode: walk to this
+    /// point, pausing if the player falls behind, ending on arrival.
+    destination: Option<Vector3<f64>>,
+    /// Lead mode only: true while paused, waiting for the player to catch up.
+    waiting: bool,
 }
 // EMBER end
 
@@ -224,6 +254,7 @@ impl NpcManager {
                 radius,
                 pause_until_tick: 0,
             }),
+            escort: None,
         }
     }
 
@@ -495,6 +526,54 @@ impl NpcManager {
     }
     // EMBER end
 
+    // EMBER start - NPC escort (guide)
+    /// Starts escorting `target`: follows indefinitely if `destination` is
+    /// `None`, otherwise leads them there (pausing if they fall behind,
+    /// ending automatically on arrival). Overrides any `moveto`/wander leg
+    /// in progress — wander itself (if configured) resumes once escort ends.
+    pub async fn escort(
+        &self,
+        name: &str,
+        target: Uuid,
+        destination: Option<Vector3<f64>>,
+    ) -> Result<(), String> {
+        let config = self.config.read().await;
+        let Some(entry) = config.find(name) else {
+            return Err(format!("No NPC named '{name}' exists."));
+        };
+        let canonical_name = entry.name.clone();
+        drop(config);
+
+        let mut runtime = self.runtime.write().await;
+        if let Some(npc) = runtime.get_mut(&canonical_name) {
+            npc.goal = None;
+            npc.escort = Some(EscortState {
+                target,
+                destination,
+                waiting: false,
+            });
+        }
+        Ok(())
+    }
+
+    /// Stops escorting. A no-op (not an error) if the NPC wasn't escorting
+    /// anyone.
+    pub async fn stop_escort(&self, name: &str) -> Result<(), String> {
+        let config = self.config.read().await;
+        let Some(entry) = config.find(name) else {
+            return Err(format!("No NPC named '{name}' exists."));
+        };
+        let canonical_name = entry.name.clone();
+        drop(config);
+
+        let mut runtime = self.runtime.write().await;
+        if let Some(npc) = runtime.get_mut(&canonical_name) {
+            npc.escort = None;
+        }
+        Ok(())
+    }
+    // EMBER end
+
     // EMBER start - per-player visibility control
     /// Hides an NPC from a specific player, regardless of distance,
     /// persisted across restarts.
@@ -718,8 +797,12 @@ impl NpcManager {
                     Self::update_look_at(npc, &players);
                 }
 
-                if do_movement && (npc.goal.is_some() || npc.wander.is_some()) {
-                    Self::move_npc(npc, tick_count, &players);
+                if do_movement {
+                    if npc.escort.is_some() {
+                        Self::update_escort(npc, &players);
+                    } else if npc.goal.is_some() || npc.wander.is_some() {
+                        Self::move_npc(npc, tick_count, &players);
+                    }
                 }
             }
         }
@@ -727,9 +810,8 @@ impl NpcManager {
 
     // EMBER start - NPC movement (moveto/wander)
     /// Advances one movement step: starts a new wander leg if idle and past
-    /// its pause, then walks `MOVE_STEP_BLOCKS` toward the active goal
-    /// (snapping to it once within one step), broadcasting the new position
-    /// to current viewers via `CEntityPositionSync`.
+    /// its pause, then steps toward the active goal, re-arming the wander
+    /// pause once a wander leg lands.
     fn move_npc(npc: &mut RuntimeNpc, tick_count: i32, players: &[Arc<Player>]) {
         if npc.goal.is_none()
             && let Some(wander) = &npc.wander
@@ -754,17 +836,28 @@ impl NpcManager {
         let target = goal.target;
         let is_wander_leg = goal.is_wander_leg;
 
-        let old_position = npc.position;
-        let delta = target.sub(&old_position);
-        let distance = delta.length();
-
-        if distance <= MOVE_STEP_BLOCKS {
-            npc.position = target;
+        if Self::step_towards(npc, target, players) {
             npc.goal = None;
             if is_wander_leg && let Some(wander) = &mut npc.wander {
                 wander.pause_until_tick =
                     tick_count + rand::random_range(WANDER_PAUSE_MIN_TICKS..WANDER_PAUSE_MAX_TICKS);
             }
+        }
+    }
+
+    /// Moves `npc.position` `MOVE_STEP_BLOCKS` toward `target` (snapping to
+    /// it once within one step), updating yaw/`chunk_pos` and broadcasting
+    /// the new position to current viewers via `CEntityPositionSync`. Shared
+    /// by `move_npc` (moveto/wander) and `update_escort`. Returns `true` once
+    /// the step lands exactly on `target`.
+    fn step_towards(npc: &mut RuntimeNpc, target: Vector3<f64>, players: &[Arc<Player>]) -> bool {
+        let old_position = npc.position;
+        let delta = target.sub(&old_position);
+        let distance = delta.length();
+        let arrived = distance <= MOVE_STEP_BLOCKS;
+
+        if arrived {
+            npc.position = target;
         } else {
             let (yaw, _pitch) = yaw_pitch_towards(old_position, target);
             npc.yaw = yaw;
@@ -796,6 +889,87 @@ impl NpcManager {
                 ));
                 client.try_enqueue_packet(&CHeadRot::new(VarInt(npc.entity_id), head_yaw));
             }
+        }
+        arrived
+    }
+    // EMBER end
+
+    // EMBER start - NPC escort (guide)
+    /// Advances one escort step: follows or leads `escort.target`,
+    /// teleport-catching-up if they've fallen far behind, pausing in lead
+    /// mode if they've fallen moderately behind, and clearing escort
+    /// entirely once the target is no longer in this world (offline, or
+    /// somewhere else) or (lead mode) the destination is reached.
+    fn update_escort(npc: &mut RuntimeNpc, players: &[Arc<Player>]) {
+        let Some(escort) = &npc.escort else {
+            return;
+        };
+        let target_uuid = escort.target;
+        let destination = escort.destination;
+
+        let Some(target_player) = players.iter().find(|p| p.gameprofile.id == target_uuid) else {
+            npc.escort = None;
+            return;
+        };
+        let player_pos = target_player.get_entity().pos.load();
+        let dist_to_player = player_pos.sub(&npc.position).length();
+
+        if dist_to_player > ESCORT_CATCHUP_TELEPORT_DISTANCE {
+            npc.position = player_pos;
+            npc.chunk_pos = to_chunk_pos(&Vector2::new(
+                npc.position.x.floor() as i32,
+                npc.position.z.floor() as i32,
+            ));
+            let head_yaw = angle_to_byte(npc.yaw);
+            for player in players {
+                if npc.visible_to.contains(&player.gameprofile.id)
+                    && let ClientPlatform::Java(client) = player.client.as_ref()
+                {
+                    client.try_enqueue_packet(&CEntityPositionSync::new(
+                        VarInt(npc.entity_id),
+                        npc.position,
+                        Vector3::new(0.0, 0.0, 0.0),
+                        npc.yaw,
+                        0.0,
+                        true,
+                    ));
+                    client.try_enqueue_packet(&CHeadRot::new(VarInt(npc.entity_id), head_yaw));
+                }
+            }
+            return;
+        }
+
+        let move_target = if let Some(dest) = destination {
+            if dist_to_player > ESCORT_WAIT_DISTANCE {
+                if let Some(state) = &mut npc.escort {
+                    state.waiting = true;
+                }
+                return;
+            }
+            if let Some(state) = &mut npc.escort {
+                state.waiting = false;
+            }
+            dest
+        } else {
+            if dist_to_player <= ESCORT_FOLLOW_DISTANCE {
+                return;
+            }
+            let away = npc.position.sub(&player_pos);
+            let away_len = away.length();
+            let (ux, uz) = if away_len > 0.0001 {
+                (away.x / away_len, away.z / away_len)
+            } else {
+                (0.0, 1.0)
+            };
+            Vector3::new(
+                player_pos.x + ux * ESCORT_FOLLOW_DISTANCE,
+                player_pos.y,
+                player_pos.z + uz * ESCORT_FOLLOW_DISTANCE,
+            )
+        };
+
+        if Self::step_towards(npc, move_target, players) && destination.is_some() {
+            npc.escort = None;
         }
     }
     // EMBER end

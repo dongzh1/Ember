@@ -21,6 +21,9 @@
 //   /npc hide <name> <player>       - hide from a specific player regardless of distance
 //   /npc show <name> <player>       - undo /npc hide
 //   /npc distance <name> [blocks]   - override view distance (omit to reset to default)
+//   /npc escort <name> <player>     - follow <player> indefinitely
+//   /npc escort <name> <player> here - lead <player> to your position; ends on arrival
+//   /npc escort <name> stop         - stop escorting
 
 use pumpkin_data::Block;
 use pumpkin_data::entity::EntityType;
@@ -54,6 +57,7 @@ const ARG_EXTRA: &str = "extra";
 const ARG_RADIUS: &str = "radius";
 const ARG_TARGET: &str = "target";
 const ARG_DISTANCE: &str = "distance";
+const ARG_ESCORT_PLAYER: &str = "player";
 
 async fn feedback(context: &CommandContext<'_>, msg: TextComponent) {
     context.source.send_feedback(msg, false).await;
@@ -482,6 +486,66 @@ impl CommandExecutor for NpcDistanceExecutor {
 }
 // EMBER end
 
+// EMBER start - NPC escort (guide)
+struct NpcEscortExecutor {
+    lead_to_sender: bool,
+}
+impl CommandExecutor for NpcEscortExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let target = EntityArgumentType::get_player(context, ARG_ESCORT_PLAYER).await?;
+            let destination = if self.lead_to_sender {
+                let sender = context.source.player_or_err()?;
+                Some(sender.get_entity().pos.load())
+            } else {
+                None
+            };
+
+            let result = context
+                .server()
+                .npc_manager
+                .escort(&name, target.gameprofile.id, destination)
+                .await;
+            match result {
+                Ok(()) => {
+                    let message = if self.lead_to_sender {
+                        format!("NPC '{name}' is leading {} here.", target.gameprofile.name)
+                    } else {
+                        format!("NPC '{name}' is now following {}.", target.gameprofile.name)
+                    };
+                    feedback(context, ok_text(message)).await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(e)).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+
+struct NpcEscortStopExecutor;
+impl CommandExecutor for NpcEscortStopExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            match context.server().npc_manager.stop_escort(&name).await {
+                Ok(()) => {
+                    feedback(context, ok_text(format!("NPC '{name}' stopped escorting."))).await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(e)).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+// EMBER end
+
 struct NpcSkinExecutor;
 impl CommandExecutor for NpcSkinExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
@@ -831,6 +895,22 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                         .then(
                             argument(ARG_DISTANCE, IntegerArgumentType::with_min(1))
                                 .executes(NpcDistanceExecutor { has_distance: true }),
+                        ),
+                ),
+            )
+            .then(
+                literal("escort").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .then(literal("stop").executes(NpcEscortStopExecutor))
+                        .then(
+                            argument(ARG_ESCORT_PLAYER, EntityArgumentType::Player)
+                                .executes(NpcEscortExecutor {
+                                    lead_to_sender: false,
+                                })
+                                .then(literal("here").executes(NpcEscortExecutor {
+                                    lead_to_sender: true,
+                                })),
                         ),
                 ),
             ),
