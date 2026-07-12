@@ -35,6 +35,7 @@ use pumpkin_protocol::java::client::login::CEncryptionRequest;
 use pumpkin_protocol::java::client::play::{CChangeDifficulty, CTabList};
 use pumpkin_protocol::{ClientPacket, java::client::config::CPluginMessage};
 use pumpkin_util::Difficulty;
+use pumpkin_util::GameMode;
 use pumpkin_util::text::TextComponent;
 use pumpkin_world::world_info::anvil::{
     AnvilLevelInfo, LEVEL_DAT_BACKUP_FILE_NAME, LEVEL_DAT_FILE_NAME,
@@ -59,6 +60,9 @@ mod connection_cache;
 // EMBER start - built-in economy system
 pub mod economy;
 // EMBER end
+// EMBER start - offline-mode login verification
+pub mod auth;
+// EMBER end
 mod key_store;
 // EMBER start - packet-only NPC manager
 pub mod npc;
@@ -75,6 +79,9 @@ pub use economy::EconomyManager;
 // EMBER end
 // EMBER start - packet-only NPC manager
 pub use npc::NpcManager;
+// EMBER end
+// EMBER start - offline-mode login verification
+pub use auth::LoginManager;
 // EMBER end
 
 use crate::command::args::entities::{
@@ -143,6 +150,12 @@ pub struct Server {
     /// Packet-only NPCs (`npc/npcs.json`): never real world entities, spawned
     /// per-viewer purely via packets. See `npc::NpcManager` doc comment.
     pub npc_manager: Arc<npc::NpcManager>,
+    // EMBER end
+    // EMBER start - offline-mode login verification
+    /// Login wall for `online_mode = false` servers. Off (feature disabled
+    /// or `online_mode = true`) unless `[auth] enabled = true` in
+    /// `auth/auth.toml` and the server is offline-mode.
+    pub login_manager: Arc<auth::LoginManager>,
     // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
@@ -314,6 +327,9 @@ impl Server {
         // EMBER start - packet-only NPC manager
         let npc_manager = Arc::new(npc::NpcManager::new());
         // EMBER end
+        // EMBER start - offline-mode login verification
+        let login_manager = Arc::new(auth::LoginManager::new());
+        // EMBER end
 
         let server = Self {
             basic_config,
@@ -362,6 +378,7 @@ impl Server {
             gen_budget: gen_budget.clone(), // EMBER
             economy_manager,                // EMBER
             npc_manager,                    // EMBER
+            login_manager,                  // EMBER
         };
         let server = Arc::new(server);
 
@@ -1035,6 +1052,8 @@ impl Server {
     /// # Note
     ///
     /// You still have to spawn the `Player` in a `World` to let them join and make them visible.
+    // EMBER: pushed over the line limit by the login-wall redirect below.
+    #[expect(clippy::too_many_lines)]
     pub async fn add_player(
         &self,
         client: Arc<ClientPlatform>,
@@ -1079,6 +1098,47 @@ impl Server {
                     .clone();
                 (default_world, None)
             };
+
+        // EMBER start - offline-mode login verification: redirect to limbo
+        let (world, gamemode) = if matches!(client.as_ref(), ClientPlatform::Java(_))
+            && self.login_manager.enabled()
+            && !self.basic_config.online_mode
+        {
+            let ip = client.address().await.ip().to_string();
+            let needs_auth = self
+                .login_manager
+                .needs_auth(profile.id, &ip)
+                .await
+                .unwrap_or(true);
+            let limbo_world = if needs_auth {
+                self.worlds
+                    .load()
+                    .iter()
+                    .find(|w| w.get_world_name() == auth::LIMBO_WORLD_NAME)
+                    .cloned()
+            } else {
+                None
+            };
+
+            if let Some(limbo) = limbo_world {
+                let _ = self
+                    .login_manager
+                    .begin(profile.id, &profile.name, gamemode, world.clone())
+                    .await;
+                (limbo, GameMode::Spectator)
+            } else {
+                if needs_auth {
+                    error!(
+                        "Login wall is enabled but the limbo world is missing - letting {} join without verification",
+                        profile.name
+                    );
+                }
+                (world, gamemode)
+            }
+        } else {
+            (world, gamemode)
+        };
+        // EMBER end
 
         let mut player = Player::new(
             client,
@@ -1145,6 +1205,8 @@ impl Server {
             .await;
         // TODO: Config if we want decrease online
         self.listing.lock().await.remove_player(player);
+        // EMBER: drop a stale pending login session if they left mid-auth
+        self.login_manager.abandon(player.gameprofile.id).await;
     }
 
     pub async fn shutdown(&self) {

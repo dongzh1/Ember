@@ -888,6 +888,29 @@ impl JavaClient {
             return Ok(());
         }
 
+        // EMBER start - offline-mode login verification: gate everything
+        // except chat (their password), the dialog button, keep-alive and
+        // teleport-confirm while a player is still pending. Everything else
+        // (movement, block break/place, commands, interact...) is silently
+        // dropped rather than reaching its normal handler - this is what
+        // actually "freezes" them, not a movement-cancel event per packet.
+        if server.login_manager.is_pending(player.gameprofile.id).await {
+            let allowed = packet.id == SChatMessage::to_id(version)
+                || packet.id == SConfirmTeleport::to_id(version)
+                || packet.id == pumpkin_protocol::java::server::play::SKeepAlive::to_id(version)
+                || packet.id
+                    == pumpkin_protocol::java::server::play::SCustomClickAction::to_id(version);
+            if !allowed {
+                return Ok(());
+            }
+            if packet.id == SChatMessage::to_id(version) {
+                let chat = SChatMessage::read(payload, &version)?;
+                self.handle_auth_chat(server, player, &chat.message).await;
+                return Ok(());
+            }
+        }
+        // EMBER end
+
         match packet.id {
             id if id == SConfirmTeleport::to_id(version) => {
                 self.handle_confirm_teleport(player, SConfirmTeleport::read(payload, &version)?)
@@ -1149,6 +1172,12 @@ impl JavaClient {
                 let packet = pumpkin_protocol::java::server::play::SCustomClickAction::read(
                     payload, &version,
                 )?;
+                // EMBER: the login-prompt dialog's own button - handled
+                // natively, never reaches the plugin event bus.
+                if packet.action_id.as_str() == crate::server::auth::DIALOG_ACTION_ID {
+                    player.clear_dialog().await;
+                    return Ok(());
+                }
                 let event = crate::plugin::api::events::player::custom_click_action::CustomClickActionEvent::new(
                     player.clone(),
                     packet.action_id.clone(),
@@ -1170,4 +1199,67 @@ impl JavaClient {
         }
         Ok(())
     }
+
+    // EMBER start - offline-mode login verification
+    /// Treats one chat message from a pending player as their password (or
+    /// confirmation), instead of the normal `handle_chat_message` path -
+    /// see the gateway in `handle_play_packet` that routes here.
+    async fn handle_auth_chat(&self, server: &Arc<Server>, player: &Arc<Player>, message: &str) {
+        let uuid = player.gameprofile.id;
+        let ip = self.address.lock().await.ip().to_string();
+        match server.login_manager.handle_chat(uuid, &ip, message).await {
+            Ok(crate::server::auth::ChatAuthOutcome::PasswordTooShort { min_length }) => {
+                player
+                    .send_system_message(&TextComponent::text(format!(
+                        "密码太短,至少需要 {min_length} 个字符,请重新输入密码。"
+                    )))
+                    .await;
+            }
+            Ok(crate::server::auth::ChatAuthOutcome::AwaitingConfirmation) => {
+                player
+                    .send_system_message(&TextComponent::text("请再输入一次密码确认。"))
+                    .await;
+            }
+            Ok(crate::server::auth::ChatAuthOutcome::ConfirmationMismatch) => {
+                player
+                    .send_system_message(&TextComponent::text("两次密码不一致,请重新输入密码。"))
+                    .await;
+            }
+            Ok(crate::server::auth::ChatAuthOutcome::WrongPassword { attempts_left }) => {
+                if attempts_left == 0 {
+                    player
+                        .kick(
+                            crate::net::DisconnectReason::Kicked,
+                            TextComponent::text("密码错误次数过多"),
+                        )
+                        .await;
+                } else {
+                    player
+                        .send_system_message(&TextComponent::text(format!(
+                            "密码错误,还可以尝试 {attempts_left} 次。"
+                        )))
+                        .await;
+                }
+            }
+            Ok(crate::server::auth::ChatAuthOutcome::Success {
+                previous_gamemode,
+                real_world,
+            }) => {
+                player.clear_dialog().await;
+                player.set_gamemode(previous_gamemode).await;
+                let pos = player.position();
+                let (yaw, pitch) = player.rotation();
+                player
+                    .teleport_world(real_world, pos, Some(yaw), Some(pitch))
+                    .await;
+                player
+                    .send_system_message(&TextComponent::text("验证成功,欢迎!"))
+                    .await;
+            }
+            Err(e) => {
+                error!("Auth chat handling failed for {uuid}: {e}");
+            }
+        }
+    }
+    // EMBER end
 }

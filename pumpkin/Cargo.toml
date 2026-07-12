@@ -32,6 +32,8 @@ pumpkin-codecs.workspace = true
 
 # EMBER: built-in economy system storage
 sqlx.workspace = true
+# EMBER: offline-mode login verification password hashing
+argon2.workspace = true
 
 dashmap.workspace = true
 crossbeam.workspace = true

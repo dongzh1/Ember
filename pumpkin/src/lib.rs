@@ -220,6 +220,20 @@ impl PumpkinServer {
     ) -> Self {
         let server = Server::new(basic_config, advanced_config, ember_config, vanilla_data).await;
 
+        // EMBER start - offline-mode login verification: ensure the limbo
+        // world exists before any player can join. Only when actually
+        // needed - most servers never touch this feature.
+        if server.login_manager.enabled() && !server.basic_config.online_mode {
+            server
+                .create_world_with(
+                    crate::server::auth::LIMBO_WORLD_NAME.to_string(),
+                    pumpkin_data::dimension::Dimension::OVERWORLD,
+                    Some(crate::server::auth::limbo_level_config()),
+                )
+                .await;
+        }
+        // EMBER end
+
         let rcon = server.advanced_config.networking.rcon.clone();
 
         if rcon.enabled {
@@ -487,6 +501,15 @@ impl PumpkinServer {
                                     world
                                         .spawn_java_player(&server_clone.basic_config, &player, &server_clone)
                                         .await;
+                                    // EMBER start - offline-mode login verification: prompt once spawned
+                                    if server_clone.login_manager.is_pending(player.gameprofile.id).await {
+                                        let registering = server_clone
+                                            .login_manager
+                                            .is_registering(player.gameprofile.id)
+                                            .await;
+                                        crate::server::auth::show_login_prompt(&player, registering).await;
+                                    }
+                                    // EMBER end
                                     if let ClientPlatform::Java(client) = player.client.as_ref() {
                                         client.progress_player_packets(&player, &server_clone).await;
 

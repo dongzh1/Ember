@@ -66,6 +66,9 @@ mod economy;
 // EMBER start - packet-only NPC manager
 mod npc;
 // EMBER end
+// EMBER start - offline-mode login verification
+mod auth;
+// EMBER end
 mod worldborder;
 
 #[must_use]
@@ -174,6 +177,9 @@ pub async fn default_dispatcher(
     // EMBER end
     // EMBER start - packet-only NPC manager
     npc::register(&mut dispatcher, registry);
+    // EMBER end
+    // EMBER start - offline-mode login verification
+    auth::register(&mut dispatcher, registry);
     // EMBER end
     dispatcher
 }

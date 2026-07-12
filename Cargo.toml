@@ -205,3 +205,6 @@ tracing-serde-structured = { version = "0.4", default-features = false }
 # EMBER start - easyworld mysql dependency
 sqlx = { version = "0.8", default-features = false, features = ["mysql", "runtime-tokio", "tls-rustls"] }
 # EMBER end
+# EMBER start - offline-mode login verification (password hashing)
+argon2 = "0.5"
+# EMBER end
