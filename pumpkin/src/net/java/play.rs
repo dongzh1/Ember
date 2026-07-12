@@ -21,6 +21,7 @@ use crate::error::PumpkinError;
 use crate::log_at_level;
 use crate::net::PlayerConfig;
 use crate::net::java::JavaClient;
+use crate::plugin::npc::npc_click::NpcClickEvent;
 use crate::plugin::player::changed_main_hand::PlayerChangedMainHandEvent;
 use crate::plugin::player::fish::{PlayerFishEvent, PlayerFishState};
 use crate::plugin::player::item_held::PlayerItemHeldEvent;
@@ -1748,21 +1749,29 @@ impl JavaClient {
             // Ghost NPCs (`server::npc::NpcManager`) are never real entities,
             // so a left-click ("attack") on one always lands here too, not
             // just the right-click ("interact") path in `handle_interact`.
-            // Run the configured click command and stop before the
-            // unknown-entity anti-cheat kick below.
-            if let Some(click_command) = server.npc_manager.click_command(entity_id.0).await {
-                if let Some(command) = click_command {
-                    let command = command.replace("%player%", &player.gameprofile.name);
-                    let source = crate::command::CommandSender::Console
-                        .into_source(server)
-                        .await;
-                    server
-                        .command_dispatcher
-                        .read()
-                        .await
-                        .handle_command(&source, &command)
-                        .await;
-                }
+            // Fire the plugin-facing click event and run the configured
+            // click command (unless a handler cancelled or rewrote it),
+            // then stop before the unknown-entity anti-cheat kick below.
+            if let Some((npc_name, command)) = server.npc_manager.click_command(entity_id.0).await {
+                send_cancellable! {{
+                    server;
+                    NpcClickEvent::new(Arc::clone(player), npc_name, ActionType::Attack, command);
+
+                    'after: {
+                        if let Some(command) = &event.command {
+                            let command = command.replace("%player%", &player.gameprofile.name);
+                            let source = crate::command::CommandSender::Console
+                                .into_source(server)
+                                .await;
+                            server
+                                .command_dispatcher
+                                .read()
+                                .await
+                                .handle_command(&source, &command)
+                                .await;
+                        }
+                    }
+                }}
                 return;
             }
             // EMBER end
@@ -1892,23 +1901,31 @@ impl JavaClient {
             // EMBER start - packet-only NPC click handling
             //
             // Ghost NPCs (`server::npc::NpcManager`) are never real entities,
-            // so they always land here. Run the configured click command (if
-            // any) and stop before the unknown-entity event/anti-cheat kick
-            // below, which exists for genuinely invalid client packets, not
-            // our own intentionally-fake entity ids.
-            if let Some(click_command) = server.npc_manager.click_command(entity_id.0).await {
-                if let Some(command) = click_command {
-                    let command = command.replace("%player%", &player.gameprofile.name);
-                    let source = crate::command::CommandSender::Console
-                        .into_source(server)
-                        .await;
-                    server
-                        .command_dispatcher
-                        .read()
-                        .await
-                        .handle_command(&source, &command)
-                        .await;
-                }
+            // so they always land here. Fire the plugin-facing click event
+            // and run the configured click command (unless a handler
+            // cancelled or rewrote it), then stop before the unknown-entity
+            // event/anti-cheat kick below, which exists for genuinely
+            // invalid client packets, not our own intentionally-fake entity ids.
+            if let Some((npc_name, command)) = server.npc_manager.click_command(entity_id.0).await {
+                send_cancellable! {{
+                    server;
+                    NpcClickEvent::new(Arc::clone(player), npc_name, action, command);
+
+                    'after: {
+                        if let Some(command) = &event.command {
+                            let command = command.replace("%player%", &player.gameprofile.name);
+                            let source = crate::command::CommandSender::Console
+                                .into_source(server)
+                                .await;
+                            server
+                                .command_dispatcher
+                                .read()
+                                .await
+                                .handle_command(&source, &command)
+                                .await;
+                        }
+                    }
+                }}
                 return;
             }
             // EMBER end

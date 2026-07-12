@@ -651,10 +651,11 @@ impl NpcManager {
     // EMBER end
 
     /// Given an entity id from an interact packet the world doesn't
-    /// recognize, returns the configured click command (if any) when it
-    /// belongs to one of our NPCs. `None` means "not one of ours" — the
-    /// caller should fall through to its normal unknown-entity handling.
-    pub async fn click_command(&self, entity_id: i32) -> Option<Option<String>> {
+    /// recognize, returns the NPC's name and configured click command (if
+    /// any) when it belongs to one of our NPCs. `None` means "not one of
+    /// ours" — the caller should fall through to its normal unknown-entity
+    /// handling.
+    pub async fn click_command(&self, entity_id: i32) -> Option<(String, Option<String>)> {
         let runtime = self.runtime.read().await;
         let name = runtime
             .iter()
@@ -662,7 +663,8 @@ impl NpcManager {
             .map(|(name, _)| name.clone())?;
         drop(runtime);
         let config = self.config.read().await;
-        Some(config.find(&name).and_then(|e| e.click_command.clone()))
+        let command = config.find(&name).and_then(|e| e.click_command.clone());
+        Some((name, command))
     }
 
     /// Clears the runtime state (new fake uuid/entity id/chunk pos) for an

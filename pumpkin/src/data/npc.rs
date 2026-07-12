@@ -114,12 +114,19 @@ impl NpcConfig {
         if path.exists() {
             let file_content = fs::read_to_string(&path)
                 .unwrap_or_else(|_| panic!("Couldn't read npc config at {}", path.display()));
-            serde_json::from_str(&file_content).unwrap_or_else(|err| {
+            let config: Self = serde_json::from_str(&file_content).unwrap_or_else(|err| {
                 panic!(
                     "Couldn't parse npc config at {}. Reason: {err}. This is probably caused by a config update. Just delete the old npc config and restart.",
                     path.display(),
                 )
-            })
+            });
+            // EMBER: always re-save right after loading, so fields serde
+            // defaulted in (a schema addition since this file was last
+            // written) become explicit on disk too, not just in memory —
+            // matching the self-healing behavior `LoadConfiguration` already
+            // gives every TOML config (ember.toml/economy.toml/...).
+            config.save();
+            config
         } else {
             let content = Self::default();
             if let Err(err) = fs::write(
