@@ -117,15 +117,36 @@ pub struct AdvancedConfiguration {
     pub plugins: PluginsConfig,
     /// Advancement configuration
     pub advancement: AdvancementConfig,
-    // EMBER start - server-wide concurrency tuning
+}
+
+// EMBER start - ember.toml: a separate file for anything Ember adds, so
+// pumpkin.toml stays a recognizable, vanilla-Pumpkin-shaped file. Loaded the
+// same way as `PumpkinConfig` (see `main.rs`), just from its own path.
+//
+// Only small, general settings live here as sections. A feature big enough
+// to need its own currencies/URLs/subcommands (economy, and future ones like
+// NPC settings) gets its own `LoadConfiguration` impl and folder instead
+// (e.g. `economy/economy.toml`) - see `EconomyConfig` - rather than growing
+// this struct forever.
+/// Simple, general settings Ember adds on top of upstream Pumpkin.
+///
+/// Kept out of `pumpkin.toml`/`AdvancedConfiguration` on purpose: that file
+/// should stay recognizable against vanilla Pumpkin's own docs/examples.
+#[derive(Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct EmberConfiguration {
     /// Performance/concurrency tuning for shared, process-wide resources.
     pub performance: PerformanceConfig,
-    // EMBER end
-    // EMBER start - built-in economy system
-    /// Built-in multi-currency economy system (`MySQL`-backed, off by default).
-    pub economy: EconomyConfig,
-    // EMBER end
 }
+
+impl LoadConfiguration for EmberConfiguration {
+    fn get_path() -> &'static Path {
+        Path::new("ember.toml")
+    }
+
+    fn validate(&self) {}
+}
+// EMBER end
 
 /// Basic configuration for core server settings.
 ///
@@ -283,11 +304,16 @@ pub trait LoadConfiguration {
     where
         Self: Sized + Default + Serialize + DeserializeOwned,
     {
-        if !config_dir.exists() {
-            debug!("creating new config root folder");
-            fs::create_dir(config_dir).expect("Failed to create config root folder");
-        }
         let path = config_dir.join(Self::get_path());
+        // EMBER: `create_dir_all` (not just `config_dir` itself) so a
+        // `get_path()` naming a subfolder - e.g. `economy/economy.toml` for a
+        // feature with its own config folder - creates that folder too.
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            debug!("creating new config folder: {}", parent.display());
+            fs::create_dir_all(parent).expect("Failed to create config folder");
+        }
 
         let config = if path.exists() {
             let file_content = fs::read_to_string(&path).unwrap_or_else(|_| {

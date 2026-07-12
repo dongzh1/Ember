@@ -1,7 +1,7 @@
 // EMBER start: packet-only NPC manager
 //
 // An NPC here is never a real world entity: no `Entity`, no NBT, no save
-// footprint. Each one is a `data::npc::NpcEntry` (persisted in `data/npcs.json`)
+// footprint. Each one is a `data::npc::NpcEntry` (persisted in `npc/npcs.json`)
 // plus a runtime-only `RuntimeNpc` (fake UUID + reserved entity id + the set
 // of players it is currently spawned for). Visibility is driven purely by
 // packets, re-evaluated on an interval from `Server::tick_worlds` using the
@@ -26,7 +26,6 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::data::npc::{NpcConfig, NpcEntry};
-use crate::data::{LoadJSONConfiguration, SaveJSONConfiguration};
 use crate::entity::player::Player;
 use crate::entity::{Entity, EntityBase};
 use crate::net::ClientPlatform;

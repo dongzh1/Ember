@@ -1,4 +1,8 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
+
+use crate::LoadConfiguration;
 
 // EMBER start - built-in economy system
 /// Configuration for Ember's built-in economy system.
@@ -6,6 +10,10 @@ use serde::{Deserialize, Serialize};
 /// Deliberately server-builtin rather than a plugin (see `EMBER.md`'s
 /// "服务端 vs 插件边界" section for why this is an intentional exception).
 /// Balances are stored in `MySQL` only — there is no file-backed mode.
+///
+/// Lives in its own `economy/economy.toml`, not `ember.toml`: a feature this
+/// size (currencies, `MySQL` url, starting balance) gets its own folder
+/// rather than being one more section in Ember's general settings file.
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct EconomyConfig {
@@ -64,5 +72,13 @@ pub struct CurrencyConfig {
     pub id: String,
     /// Name shown to players in command feedback (e.g. `Coins`).
     pub display_name: String,
+}
+
+impl LoadConfiguration for EconomyConfig {
+    fn get_path() -> &'static Path {
+        Path::new("economy/economy.toml")
+    }
+
+    fn validate(&self) {}
 }
 // EMBER end

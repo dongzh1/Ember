@@ -26,7 +26,7 @@ use pumpkin::{
 };
 use pumpkin::{PumpkinServer, stop_server};
 
-use pumpkin_config::{LoadConfiguration, PumpkinConfig};
+use pumpkin_config::{EmberConfiguration, LoadConfiguration, PumpkinConfig};
 use pumpkin_util::text::{
     TextComponent,
     color::{Color, NamedColor},
@@ -58,6 +58,8 @@ async fn main() {
     let exec_dir = std::env::current_dir().unwrap();
 
     let config = PumpkinConfig::load(&exec_dir);
+    // EMBER: everything Ember itself adds lives in its own ember.toml
+    let ember_config = EmberConfiguration::load(&exec_dir);
 
     let vanilla_data = VanillaData::load();
 
@@ -99,7 +101,8 @@ async fn main() {
             .expect("Unable to setup signal handlers");
     });
 
-    let pumpkin_server = PumpkinServer::new(config.basic, config.advanced, vanilla_data).await;
+    let pumpkin_server =
+        PumpkinServer::new(config.basic, config.advanced, ember_config, vanilla_data).await;
     let plugin_wait_time = pumpkin_server.init_plugins().await;
 
     let time_elapsed = time.elapsed().saturating_sub(plugin_wait_time);

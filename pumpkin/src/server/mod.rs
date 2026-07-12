@@ -20,7 +20,7 @@ use crate::{
 use arc_swap::ArcSwap;
 use connection_cache::{CachedBranding, CachedStatus};
 use key_store::KeyStore;
-use pumpkin_config::{AdvancedConfiguration, BasicConfiguration};
+use pumpkin_config::{AdvancedConfiguration, BasicConfiguration, EmberConfiguration};
 use pumpkin_data::dimension::Dimension;
 use pumpkin_data::entity::EntityType;
 use pumpkin_util::permission::{PermissionManager, PermissionRegistry};
@@ -87,6 +87,8 @@ use crate::server::scheduler::TaskScheduler;
 pub struct Server {
     pub basic_config: BasicConfiguration,
     pub advanced_config: AdvancedConfiguration,
+    // EMBER: everything Ember itself adds, loaded from its own ember.toml
+    pub ember_config: EmberConfiguration,
 
     pub data: VanillaData,
 
@@ -138,7 +140,7 @@ pub struct Server {
     pub economy_manager: Arc<economy::EconomyManager>,
     // EMBER end
     // EMBER start - packet-only NPC manager
-    /// Packet-only NPCs (`data/npcs.json`): never real world entities, spawned
+    /// Packet-only NPCs (`npc/npcs.json`): never real world entities, spawned
     /// per-viewer purely via packets. See `npc::NpcManager` doc comment.
     pub npc_manager: Arc<npc::NpcManager>,
     // EMBER end
@@ -191,6 +193,7 @@ impl Server {
     pub async fn new(
         basic_config: BasicConfiguration,
         advanced_config: AdvancedConfiguration,
+        ember_config: EmberConfiguration,
         vanilla_data: VanillaData,
     ) -> Arc<Self> {
         let permission_registry = Arc::new(RwLock::new(PermissionRegistry::new()));
@@ -302,11 +305,11 @@ impl Server {
         );
         // EMBER start - cross-world admission control for the shared gen_pool
         let gen_budget = Arc::new(pumpkin_world::chunk_system::GenPoolBudget::new(
-            advanced_config.performance.max_concurrent_world_gen_jobs,
+            ember_config.performance.max_concurrent_world_gen_jobs,
         ));
         // EMBER end
         // EMBER start - built-in economy system
-        let economy_manager = Arc::new(economy::EconomyManager::new(&advanced_config.economy));
+        let economy_manager = Arc::new(economy::EconomyManager::new());
         // EMBER end
         // EMBER start - packet-only NPC manager
         let npc_manager = Arc::new(npc::NpcManager::new());
@@ -315,6 +318,7 @@ impl Server {
         let server = Self {
             basic_config,
             advanced_config,
+            ember_config, // EMBER
             data: vanilla_data,
             plugin_manager: Arc::new(PluginManager::new()),
             permission_manager: Arc::new(RwLock::new(PermissionManager::new(

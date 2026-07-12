@@ -1,10 +1,9 @@
 // EMBER start: packet-only NPC storage
-use std::path::Path;
+use std::{fs, path::PathBuf};
 
 use pumpkin_protocol::Property;
 use serde::{Deserialize, Serialize};
-
-use super::{LoadJSONConfiguration, SaveJSONConfiguration};
+use tracing::{debug, warn};
 
 /// A single packet-only NPC definition.
 ///
@@ -31,11 +30,19 @@ pub struct NpcEntry {
     pub click_command: Option<String>,
 }
 
+/// NPC definitions, persisted to `npc/npcs.json`.
+///
+/// Its own folder, not the vanilla-mirroring `data/` folder
+/// (whitelist/ops/bans/usercache): it's an Ember-only feature, not something
+/// upstream Pumpkin also has a file for.
 #[derive(Deserialize, Serialize, Default)]
 #[serde(transparent)]
 pub struct NpcConfig {
     pub npcs: Vec<NpcEntry>,
 }
+
+const NPC_FOLDER: &str = "npc/";
+const NPC_FILE: &str = "npcs.json";
 
 impl NpcConfig {
     #[must_use]
@@ -44,14 +51,58 @@ impl NpcConfig {
             .iter()
             .find(|npc| npc.name.eq_ignore_ascii_case(name))
     }
-}
 
-impl LoadJSONConfiguration for NpcConfig {
-    fn get_path() -> &'static Path {
-        Path::new("npcs.json")
+    fn path() -> PathBuf {
+        let exec_dir = std::env::current_dir().expect("Failed to get current directory");
+        exec_dir.join(NPC_FOLDER).join(NPC_FILE)
     }
-    fn validate(&self) {}
-}
 
-impl SaveJSONConfiguration for NpcConfig {}
+    #[must_use]
+    pub fn load() -> Self {
+        let path = Self::path();
+        if let Some(folder) = path.parent()
+            && !folder.exists()
+        {
+            debug!("creating new npc folder");
+            fs::create_dir_all(folder).expect("Failed to create npc folder");
+        }
+
+        if path.exists() {
+            let file_content = fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("Couldn't read npc config at {}", path.display()));
+            serde_json::from_str(&file_content).unwrap_or_else(|err| {
+                panic!(
+                    "Couldn't parse npc config at {}. Reason: {err}. This is probably caused by a config update. Just delete the old npc config and restart.",
+                    path.display(),
+                )
+            })
+        } else {
+            let content = Self::default();
+            if let Err(err) = fs::write(
+                &path,
+                serde_json::to_string_pretty(&content).expect("Failed to serialize npc config"),
+            ) {
+                warn!(
+                    "Couldn't write default npc config to {}: {err}",
+                    path.display()
+                );
+            }
+            content
+        }
+    }
+
+    pub fn save(&self) {
+        let path = Self::path();
+        let content = match serde_json::to_string_pretty(self) {
+            Ok(content) => content,
+            Err(err) => {
+                warn!("Couldn't serialize npc config to {}: {err}", path.display());
+                return;
+            }
+        };
+        if let Err(err) = fs::write(&path, content) {
+            warn!("Couldn't write npc config to {}: {err}", path.display());
+        }
+    }
+}
 // EMBER end

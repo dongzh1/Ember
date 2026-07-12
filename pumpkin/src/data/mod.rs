@@ -12,7 +12,8 @@ pub mod advancement_data;
 pub mod banlist_serializer;
 pub mod banned_ip;
 pub mod banned_player;
-// EMBER: packet-only NPC storage (data/npcs.json)
+// EMBER: packet-only NPC storage, own folder (npc/npcs.json) - not `data/`,
+// which mirrors vanilla Pumpkin's own files (whitelist/ops/bans/usercache)
 pub mod npc;
 pub mod player_server;
 pub mod usercache;

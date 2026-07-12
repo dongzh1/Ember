@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use pumpkin_config::EconomyConfig;
+use pumpkin_config::{EconomyConfig, LoadConfiguration};
 use sqlx::mysql::MySqlPoolOptions;
 use tracing::error;
 use uuid::Uuid;
@@ -78,9 +78,27 @@ pub struct EconomyManager {
     starting_balance: i64,
 }
 
+impl Default for EconomyManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EconomyManager {
+    /// Loads `economy/economy.toml` itself (own folder, own file - see
+    /// `EconomyConfig`'s doc comment) rather than taking a config the caller
+    /// had to know how to find; `Server::new` just calls this with no args.
     #[must_use]
-    pub fn new(config: &EconomyConfig) -> Self {
+    pub fn new() -> Self {
+        let exec_dir = std::env::current_dir().expect("Failed to get current directory");
+        Self::from_config(&EconomyConfig::load(&exec_dir))
+    }
+
+    /// Builds a manager from an explicit config, bypassing the disk load -
+    /// only `new()` and tests (which need a config pointed at a test
+    /// database) should call this directly.
+    #[must_use]
+    fn from_config(config: &EconomyConfig) -> Self {
         let manager = Self {
             enabled: config.enabled,
             url: config.url.clone(),
@@ -351,7 +369,7 @@ mod tests {
             url,
             ..EconomyConfig::default()
         };
-        let manager = EconomyManager::new(&config);
+        let manager = EconomyManager::from_config(&config);
         // Empty out any rows a previous run left behind so tests are repeatable.
         let pool = manager
             .ensure_pool()
