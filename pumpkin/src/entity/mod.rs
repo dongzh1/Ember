@@ -287,24 +287,32 @@ pub trait EntityBase: Send + Sync + NBTStorage + std::any::Any {
         })
     }
 
+    // EMBER start - fix unconditional infinite recursion in this default
+    //
+    // This default previously re-dispatched onto `caller` — the exact same
+    // trait object `self` already was reached through — whenever that object
+    // had a `LivingEntity` backing it. Since dynamic dispatch already sends
+    // any type overriding `damage_with_context` straight to its own override
+    // (this default is never entered for those types at all), the recursive
+    // branch could only ever run for a type that does NOT override it, and
+    // for that type `caller`'s concrete type never changes between calls —
+    // so it recursed with identical arguments forever, guaranteeing a stack
+    // overflow (a raw OS-level fault, not a catchable panic) the first time
+    // anything damaged such an entity. `MannequinEntity` hit this in
+    // practice via suffocation damage. A plain no-op is the correct default
+    // for "this entity type never implemented damage handling."
     fn damage_with_context<'a>(
         &'a self,
-        caller: &'a dyn EntityBase,
-        amount: f32,
-        damage_type: DamageType,
-        position: Option<Vector3<f64>>,
-        source: Option<&'a dyn EntityBase>,
-        cause: Option<&'a dyn EntityBase>,
+        _caller: &'a dyn EntityBase,
+        _amount: f32,
+        _damage_type: DamageType,
+        _position: Option<Vector3<f64>>,
+        _source: Option<&'a dyn EntityBase>,
+        _cause: Option<&'a dyn EntityBase>,
     ) -> EntityBaseFuture<'a, bool> {
-        Box::pin(async move {
-            if caller.get_living_entity().is_some() {
-                return caller
-                    .damage_with_context(caller, amount, damage_type, position, source, cause)
-                    .await;
-            }
-            false
-        })
+        Box::pin(async move { false })
     }
+    // EMBER end
 
     /// Called when a player right-clicks this entity with an item.
     /// Returns true if the interaction was handled.

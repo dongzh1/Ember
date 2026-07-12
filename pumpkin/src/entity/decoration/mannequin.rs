@@ -3,11 +3,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
+use pumpkin_data::damage::DamageType;
 use pumpkin_data::meta_data_type::MetaDataType;
 use pumpkin_data::tracked_data::TrackedData;
 use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_protocol::ResolvableProfile;
 use pumpkin_protocol::java::client::play::Metadata;
+use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::text::TextComponent;
 
 use crate::entity::{
@@ -143,6 +145,29 @@ impl EntityBase for MannequinEntity {
     fn as_nbt_storage(&self) -> &dyn NBTStorage {
         self
     }
+
+    // EMBER start - fix infinite recursion in the EntityBase::damage_with_context
+    // default (see entity/mod.rs): that default re-dispatches onto `caller` (the
+    // same trait object) whenever it doesn't find a real override, so any
+    // EntityBase impl that never overrides it recurses into itself forever the
+    // first time anything calls `damage` on it (e.g. suffocation damage from
+    // `tick_block_collisions` when embedded in a block) — a guaranteed stack
+    // overflow, not a panic. Delegating to `living_entity`'s own real
+    // implementation, the same way every other LivingEntity-backed decoration
+    // (ArmorStand, Mob, ...) already does, is what actually breaks the cycle.
+    fn damage_with_context<'a>(
+        &'a self,
+        caller: &'a dyn EntityBase,
+        amount: f32,
+        damage_type: DamageType,
+        position: Option<Vector3<f64>>,
+        source: Option<&'a dyn EntityBase>,
+        cause: Option<&'a dyn EntityBase>,
+    ) -> EntityBaseFuture<'a, bool> {
+        self.living_entity
+            .damage_with_context(caller, amount, damage_type, position, source, cause)
+    }
+    // EMBER end
 
     /// Pushes the mannequin's skin, immovable flag and description to viewers on
     /// spawn. Replaces the default (baby-flag) tracker init, which mannequins do
