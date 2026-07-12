@@ -12,6 +12,9 @@
 //   /npc skin <name> <player>       - re-copy an NPC's skin from an online player
 //   /npc setaction <name> <command> - run a console command on click (%player% placeholder)
 //   /npc clearaction <name>         - make the NPC purely decorative again
+//   /npc lookat <name> on|off       - continuously face the nearest visible player
+//   /npc sneak <name> on|off        - client-side crouch pose
+//   /npc swing <name>               - play the swing-main-arm animation once
 
 use pumpkin_data::Block;
 use pumpkin_data::entity::EntityType;
@@ -95,6 +98,8 @@ impl CommandExecutor for NpcCreateExecutor {
                 entity_type: "player".to_string(),
                 block: None,
                 item: None,
+                look_at_nearest_player: false,
+                sneaking: false,
             };
 
             let server = context.server();
@@ -211,6 +216,8 @@ impl CommandExecutor for NpcCreateAsExecutor {
                 entity_type: entity_type.resource_name.to_string(),
                 block,
                 item,
+                look_at_nearest_player: false,
+                sneaking: false,
             };
 
             if let Err(e) = context.server().npc_manager.create(entry).await {
@@ -378,6 +385,86 @@ impl CommandExecutor for NpcClearActionExecutor {
     }
 }
 
+// EMBER start - basic NPC actions (look-at, sneak, swing)
+struct NpcLookAtExecutor {
+    enabled: bool,
+}
+impl CommandExecutor for NpcLookAtExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let result = context
+                .server()
+                .npc_manager
+                .set_look_at_nearest_player(&name, self.enabled)
+                .await;
+            match result {
+                Ok(()) => {
+                    let state = if self.enabled { "on" } else { "off" };
+                    feedback(
+                        context,
+                        ok_text(format!("NPC '{name}' look-at-nearest-player {state}.")),
+                    )
+                    .await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(e)).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+
+struct NpcSneakExecutor {
+    sneaking: bool,
+}
+impl CommandExecutor for NpcSneakExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let server = context.server();
+            let result = server
+                .npc_manager
+                .set_sneaking(server, &name, self.sneaking)
+                .await;
+            match result {
+                Ok(()) => {
+                    let state = if self.sneaking { "on" } else { "off" };
+                    feedback(context, ok_text(format!("NPC '{name}' sneaking {state}."))).await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(e)).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+
+struct NpcSwingExecutor;
+impl CommandExecutor for NpcSwingExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let server = context.server();
+            match server.npc_manager.swing_arm(server, &name).await {
+                Ok(()) => {
+                    feedback(context, ok_text(format!("NPC '{name}' swung its arm."))).await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(e)).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+// EMBER end
+
 /// Suggests names of existing NPCs — used by every subcommand that acts on
 /// an already-created NPC (everything except `create`, which names a new one).
 struct NpcNameSuggestionProvider;
@@ -497,6 +584,29 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                     argument(ARG_NAME, StringArgumentType::SingleWord)
                         .suggests(NpcNameSuggestionProvider)
                         .executes(NpcClearActionExecutor),
+                ),
+            )
+            .then(
+                literal("lookat").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .then(literal("on").executes(NpcLookAtExecutor { enabled: true }))
+                        .then(literal("off").executes(NpcLookAtExecutor { enabled: false })),
+                ),
+            )
+            .then(
+                literal("sneak").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .then(literal("on").executes(NpcSneakExecutor { sneaking: true }))
+                        .then(literal("off").executes(NpcSneakExecutor { sneaking: false })),
+                ),
+            )
+            .then(
+                literal("swing").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .executes(NpcSwingExecutor),
                 ),
             ),
     );

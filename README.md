@@ -181,6 +181,9 @@ via their type-specific data.
                                                 # falling_block/item)
 /npc remove|list|move|skin <name> ...
 /npc setaction <name> <command>                # run a console command on click (%player% placeholder)
+/npc lookat <name> on|off                      # continuously face the nearest visible player
+/npc sneak <name> on|off                       # client-side crouch pose
+/npc swing <name>                              # play the swing-main-arm animation once
 ```
 
 Skins are always copied from a currently-online player (never resolved against Mojang).
@@ -397,6 +400,9 @@ url = "mysql://user:pass@localhost:3306/ember"
                                                   # 填玩家名换皮肤,falling_block/item 填方块/物品名)
 /npc remove|list|move|skin <名字> ...
 /npc setaction <名字> <命令>                     # 点击时以控制台身份执行命令(%player% 占位符)
+/npc lookat <名字> on|off                        # 持续朝向最近的可见玩家
+/npc sneak <名字> on|off                         # 客户端下蹲姿态
+/npc swing <名字>                                # 播放一次挥手动画
 ```
 
 皮肤始终从当前在线玩家复制（不联网解析 Mojang 用户名）。

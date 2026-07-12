@@ -22,8 +22,9 @@ use pumpkin_protocol::ResolvableProfile;
 use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::java::client::play::{
-    CPlayerInfoUpdate, CRemoveEntities, CRemovePlayerInfo, CSetEntityMetadata, CSpawnEntity,
-    Metadata, Player as InfoPlayer, PlayerAction, PlayerInfoFlags,
+    Animation, CEntityAnimation, CHeadRot, CPlayerInfoUpdate, CRemoveEntities, CRemovePlayerInfo,
+    CSetEntityMetadata, CSpawnEntity, Metadata, Player as InfoPlayer, PlayerAction,
+    PlayerInfoFlags,
 };
 use pumpkin_util::math::vector2::{Vector2, to_chunk_pos};
 use pumpkin_util::math::vector3::Vector3;
@@ -43,10 +44,20 @@ use crate::world::chunker::{get_view_distance, is_within_view_distance};
 /// late is imperceptible, and this keeps the per-tick cost near zero.
 const VISIBILITY_INTERVAL_TICKS: i32 = 10;
 
+// EMBER start - look-at-nearest-player
+/// Re-evaluate `look_at_nearest_player` every 4 ticks (5/s) — noticeably
+/// smoother than the visibility interval without re-scanning every tick.
+const LOOK_INTERVAL_TICKS: i32 = 4;
+// EMBER end
+
 /// All bits set: cape/jacket/sleeves/pants-legs/hat all rendered. A real
 /// player's byte here mirrors their client-side settings; a fake NPC has no
 /// such source, so it hardcodes "show everything".
 const SKIN_LAYERS_ALL: u8 = 0x7F;
+
+/// Sneaking bit in the base-entity shared-flags byte (see `Entity::set_flag`,
+/// `Flag::Sneaking as u8 == 1`).
+const SNEAKING_BIT: i8 = 0x02;
 
 // EMBER start - packet-only NPCs generalized to any entity type
 /// Resolves an [`NpcEntry`]'s stored resource name to a real [`EntityType`].
@@ -83,6 +94,24 @@ fn profile_from_skin(skin: Option<&pumpkin_protocol::Property>) -> ResolvablePro
     })
 }
 
+// EMBER start - look-at-nearest-player
+/// Yaw/pitch (in degrees) to face `to` from `from`, the same formula
+/// `Entity::look_at` uses (no eye-height offset, matching that precedent).
+fn yaw_pitch_towards(from: Vector3<f64>, to: Vector3<f64>) -> (f32, f32) {
+    let delta = to.sub(&from);
+    let root = delta.x.hypot(delta.z);
+    let pitch = pumpkin_util::math::wrap_degrees((-delta.y.atan2(root) as f32).to_degrees());
+    let yaw = pumpkin_util::math::wrap_degrees((delta.z.atan2(delta.x) as f32).to_degrees() - 90.0);
+    (yaw, pitch)
+}
+
+/// Degrees to the packet's 1/256-of-a-turn byte encoding, the same
+/// conversion `net/java/play.rs`'s rotation handling uses.
+fn angle_to_byte(degrees: f32) -> u8 {
+    (degrees * 256.0 / 360.0).rem_euclid(256.0) as u8
+}
+// EMBER end
+
 /// Sends the despawn packets for one NPC to one client. `is_player` gates
 /// `CRemovePlayerInfo` — every other entity type never entered the tab list
 /// in the first place, so removing it there would be a meaningless no-op at
@@ -105,6 +134,9 @@ struct RuntimeNpc {
     entity_id: i32,
     chunk_pos: Vector2<i32>,
     visible_to: HashSet<Uuid>,
+    /// Last head yaw byte sent to viewers, so `look_at_nearest_player`
+    /// doesn't spam an identical `CHeadRot` every interval.
+    last_sent_head_yaw: Option<u8>,
 }
 
 pub struct NpcManager {
@@ -141,6 +173,7 @@ impl NpcManager {
                 entry.z.floor() as i32,
             )),
             visible_to: HashSet::new(),
+            last_sent_head_yaw: None,
         }
     }
 
@@ -277,6 +310,91 @@ impl NpcManager {
         Ok(())
     }
 
+    // EMBER start - basic NPC actions (look-at, sneak, swing)
+    /// Toggles continuously facing the nearest visible viewer. Picked up by
+    /// the next `tick()` on its own interval — no respawn needed, unlike
+    /// `sneaking`, since nothing about the initial spawn packet changes.
+    pub async fn set_look_at_nearest_player(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let mut config = self.config.write().await;
+        let Some(entry) = config
+            .npcs
+            .iter_mut()
+            .find(|n| n.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("No NPC named '{name}' exists."));
+        };
+        entry.look_at_nearest_player = enabled;
+        config.save();
+        Ok(())
+    }
+
+    /// Sets the crouch pose. Forces a respawn (like `set_skin`) since the
+    /// pose is part of the metadata sent once at spawn time, not re-sent
+    /// per-tick.
+    pub async fn set_sneaking(
+        &self,
+        server: &Arc<Server>,
+        name: &str,
+        sneaking: bool,
+    ) -> Result<(), String> {
+        let mut config = self.config.write().await;
+        let Some(entry) = config
+            .npcs
+            .iter_mut()
+            .find(|n| n.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("No NPC named '{name}' exists."));
+        };
+        entry.sneaking = sneaking;
+        let entry = entry.clone();
+        config.save();
+        drop(config);
+
+        self.reset_runtime_and_despawn(server, &entry).await;
+        Ok(())
+    }
+
+    /// Plays the swing-main-arm animation for current viewers. One-shot —
+    /// nothing persisted, unlike the other actions here.
+    pub async fn swing_arm(&self, server: &Arc<Server>, name: &str) -> Result<(), String> {
+        let config = self.config.read().await;
+        let Some(entry) = config.find(name) else {
+            return Err(format!("No NPC named '{name}' exists."));
+        };
+        let (world_name, canonical_name) = (entry.world.clone(), entry.name.clone());
+        drop(config);
+
+        let runtime = self.runtime.read().await;
+        let Some(npc) = runtime.get(&canonical_name) else {
+            return Ok(());
+        };
+        let Some(world) = server
+            .worlds
+            .load()
+            .iter()
+            .find(|w| w.get_world_name() == world_name)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        for player in world.players.load().iter() {
+            if npc.visible_to.contains(&player.gameprofile.id)
+                && let ClientPlatform::Java(client) = player.client.as_ref()
+            {
+                client.try_enqueue_packet(&CEntityAnimation::new(
+                    VarInt(npc.entity_id),
+                    Animation::SwingMainArm,
+                ));
+            }
+        }
+        Ok(())
+    }
+    // EMBER end
+
     /// Given an entity id from an interact packet the world doesn't
     /// recognize, returns the configured click command (if any) when it
     /// belongs to one of our NPCs. `None` means "not one of ours" — the
@@ -343,10 +461,15 @@ impl NpcManager {
 
     /// Re-evaluates visibility for every NPC against every connected player,
     /// spawning/despawning per-viewer as they cross the view-distance
-    /// boundary. Called once per game tick from `Server::tick_worlds`; the
-    /// interval check keeps the real work at a fraction of that rate.
+    /// boundary, and (on its own faster interval) turns `look_at_nearest_player`
+    /// NPCs to face their nearest viewer. Called once per game tick from
+    /// `Server::tick_worlds`; the interval checks keep the real work at a
+    /// fraction of that rate.
     pub async fn tick(&self, server: &Arc<Server>) {
-        if server.tick_count.load(Ordering::Relaxed) % VISIBILITY_INTERVAL_TICKS != 0 {
+        let tick_count = server.tick_count.load(Ordering::Relaxed);
+        let do_visibility = tick_count % VISIBILITY_INTERVAL_TICKS == 0;
+        let do_look = tick_count % LOOK_INTERVAL_TICKS == 0;
+        if !do_visibility && !do_look {
             return;
         }
 
@@ -375,35 +498,80 @@ impl NpcManager {
                 };
                 let is_player = is_player_kind(resolve_entity_type(entry));
 
-                let mut in_range = HashSet::with_capacity(npc.visible_to.len());
-                for player in players.iter() {
-                    let ClientPlatform::Java(client) = player.client.as_ref() else {
-                        continue;
-                    };
-                    let center = player.get_entity().chunk_pos.load();
-                    let view_distance = get_view_distance(player).get() as i32;
-                    if !is_within_view_distance(npc.chunk_pos, center, view_distance) {
-                        continue;
+                if do_visibility {
+                    let mut in_range = HashSet::with_capacity(npc.visible_to.len());
+                    for player in players.iter() {
+                        let ClientPlatform::Java(client) = player.client.as_ref() else {
+                            continue;
+                        };
+                        let center = player.get_entity().chunk_pos.load();
+                        let view_distance = get_view_distance(player).get() as i32;
+                        if !is_within_view_distance(npc.chunk_pos, center, view_distance) {
+                            continue;
+                        }
+                        let uuid = player.gameprofile.id;
+                        in_range.insert(uuid);
+                        if !npc.visible_to.contains(&uuid) {
+                            Self::send_spawn(client, npc, entry);
+                        }
                     }
-                    let uuid = player.gameprofile.id;
-                    in_range.insert(uuid);
-                    if !npc.visible_to.contains(&uuid) {
-                        Self::send_spawn(client, npc, entry);
+                    for player in players.iter() {
+                        let uuid = player.gameprofile.id;
+                        if npc.visible_to.contains(&uuid)
+                            && !in_range.contains(&uuid)
+                            && let ClientPlatform::Java(client) = player.client.as_ref()
+                        {
+                            send_despawn_packets(client, npc.entity_id, npc.fake_uuid, is_player);
+                        }
                     }
+                    npc.visible_to = in_range;
                 }
-                for player in players.iter() {
-                    let uuid = player.gameprofile.id;
-                    if npc.visible_to.contains(&uuid)
-                        && !in_range.contains(&uuid)
-                        && let ClientPlatform::Java(client) = player.client.as_ref()
-                    {
-                        send_despawn_packets(client, npc.entity_id, npc.fake_uuid, is_player);
-                    }
+
+                if do_look && entry.look_at_nearest_player {
+                    Self::update_look_at(npc, entry, &players);
                 }
-                npc.visible_to = in_range;
             }
         }
     }
+
+    // EMBER start - look-at-nearest-player
+    /// Turns `npc` to face its nearest currently-visible viewer, broadcasting
+    /// `CHeadRot` to every viewer — one shared head orientation, not a
+    /// separate one per viewer (a head-yaw byte can't express "face whoever's
+    /// looking at you" individually per client anyway).
+    fn update_look_at(npc: &mut RuntimeNpc, entry: &NpcEntry, players: &[Arc<Player>]) {
+        if npc.visible_to.is_empty() {
+            return;
+        }
+        let npc_pos = Vector3::new(entry.x, entry.y, entry.z);
+        let Some(nearest) = players
+            .iter()
+            .filter(|p| npc.visible_to.contains(&p.gameprofile.id))
+            .min_by(|a, b| {
+                let da = a.get_entity().pos.load().sub(&npc_pos).length_squared();
+                let db = b.get_entity().pos.load().sub(&npc_pos).length_squared();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+        else {
+            return;
+        };
+
+        let (yaw, _pitch) = yaw_pitch_towards(npc_pos, nearest.get_entity().pos.load());
+        let head_yaw = angle_to_byte(yaw);
+        if npc.last_sent_head_yaw == Some(head_yaw) {
+            return;
+        }
+        npc.last_sent_head_yaw = Some(head_yaw);
+
+        for player in players {
+            if npc.visible_to.contains(&player.gameprofile.id)
+                && let ClientPlatform::Java(client) = player.client.as_ref()
+            {
+                client.try_enqueue_packet(&CHeadRot::new(VarInt(npc.entity_id), head_yaw));
+            }
+        }
+    }
+    // EMBER end
 
     fn send_spawn(client: &crate::net::java::JavaClient, npc: &RuntimeNpc, entry: &NpcEntry) {
         let entity_type = resolve_entity_type(entry);
@@ -474,15 +642,25 @@ impl NpcManager {
         let version = client.version.load();
         let mut buf = Vec::new();
 
+        // EMBER: the sneaking bit lives on every entity's base shared-flags
+        // metadata (see `Entity::set_flag`), so it applies regardless of kind.
+        let mut ok = Metadata::new(
+            TrackedData::SHARED_FLAGS_ID,
+            MetaDataType::BYTE,
+            if entry.sneaking { SNEAKING_BIT } else { 0 },
+        )
+        .write(&mut buf, &version)
+        .is_ok();
+
         if is_player {
-            if Metadata::new(
+            ok &= Metadata::new(
                 TrackedData::PLAYER_MODE_CUSTOMISATION,
                 MetaDataType::BYTE,
                 SKIN_LAYERS_ALL,
             )
             .write(&mut buf, &version)
-            .is_ok()
-            {
+            .is_ok();
+            if ok {
                 buf.push(0xFF);
                 client.try_enqueue_packet(&CSetEntityMetadata::new(
                     VarInt(npc.entity_id),
@@ -495,7 +673,7 @@ impl NpcManager {
         // Every non-player kind needs its name sent explicitly: a player
         // gets a nametag "for free" from its tab-list username, nothing
         // else does.
-        let mut ok = Metadata::new(
+        ok &= Metadata::new(
             TrackedData::CUSTOM_NAME,
             MetaDataType::OPTIONAL_TEXT_COMPONENT,
             Some(TextComponent::text(entry.name.clone())),

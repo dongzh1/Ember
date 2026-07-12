@@ -46,6 +46,13 @@ pub struct NpcEntry {
     /// invisible (its appearance is entirely metadata-driven).
     #[serde(default)]
     pub item: Option<String>,
+    /// Continuously turn to face the nearest currently-visible player (a
+    /// "shopkeeper" look), re-evaluated on `LOOK_INTERVAL_TICKS`.
+    #[serde(default)]
+    pub look_at_nearest_player: bool,
+    /// Client-side crouch pose.
+    #[serde(default)]
+    pub sneaking: bool,
     // EMBER end
 }
 
