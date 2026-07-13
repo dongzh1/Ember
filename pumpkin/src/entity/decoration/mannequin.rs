@@ -70,31 +70,40 @@ impl MannequinEntity {
     /// Sets the rendered skin and broadcasts it to viewers immediately.
     pub fn set_skin(&self, textures: Option<SkinTextures>) {
         self.skin.store(Arc::new(textures));
-        self.get_entity().send_meta_data(&[Metadata::new(
-            TrackedData::PROFILE,
-            MetaDataType::RESOLVABLE_PROFILE,
-            self.profile(),
-        )]);
+        self.get_entity().send_meta_data(
+            &[Metadata::new(
+                TrackedData::PROFILE,
+                MetaDataType::RESOLVABLE_PROFILE,
+                self.profile(),
+            )],
+            None,
+        );
     }
 
     /// Sets the below-name description text and broadcasts it immediately.
     pub fn set_description(&self, description: Option<TextComponent>) {
         self.description.store(Arc::new(description.clone()));
-        self.get_entity().send_meta_data(&[Metadata::new(
-            TrackedData::DESCRIPTION,
-            MetaDataType::OPTIONAL_TEXT_COMPONENT,
-            description,
-        )]);
+        self.get_entity().send_meta_data(
+            &[Metadata::new(
+                TrackedData::DESCRIPTION,
+                MetaDataType::OPTIONAL_TEXT_COMPONENT,
+                description,
+            )],
+            None,
+        );
     }
 
     /// Sets whether the mannequin resists being pushed and broadcasts it.
     pub fn set_immovable(&self, immovable: bool) {
         self.immovable.store(immovable, Ordering::Relaxed);
-        self.get_entity().send_meta_data(&[Metadata::new(
-            TrackedData::IMMOVABLE,
-            MetaDataType::BOOLEAN,
-            immovable,
-        )]);
+        self.get_entity().send_meta_data(
+            &[Metadata::new(
+                TrackedData::IMMOVABLE,
+                MetaDataType::BOOLEAN,
+                immovable,
+            )],
+            None,
+        );
     }
 
     pub fn is_immovable(&self) -> bool {
@@ -175,21 +184,30 @@ impl EntityBase for MannequinEntity {
     fn init_data_tracker(&self) -> EntityBaseFuture<'_, ()> {
         Box::pin(async move {
             let entity = self.get_entity();
-            entity.send_meta_data(&[Metadata::new(
-                TrackedData::IMMOVABLE,
-                MetaDataType::BOOLEAN,
-                self.is_immovable(),
-            )]);
-            entity.send_meta_data(&[Metadata::new(
-                TrackedData::PROFILE,
-                MetaDataType::RESOLVABLE_PROFILE,
-                self.profile(),
-            )]);
-            entity.send_meta_data(&[Metadata::new(
-                TrackedData::DESCRIPTION,
-                MetaDataType::OPTIONAL_TEXT_COMPONENT,
-                (**self.description.load()).clone(),
-            )]);
+            entity.send_meta_data(
+                &[Metadata::new(
+                    TrackedData::IMMOVABLE,
+                    MetaDataType::BOOLEAN,
+                    self.is_immovable(),
+                )],
+                None,
+            );
+            entity.send_meta_data(
+                &[Metadata::new(
+                    TrackedData::PROFILE,
+                    MetaDataType::RESOLVABLE_PROFILE,
+                    self.profile(),
+                )],
+                None,
+            );
+            entity.send_meta_data(
+                &[Metadata::new(
+                    TrackedData::DESCRIPTION,
+                    MetaDataType::OPTIONAL_TEXT_COMPONENT,
+                    (**self.description.load()).clone(),
+                )],
+                None,
+            );
         })
     }
 

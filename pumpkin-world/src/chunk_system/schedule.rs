@@ -1363,7 +1363,7 @@ impl GenerationSchedule {
                             let send_chunk = self.send_chunk.clone();
                             let level = level.clone();
                             let settings =
-                                GenerationSettings::from_dimension(&level.world_gen.dimension);
+                                GenerationSettings::from_dimension(level.world_gen.dimension());
                             // EMBER: release the shared-pool slot acquired above once
                             // this job finishes. `run_generation` already catches
                             // panics internally, so this always runs.

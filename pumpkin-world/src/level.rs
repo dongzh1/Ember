@@ -13,7 +13,7 @@ use pumpkin_config::ember_world::{EmberRuntime, GenerateMode};
 use crate::chunk_system::{
     ChunkListener, ChunkLoading, GenPoolBudget, GenerationSchedule, LevelChannel,
 };
-use crate::generation::generator::VanillaGenerator;
+use crate::generation::generator::WorldGenerator;
 use crate::lighting::DynamicLightEngine;
 use crate::{
     chunk::{
@@ -160,7 +160,7 @@ pub struct Level {
     pub chunk_saver: Arc<dyn FileIO<Data = SyncChunk>>,
     entity_saver: Arc<dyn FileIO<Data = SyncEntityChunk>>,
 
-    pub world_gen: Arc<VanillaGenerator>,
+    pub world_gen: Arc<WorldGenerator>,
 
     /// Handles runtime lighting updates
     pub light_engine: DynamicLightEngine,
@@ -230,11 +230,21 @@ impl Level {
         gen_budget: Option<Arc<GenPoolBudget>>,
         // EMBER end
     ) -> Arc<Self> {
+        // EMBER: hoisted out of the (originally else-only) block below so
+        // `dim_path` (an easyworld-only identifier, further down) can also
+        // use it for the default dimensions, not just custom ones.
         let (namespace, name) = match dimension.minecraft_name.split_once(':') {
             Some((ns, n)) => (ns, n),
             None => ("minecraft", dimension.minecraft_name),
         };
-        let dim_folder = root_folder.join("dimensions").join(namespace).join(name);
+        let dim_folder = if dimension.minecraft_name == Dimension::OVERWORLD.minecraft_name
+            || dimension.minecraft_name == Dimension::THE_NETHER.minecraft_name
+            || dimension.minecraft_name == Dimension::THE_END.minecraft_name
+        {
+            root_folder.clone()
+        } else {
+            root_folder.join("dimensions").join(namespace).join(name)
+        };
 
         let region_folder = dim_folder.join("region");
         let entities_folder = dim_folder.join("entities");
@@ -279,7 +289,62 @@ impl Level {
         let dim_min_y = dimension.min_y;
         let dim_height = dimension.height;
         // EMBER end
-        let world_gen = get_world_gen(seed, dimension).into();
+
+        let main_folder = if dimension.minecraft_name == Dimension::OVERWORLD.minecraft_name {
+            level_folder.root_folder.clone()
+        } else {
+            level_folder
+                .root_folder
+                .parent()
+                .unwrap_or(&level_folder.root_folder)
+                .to_path_buf()
+        };
+
+        let mut is_flat = false;
+        let mut flat_layers = Vec::new();
+        let mut flat_biome = "minecraft:plains".to_string();
+
+        if let Some(wgs) = crate::world_info::data_files::read_world_gen_settings(&main_folder)
+            && let Some(dim_settings) = wgs.dimensions.get(dimension.minecraft_name)
+            && dim_settings.generator.generator_type == "minecraft:flat"
+        {
+            is_flat = true;
+            if let Some(crate::world_info::GeneratorSettings::Compound(nbt)) =
+                &dim_settings.generator.settings
+            {
+                if let Some(pumpkin_nbt::tag::NbtTag::String(b)) = nbt.child_tags.get("biome") {
+                    flat_biome = b.to_string();
+                }
+                if let Some(pumpkin_nbt::tag::NbtTag::List(list)) = nbt.child_tags.get("layers") {
+                    for tag in list {
+                        if let pumpkin_nbt::tag::NbtTag::Compound(layer_compound) = tag {
+                            let mut block = "minecraft:air".to_string();
+                            let mut height = 1;
+                            if let Some(pumpkin_nbt::tag::NbtTag::String(bl)) =
+                                layer_compound.child_tags.get("block")
+                            {
+                                block = bl.to_string();
+                            }
+                            if let Some(pumpkin_nbt::tag::NbtTag::Int(h)) =
+                                layer_compound.child_tags.get("height")
+                            {
+                                height = *h;
+                            }
+                            flat_layers
+                                .push(crate::generation::generator::FlatLayer { block, height });
+                        }
+                    }
+                }
+            }
+        }
+
+        let world_gen: Arc<WorldGenerator> = Arc::from(get_world_gen(
+            seed,
+            dimension,
+            is_flat,
+            flat_layers,
+            flat_biome,
+        ));
 
         // EMBER start - easyworld: pick storage by backend + per-world runtime
         let ember = level_config.ember.clone();
