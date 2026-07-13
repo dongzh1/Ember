@@ -274,6 +274,20 @@ uploading it to any S3-compatible bucket (`hosting = "s3"` — real AWS S3, Clou
 way still works unchanged if you'd rather do that. First phase of a larger plan to port select
 features from [CraftEngine](https://github.com/Xiao-MoMi/craft-engine) (custom items next).
 
+### Custom items
+
+```
+/customitem give <player> <id> [count]   # give a configured custom item
+/customitem list                         # list configured custom item ids
+```
+
+A real vanilla item (keeps its vanilla stack size, durability, etc.) wearing a custom
+`minecraft:item_model` component pointing at a model in the resource pack builder's
+`source_dir`. Configure in `resourcepack/items.toml`: `id`, `base_item`, `model`, and an
+optional `display_name`. Second phase of the CraftEngine port — targets the modern (1.21.2+)
+item model system only; the older numeric `custom_model_data` path isn't implemented (older
+clients just see the plain base item, nothing breaks).
+
 ## Inherited Pumpkin Features
 
 Everything from upstream Pumpkin — Ember syncs weekly and keeps full compatibility:
@@ -540,6 +554,19 @@ url = "mysql://user:pass@localhost:3306/ember"
 `url`/`sha1` 塞进已有的（本来就能正常工作的）资源包推送逻辑——想继续手动配一个外部托管的
 URL，老用法完全不受影响。是移植 [CraftEngine](https://github.com/Xiao-MoMi/craft-engine)
 部分功能这个更大计划的第一阶段（下一步是自定义物品）。
+
+### 自定义物品
+
+```
+/customitem give <玩家> <id> [数量]   # 给一个配置好的自定义物品
+/customitem list                     # 列出所有配置的自定义物品 id
+```
+
+一个真实的原版物品（保留原版的最大堆叠数、耐久等一切行为），戴上一个自定义的
+`minecraft:item_model` 组件，指向阶段一资源包生成器 `source_dir` 里的模型文件。在
+`resourcepack/items.toml` 配置：`id`、`base_item`、`model`，可选 `display_name`。CraftEngine
+移植的第二阶段——只做新协议（1.21.2+）的物品模型系统，老协议数值型 `custom_model_data` 没做
+（老客户端就看到原版物品本身，不会出问题）。
 
 ## 继承的 Pumpkin 能力
 

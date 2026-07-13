@@ -82,6 +82,9 @@ pub mod menu;
 // EMBER start - resource pack builder (self-generate + self-host/S3)
 mod resourcepack_builder;
 // EMBER end
+// EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
+pub mod custom_item;
+// EMBER end
 pub mod recipe;
 pub mod scheduler;
 pub mod seasonal_events;
@@ -103,6 +106,9 @@ pub use tpa::TpaManager;
 // EMBER end
 // EMBER start - floating packet-only menu system
 pub use menu::MenuManager;
+// EMBER end
+// EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
+pub use custom_item::CustomItemManager;
 // EMBER end
 // EMBER start - offline-mode login verification
 pub use auth::LoginManager;
@@ -209,6 +215,11 @@ pub struct Server {
     /// Floating packet-only menus (`menu/menus.toml`): never real world
     /// entities, opened per-player via `/menu`. See `menu::MenuManager`.
     pub menu_manager: Arc<menu::MenuManager>,
+    // EMBER end
+    // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
+    /// Custom items (`resourcepack/items.toml`): vanilla base items wearing
+    /// a custom `minecraft:item_model` component. See `custom_item::CustomItemManager`.
+    pub custom_item_manager: Arc<custom_item::CustomItemManager>,
     // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
@@ -423,6 +434,9 @@ impl Server {
         // EMBER start - floating packet-only menu system
         let menu_manager = Arc::new(menu::MenuManager::new());
         // EMBER end
+        // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
+        let custom_item_manager = Arc::new(custom_item::CustomItemManager::new());
+        // EMBER end
 
         let server = Self {
             basic_config,
@@ -480,6 +494,7 @@ impl Server {
             lottery_manager,                // EMBER
             shop_chat_capture,              // EMBER
             menu_manager,                   // EMBER
+            custom_item_manager,            // EMBER
         };
         let server = Arc::new(server);
 

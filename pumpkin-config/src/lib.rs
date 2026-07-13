@@ -53,6 +53,9 @@ pub use resourcepack_builder::{
     HostingMode, ResourcePackBuilderConfig, S3Config, SelfHostedConfig,
 };
 // EMBER end
+// EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
+pub use custom_item::{CustomItemConfig, CustomItemListConfig};
+// EMBER end
 
 mod commands;
 
@@ -85,6 +88,9 @@ mod menu;
 // EMBER end
 // EMBER start - resource pack builder (self-generate + self-host/S3)
 mod resourcepack_builder;
+// EMBER end
+// EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
+mod custom_item;
 // EMBER end
 mod player_data;
 mod pvp;
