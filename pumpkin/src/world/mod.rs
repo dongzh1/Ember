@@ -300,6 +300,11 @@ impl World {
         dimension: Dimension,
         block_registry: Arc<BlockRegistry>,
         server: Weak<Server>,
+        // EMBER: this world's resolved chunk backend - furniture/custom
+        // block storage mirrors it (mysql-backend worlds share placements
+        // through the same connection the chunk data itself uses; other
+        // backends fall back to a per-world TOML file).
+        chunk_config: &pumpkin_config::chunk::ChunkConfig,
     ) -> Self {
         // TODO
         let generation_settings = GenerationSettings::from_dimension(&dimension);
@@ -310,14 +315,17 @@ impl World {
             .then(|| Mutex::new(dragon_fight::DragonFight::new()));
         // EMBER start - per-world furniture/custom block instance storage
         //
-        // Both load synchronously here (this fn isn't async); furniture's
-        // runtime visuals need an async `CustomItemManager` lookup it can't
-        // do yet, so callers must follow up with `furniture_manager.
-        // load_runtime(...).await` once the world is fully constructed.
+        // Both load synchronously here (this fn isn't async); resolving
+        // visuals (furniture) and connecting to mysql (either, when this
+        // world's chunk backend is mysql) need async work this can't do
+        // yet, so callers must follow up with `furniture_manager.
+        // load_runtime(...).await` / `custom_block_manager.
+        // connect_mysql(...).await` once the world is fully constructed.
         let world_root = level.level_folder.root_folder.clone();
-        let furniture_manager = crate::server::furniture::FurnitureManager::new(&world_root);
+        let furniture_manager =
+            crate::server::furniture::FurnitureManager::new(&world_root, chunk_config);
         let custom_block_manager =
-            crate::server::custom_block::CustomBlockManager::new(&world_root);
+            crate::server::custom_block::CustomBlockManager::new(&world_root, chunk_config);
         // EMBER end
         Self {
             uuid: Uuid::new_v4(),

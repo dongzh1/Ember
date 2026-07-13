@@ -298,6 +298,12 @@ if it's copied to another server), broadcast to everyone in view distance the sa
 packet-only NPCs are. Attack it to break it and get the item back. Third phase of the
 CraftEngine port.
 
+Placements follow whichever chunk backend the world itself uses: a `file`-backend world keeps
+the TOML above; a `mysql`-backend world (shared read-write/read-only across multiple servers)
+stores the same rows in that world's own database instead, over the same connection its chunk
+data already uses — so every server actually sharing that world sees the same furniture, not
+just whichever one has the local file.
+
 ### Custom blocks
 
 Two ways to skin a block, fourth and final phase of the CraftEngine port:
@@ -309,11 +315,12 @@ Two ways to skin a block, fourth and final phase of the CraftEngine port:
 - **Vanilla block carriers** (`blocks/blocks.toml`) — binds a custom block id to a real
   vanilla "carrier" block (currently `note_block` only). Right-clicking with the bound custom
   item places the carrier's default state and records the position in the world's own
-  `custom_block_instances.toml` (same travels-with-the-world reasoning as furniture above);
-  breaking it drops the custom item instead of the carrier's vanilla loot, and the carrier's
-  own interactive behavior (e.g. note block tuning) is swallowed wherever a custom block is
-  recorded. Every other position keeps its exact vanilla behavior — reviewed carefully for a
-  byte-for-byte fallthrough when no record exists, but not verified against a real client.
+  `custom_block_instances.toml` (same travels-with-the-world reasoning as furniture above, and
+  the same mysql-backend sharing when that's the world's chunk backend); breaking it drops the
+  custom item instead of the carrier's vanilla loot, and the carrier's own interactive behavior
+  (e.g. note block tuning) is swallowed wherever a custom block is recorded. Every other
+  position keeps its exact vanilla behavior — reviewed carefully for a byte-for-byte fallthrough
+  when no record exists, but not verified against a real client.
 
 ## Inherited Pumpkin Features
 
@@ -603,6 +610,10 @@ URL，老用法完全不受影响。是移植 [CraftEngine](https://github.com/X
 其他服务器时摆放记录也会跟着走），广播给视距内所有人，和发包 NPC 系统同一套可见性判定。攻击它
 即可破坏并拿回物品。CraftEngine 移植的第三阶段。
 
+摆放记录跟着世界自己选的区块存储后端走：`file` 后端就是上面说的 TOML；`mysql` 后端（世界被多台
+服务器读写/只读共享）会把这些记录存进这个世界自己的数据库，复用区块数据本来就在用的同一个连接
+——这样真正共享同一个世界的每台服务器看到的家具都是一致的，不会只有存了本地文件的那一台能看到。
+
 ### 自定义方块
 
 两种贴皮方式，CraftEngine 移植的第四阶段，也是最后一阶段：
@@ -612,10 +623,10 @@ URL，老用法完全不受影响。是移植 [CraftEngine](https://github.com/X
   始终朝向摄像机。
 - **原版方块载体**（`blocks/blocks.toml`）——把一个自定义方块 id 绑定到一个真实的原版"载体"方块
   （目前只支持 `note_block`）。右键放置对应的自定义物品会在目标位置放上载体的默认状态并记录到
-  世界自己的 `custom_block_instances.toml`（和家具同样的"跟着世界文件夹走"考虑）；破坏时掉落
-  自定义物品而不是载体的原版战利品，载体自己的交互行为（比如音符盒调音）在记录了自定义方块的
-  位置会被吞掉。其余所有位置的原版方块行为完全不变——逐字审查过"没有记录时是否严丝合缝落回原
-  代码"，但没有真实客户端实测验证。
+  世界自己的 `custom_block_instances.toml`（和家具同样的"跟着世界文件夹走"考虑，世界是 `mysql`
+  后端时同样存进那个世界自己的数据库）；破坏时掉落自定义物品而不是载体的原版战利品，载体自己的
+  交互行为（比如音符盒调音）在记录了自定义方块的位置会被吞掉。其余所有位置的原版方块行为完全
+  不变——逐字审查过"没有记录时是否严丝合缝落回原代码"，但没有真实客户端实测验证。
 
 ## 继承的 Pumpkin 能力
 

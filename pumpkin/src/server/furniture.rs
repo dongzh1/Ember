@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
+use pumpkin_config::chunk::{ChunkConfig, EasyBackend, EasyWorldMode};
 use pumpkin_config::{
     FurnitureConfig, FurnitureInstanceConfig, FurnitureInstanceListConfig, FurnitureListConfig,
     LoadConfiguration, RenderMode,
@@ -42,7 +43,9 @@ use pumpkin_protocol::java::client::play::{
 };
 use pumpkin_util::math::vector2::{Vector2, to_chunk_pos};
 use pumpkin_util::math::vector3::Vector3;
+use pumpkin_world::chunk::easy_mysql::world_key_for;
 use tokio::sync::RwLock;
+use tracing::error;
 use uuid::Uuid;
 
 use crate::entity::{Entity, EntityBase};
@@ -50,6 +53,38 @@ use crate::net::ClientPlatform;
 use crate::server::custom_item::CustomItemManager;
 use crate::world::World;
 use crate::world::chunker::{get_view_distance, is_within_view_distance};
+
+const CREATE_TABLE: &str = concat!(
+    "CREATE TABLE IF NOT EXISTS ember_furniture_instances (",
+    "world_key VARCHAR(512) NOT NULL,",
+    "instance_id CHAR(36) NOT NULL,",
+    "furniture_id VARCHAR(128) NOT NULL,",
+    "x DOUBLE NOT NULL,",
+    "y DOUBLE NOT NULL,",
+    "z DOUBLE NOT NULL,",
+    "yaw FLOAT NOT NULL,",
+    "PRIMARY KEY (world_key, instance_id)",
+    ")"
+);
+
+/// Mirrors this world's chunk storage backend (see module doc): `file`
+/// keeps the instance list in a TOML file inside the world's own folder;
+/// `mysql` (a world shared read-write/read-only across servers) stores the
+/// same rows in that world's own database instead, so every server
+/// actually sharing it sees the same placements.
+enum Storage {
+    File {
+        world_root: PathBuf,
+        instances: FurnitureInstanceListConfig,
+    },
+    /// This world's chunk backend is mysql, but `World::load` (sync) can't
+    /// connect yet - `load_runtime` connects once it's able to `.await`.
+    PendingMysql { url: String, world_key: String },
+    Mysql {
+        pool: sqlx::mysql::MySqlPool,
+        world_key: String,
+    },
+}
 
 /// Re-evaluate visibility every 10 ticks (0.5s) - same cadence as
 /// `NpcManager`, for the same reason (imperceptible latency, near-zero cost).
@@ -100,30 +135,47 @@ struct RuntimeFurniture {
 }
 
 pub struct FurnitureManager {
-    world_root: PathBuf,
+    storage: RwLock<Storage>,
     /// The configured furniture *types* - server-level (see module doc),
     /// reloaded independently per world since it's tiny and read-only after
     /// boot; not worth threading a shared handle through `World::load` for.
     types: RwLock<FurnitureListConfig>,
-    instances: RwLock<FurnitureInstanceListConfig>,
     runtime: RwLock<Vec<RuntimeFurniture>>,
 }
 
 impl FurnitureManager {
-    /// Loads this world's furniture instance list synchronously - safe to
-    /// call from `World::load` (not an `async fn`). `runtime` starts empty;
-    /// the caller must follow up with `load_runtime` once it can `.await`
-    /// (resolving each instance's visual needs the `CustomItemManager`,
-    /// which isn't available synchronously here).
+    /// Loads this world's furniture type list and (for file storage) its
+    /// instance list synchronously - safe to call from `World::load` (not
+    /// an `async fn`). `runtime` starts empty either way; the caller must
+    /// follow up with `load_runtime` once it can `.await` (resolving each
+    /// instance's visual needs the `CustomItemManager`, and mysql storage
+    /// needs to actually connect - neither is possible synchronously here).
     #[must_use]
-    pub fn new(world_root: &Path) -> Self {
+    pub fn new(world_root: &Path, chunk_config: &ChunkConfig) -> Self {
         let exec_dir = std::env::current_dir().expect("Failed to get current directory");
         let types = FurnitureListConfig::load(&exec_dir);
-        let instance_list = FurnitureInstanceListConfig::load(world_root);
+
+        if let ChunkConfig::Easy(cfg) = chunk_config
+            && cfg.backend == EasyBackend::Mysql
+        {
+            let world_key = world_key_for(&cfg.mysql(EasyWorldMode::default()), world_root);
+            return Self {
+                storage: RwLock::new(Storage::PendingMysql {
+                    url: cfg.url.clone(),
+                    world_key,
+                }),
+                types: RwLock::new(types),
+                runtime: RwLock::new(Vec::new()),
+            };
+        }
+
+        let instances = FurnitureInstanceListConfig::load(world_root);
         Self {
-            world_root: world_root.to_path_buf(),
+            storage: RwLock::new(Storage::File {
+                world_root: world_root.to_path_buf(),
+                instances,
+            }),
             types: RwLock::new(types),
-            instances: RwLock::new(instance_list),
             runtime: RwLock::new(Vec::new()),
         }
     }
@@ -131,16 +183,82 @@ impl FurnitureManager {
     /// Builds runtime state for every persisted instance - called once
     /// after construction (needs the `CustomItemManager` to resolve each
     /// instance's visual, which isn't available yet inside `new()` during
-    /// `Server::new`'s own construction order).
+    /// `Server::new`'s own construction order; mysql storage also connects
+    /// here for the same reason - both need to `.await`).
     pub async fn load_runtime(&self, custom_items: &CustomItemManager) {
+        let instances = self.load_instances().await;
         let types = self.types.read().await.clone();
-        let instances = self.instances.read().await.instances.clone();
         let mut runtime = self.runtime.write().await;
-        for instance in instances {
-            if let Some(state) = Self::build_runtime(&types, custom_items, &instance).await {
+        for instance in &instances {
+            if let Some(state) = Self::build_runtime(&types, custom_items, instance).await {
                 runtime.push(state);
             }
         }
+    }
+
+    /// Returns this world's persisted furniture instances, connecting to
+    /// mysql (creating the table and loading its rows) first if this
+    /// manager's storage is still pending.
+    async fn load_instances(&self) -> Vec<FurnitureInstanceConfig> {
+        if let Storage::File { instances, .. } = &*self.storage.read().await {
+            return instances.instances.clone();
+        }
+
+        let (url, world_key) = match &*self.storage.read().await {
+            Storage::PendingMysql { url, world_key } => (url.clone(), world_key.clone()),
+            Storage::File { .. } | Storage::Mysql { .. } => return Vec::new(),
+        };
+
+        let pool = match sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+        {
+            Ok(pool) => pool,
+            Err(e) => {
+                error!(
+                    "Furniture manager: failed to connect to mysql ({url}): {e} - furniture in \
+                     this world won't load or persist until this is fixed."
+                );
+                return Vec::new();
+            }
+        };
+        if let Err(e) = sqlx::query(CREATE_TABLE).execute(&pool).await {
+            error!("Furniture manager: failed to create table: {e}");
+            return Vec::new();
+        }
+
+        let rows: Vec<(String, String, f64, f64, f64, f32)> = match sqlx::query_as(
+            "SELECT instance_id, furniture_id, x, y, z, yaw FROM ember_furniture_instances \
+             WHERE world_key = ?",
+        )
+        .bind(&world_key)
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                error!("Furniture manager: failed to load instances: {e}");
+                return Vec::new();
+            }
+        };
+
+        let instances: Vec<FurnitureInstanceConfig> = rows
+            .into_iter()
+            .filter_map(|(id, furniture_id, x, y, z, yaw)| {
+                Some(FurnitureInstanceConfig {
+                    instance_id: Uuid::parse_str(&id).ok()?,
+                    furniture_id,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                })
+            })
+            .collect();
+
+        *self.storage.write().await = Storage::Mysql { pool, world_key };
+        instances
     }
 
     async fn build_runtime(
@@ -237,10 +355,35 @@ impl FurnitureManager {
             return;
         };
 
-        let mut instances = self.instances.write().await;
-        instances.instances.push(instance);
-        instances.save(&self.world_root);
-        drop(instances);
+        match &mut *self.storage.write().await {
+            Storage::File {
+                world_root,
+                instances,
+            } => {
+                instances.instances.push(instance);
+                instances.save(world_root);
+            }
+            Storage::Mysql { pool, world_key } => {
+                let result = sqlx::query(
+                    "INSERT INTO ember_furniture_instances \
+                     (world_key, instance_id, furniture_id, x, y, z, yaw) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(&*world_key)
+                .bind(instance.instance_id.to_string())
+                .bind(&instance.furniture_id)
+                .bind(instance.x)
+                .bind(instance.y)
+                .bind(instance.z)
+                .bind(instance.yaw)
+                .execute(&*pool)
+                .await;
+                if let Err(e) = result {
+                    error!("Furniture manager: failed to persist placement: {e}");
+                }
+            }
+            Storage::PendingMysql { .. } => {}
+        }
 
         self.runtime.write().await.push(state);
     }
@@ -255,12 +398,30 @@ impl FurnitureManager {
         let removed = runtime.remove(index);
         drop(runtime);
 
-        let mut instances = self.instances.write().await;
-        instances
-            .instances
-            .retain(|i| i.instance_id != removed.instance_id);
-        instances.save(&self.world_root);
-        drop(instances);
+        match &mut *self.storage.write().await {
+            Storage::File {
+                world_root,
+                instances,
+            } => {
+                instances
+                    .instances
+                    .retain(|i| i.instance_id != removed.instance_id);
+                instances.save(world_root);
+            }
+            Storage::Mysql { pool, world_key } => {
+                let result = sqlx::query(
+                    "DELETE FROM ember_furniture_instances WHERE world_key = ? AND instance_id = ?",
+                )
+                .bind(&*world_key)
+                .bind(removed.instance_id.to_string())
+                .execute(&*pool)
+                .await;
+                if let Err(e) = result {
+                    error!("Furniture manager: failed to persist removal: {e}");
+                }
+            }
+            Storage::PendingMysql { .. } => {}
+        }
 
         if !removed.visible_to.is_empty() {
             let ids = [VarInt(removed.entity_id), VarInt(removed.hitbox_id)];
@@ -444,6 +605,108 @@ impl FurnitureManager {
                 buf.into(),
             ));
         }
+    }
+}
+
+// Manual-only: needs a real, reachable mysql server, so it's excluded from
+// the normal `cargo test` run (`#[ignore]`) and never hardcodes a
+// connection string - set `EMBER_TEST_MYSQL_URL` and run with `--ignored`
+// to actually exercise it. Exercises the storage layer directly
+// (`load_instances`, and `place`/`remove`'s own insert/delete queries)
+// rather than through `place`/`remove` themselves, which also need a
+// configured `CustomItemManager`/`FurnitureConfig` to resolve a visual -
+// business logic already covered by boot-testing, not what this is
+// checking (the mysql schema/round-trip itself).
+#[cfg(test)]
+mod mysql_tests {
+    use super::*;
+
+    fn test_url() -> Option<String> {
+        std::env::var("EMBER_TEST_MYSQL_URL").ok()
+    }
+
+    fn mysql_chunk_config(url: &str) -> ChunkConfig {
+        ChunkConfig::Easy(pumpkin_config::chunk::EasyConfig {
+            backend: EasyBackend::Mysql,
+            url: url.to_string(),
+            key_prefix: "ember_mysql_test".to_string(),
+            max_cached_regions: 1,
+        })
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a real mysql server; set EMBER_TEST_MYSQL_URL and run with --ignored"]
+    async fn insert_persists_and_reloads_across_managers() {
+        let Some(url) = test_url() else {
+            panic!("set EMBER_TEST_MYSQL_URL to a real mysql connection string to run this");
+        };
+        let chunk_config = mysql_chunk_config(&url);
+        let world_root =
+            std::path::PathBuf::from(format!("/ember-mysql-test-{}", std::process::id()));
+
+        let manager = FurnitureManager::new(&world_root, &chunk_config);
+        assert!(
+            manager.load_instances().await.is_empty(),
+            "fresh world_key should start empty"
+        );
+
+        let (pool, world_key) = match &*manager.storage.read().await {
+            Storage::Mysql { pool, world_key } => (pool.clone(), world_key.clone()),
+            Storage::File { .. } | Storage::PendingMysql { .. } => {
+                panic!("expected `load_instances` to have connected by now")
+            }
+        };
+
+        let instance_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO ember_furniture_instances \
+             (world_key, instance_id, furniture_id, x, y, z, yaw) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&world_key)
+        .bind(instance_id.to_string())
+        .bind("test_chair")
+        .bind(1.5f64)
+        .bind(64.0f64)
+        .bind(-2.5f64)
+        .bind(90.0f32)
+        .execute(&pool)
+        .await
+        .expect("insert should succeed");
+
+        // A second manager instance, pointed at the same world_key, proves
+        // the row actually round-trips through mysql (correct table/column
+        // mapping) rather than this just being the same in-memory pool.
+        let reloaded = FurnitureManager::new(&world_root, &chunk_config);
+        let instances = reloaded.load_instances().await;
+        let found = instances
+            .iter()
+            .find(|i| i.instance_id == instance_id)
+            .expect("the row inserted above should load back");
+        assert_eq!(found.furniture_id, "test_chair");
+        assert!((found.x - 1.5).abs() < f64::EPSILON);
+        assert!((found.y - 64.0).abs() < f64::EPSILON);
+        assert!((found.z - (-2.5)).abs() < f64::EPSILON);
+        assert!((found.yaw - 90.0).abs() < f32::EPSILON);
+
+        sqlx::query(
+            "DELETE FROM ember_furniture_instances WHERE world_key = ? AND instance_id = ?",
+        )
+        .bind(&world_key)
+        .bind(instance_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("delete should succeed");
+
+        let after_delete = FurnitureManager::new(&world_root, &chunk_config);
+        assert!(
+            after_delete
+                .load_instances()
+                .await
+                .iter()
+                .all(|i| i.instance_id != instance_id),
+            "removal should also round-trip through mysql"
+        );
     }
 }
 // EMBER end

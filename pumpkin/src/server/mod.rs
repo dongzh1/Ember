@@ -544,8 +544,16 @@ impl Server {
                         .color_named(NamedColor::DarkGreen)
                         .to_pretty_console()
                 );
-                let level = into_level(dim.clone(), &config, path, seed, Some(pool), Some(budget));
-                let world = Arc::new(World::load(level.clone(), l_info, dim, registry, weak));
+                let (level, chunk_config) =
+                    into_level(dim.clone(), &config, path, seed, Some(pool), Some(budget));
+                let world = Arc::new(World::load(
+                    level.clone(),
+                    l_info,
+                    dim,
+                    registry,
+                    weak,
+                    &chunk_config,
+                ));
                 let portal: Arc<dyn WorldPortalExt> = Arc::new(WorldPortal(world.clone()));
                 level.world_portal.store(Arc::new(Some(portal)));
                 world
@@ -586,6 +594,10 @@ impl Server {
                 .furniture_manager
                 .load_runtime(&server.custom_item_manager)
                 .await;
+            // EMBER: only actually connects if this world's chunk backend
+            // is mysql (a no-op otherwise - file storage already loaded
+            // synchronously in `World::load`).
+            world.custom_block_manager.connect_mysql().await;
 
             let root = world.level.level_folder.root_folder.clone();
             if let Some(sidecar) = pumpkin_config::ember_world::EmberWorldConfig::load(&root) {
@@ -784,7 +796,7 @@ impl Server {
                 Arc::new(level_config.unwrap_or_else(|| server.advanced_config.world.clone()));
             let seed = l_info.load().world_gen_settings.seed;
 
-            let level = pumpkin_world::dimension::into_level(
+            let (level, chunk_config) = pumpkin_world::dimension::into_level(
                 dimension.clone(),
                 &config,
                 world_path,
@@ -792,7 +804,14 @@ impl Server {
                 Some(server.gen_pool.clone()),
                 Some(server.gen_budget.clone()), // EMBER
             );
-            let world: World = World::load(level.clone(), l_info, dimension, registry, weak);
+            let world: World = World::load(
+                level.clone(),
+                l_info,
+                dimension,
+                registry,
+                weak,
+                &chunk_config,
+            );
             let world = Arc::new(world);
             let portal: Arc<dyn WorldPortalExt> = Arc::new(WorldPortal(world.clone()));
             level.world_portal.store(Arc::new(Some(portal)));
@@ -812,6 +831,7 @@ impl Server {
             .furniture_manager
             .load_runtime(&self.custom_item_manager)
             .await;
+        world.custom_block_manager.connect_mysql().await;
 
         // Size-based policy: enforce the max border and prewarm small maps.
         if let Some((border, cap)) = runtime {
