@@ -233,17 +233,6 @@ pub struct Server {
     /// a custom `minecraft:item_model` component. See `custom_item::CustomItemManager`.
     pub custom_item_manager: Arc<custom_item::CustomItemManager>,
     // EMBER end
-    // EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
-    /// Custom furniture (`furniture/furniture.toml` + `instances.toml`):
-    /// packet-only, persisted, view-distance broadcast. See
-    /// `furniture::FurnitureManager`.
-    pub furniture_manager: Arc<furniture::FurnitureManager>,
-    // EMBER end
-    // EMBER start - custom blocks (resource-pack-driven, phase 4 of the CraftEngine portation)
-    /// Custom blocks (`blocks/blocks.toml` + `instances.toml`): real
-    /// blockstate-carrier blocks. See `custom_block::CustomBlockManager`.
-    pub custom_block_manager: Arc<custom_block::CustomBlockManager>,
-    // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
     /// Assigns unique IDs to containers.
@@ -460,13 +449,12 @@ impl Server {
         // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
         let custom_item_manager = Arc::new(custom_item::CustomItemManager::new());
         // EMBER end
-        // EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
-        let furniture_manager = Arc::new(furniture::FurnitureManager::new());
-        furniture_manager.load_runtime(&custom_item_manager).await;
-        // EMBER end
-        // EMBER start - custom blocks (resource-pack-driven, phase 4 of the CraftEngine portation)
-        let custom_block_manager = Arc::new(custom_block::CustomBlockManager::new());
-        // EMBER end
+        // EMBER: furniture/custom block *instance* storage moved to a
+        // per-world FurnitureManager/CustomBlockManager (see world::World),
+        // so their placed positions travel with a world's own folder
+        // instead of living in a server-level config folder. Only the
+        // shared, server-level pieces (item resolution, block/item type
+        // definitions read fresh per world) stay here.
 
         let server = Self {
             basic_config,
@@ -525,8 +513,6 @@ impl Server {
             shop_chat_capture,              // EMBER
             menu_manager,                   // EMBER
             custom_item_manager,            // EMBER
-            furniture_manager,              // EMBER
-            custom_block_manager,           // EMBER
         };
         let server = Arc::new(server);
 
@@ -588,6 +574,15 @@ impl Server {
         // configured border was silently storage/generation-only — enforced
         // against players in none of them, however-configured.
         for world in server.worlds.load().iter() {
+            // EMBER: finishes constructing this world's furniture -
+            // `World::load` can only load the persisted instance list
+            // synchronously; resolving each instance's visual needs the
+            // (server-level) `CustomItemManager`, only reachable here.
+            world
+                .furniture_manager
+                .load_runtime(&server.custom_item_manager)
+                .await;
+
             let root = world.level.level_folder.root_folder.clone();
             if let Some(sidecar) = pumpkin_config::ember_world::EmberWorldConfig::load(&root) {
                 let cap = sidecar.resident_region_cap();
@@ -796,6 +791,13 @@ impl Server {
         })
         .await
         .expect("World creation panicked");
+
+        // EMBER: finishes constructing this world's furniture - see the
+        // matching comment on the startup-world loop in `Server::new`.
+        world
+            .furniture_manager
+            .load_runtime(&self.custom_item_manager)
+            .await;
 
         // Size-based policy: enforce the max border and prewarm small maps.
         if let Some((border, cap)) = runtime {
@@ -1727,7 +1729,6 @@ impl Server {
 
         self.task_scheduler.tick(self).await;
         self.npc_manager.tick(self).await; // EMBER - packet-only NPC visibility
-        self.furniture_manager.tick(self).await; // EMBER - custom furniture visibility
 
         let mut handles = Vec::new();
         for world in self.worlds.load().iter() {
@@ -1742,6 +1743,12 @@ impl Server {
             let server = self.clone();
             handles.push(tokio::spawn(async move {
                 let _guard = TickingGuard(world.clone());
+                // EMBER: custom furniture visibility - per-world (unlike
+                // `npc_manager`, furniture instances live on their owning
+                // `World`, not a global manager), so this rides along with
+                // the same per-world spawned/panic-caught task as the rest
+                // of this world's own tick.
+                world.furniture_manager.tick(&world).await;
                 if let Err(e) = AssertUnwindSafe(world.tick(server)).catch_unwind().await {
                     error!("World tick task panicked: {e:?}");
                 }

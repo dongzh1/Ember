@@ -1,20 +1,26 @@
 // EMBER start: custom furniture (packet-only, view-distance broadcast)
 //
-// Furniture here is never a real world entity - same philosophy as
+// Furniture here is never a real world entity - similar in spirit to
 // `server::npc::NpcManager`: a placed furniture instance is a persisted
-// `FurnitureInstanceConfig` (`furniture/instances.toml`) plus a runtime-only
-// `RuntimeFurniture` (fake entity ids + the set of players it's currently
-// spawned for). Visibility is re-evaluated on an interval using the exact
-// same chunk/view-distance rule real entities use, mirroring
-// `NpcManager::tick` - the only structural difference from NPCs is the
-// rendering: an `item_display` (showing the held custom item's own model,
-// `render_mode = "item"`) or a `block_display` (showing a chosen vanilla
-// blockstate, `render_mode = "block"` - phase four's non-solid, no-core-
-// edits sibling to the real blockstate-carrier custom blocks), plus a
-// separate `interaction` hitbox for click-to-break, reusing the exact
+// `FurnitureInstanceConfig` (`<world folder>/furniture_instances.toml`)
+// plus a runtime-only `RuntimeFurniture` (fake entity ids + the set of
+// players it's currently spawned for). Visibility is re-evaluated on an
+// interval using the exact same chunk/view-distance rule real entities
+// use, mirroring `NpcManager::tick`. Unlike NPCs (one global manager
+// scanning every world by a `world: String` field), one `FurnitureManager`
+// is owned per loaded `World` (constructed in `World::load`, dropped with
+// it on unload) - the instance file lives inside the world's own folder so
+// it travels with it if that folder is copied to another server, the same
+// reasoning `World::portal_poi` already follows for its own per-world
+// index. The other structural difference from NPCs is the rendering: an
+// `item_display` (showing the held custom item's own model, `render_mode =
+// "item"`) or a `block_display` (showing a chosen vanilla blockstate,
+// `render_mode = "block"` - phase four's non-solid, no-core-edits sibling
+// to the real blockstate-carrier custom blocks), plus a separate
+// `interaction` hitbox for click-to-break, reusing the exact
 // metadata-writing technique from `server::menu::MenuManager`.
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use pumpkin_config::{
@@ -41,8 +47,8 @@ use uuid::Uuid;
 
 use crate::entity::{Entity, EntityBase};
 use crate::net::ClientPlatform;
-use crate::server::Server;
 use crate::server::custom_item::CustomItemManager;
+use crate::world::World;
 use crate::world::chunker::{get_view_distance, is_within_view_distance};
 
 /// Re-evaluate visibility every 10 ticks (0.5s) - same cadence as
@@ -85,7 +91,6 @@ struct RuntimeFurniture {
     hitbox_id: i32,
     fake_uuid: Uuid,
     hitbox_uuid: Uuid,
-    world: String,
     chunk_pos: Vector2<i32>,
     position: Vector3<f64>,
     furniture_id: String,
@@ -95,26 +100,28 @@ struct RuntimeFurniture {
 }
 
 pub struct FurnitureManager {
-    exec_dir: std::path::PathBuf,
+    world_root: PathBuf,
+    /// The configured furniture *types* - server-level (see module doc),
+    /// reloaded independently per world since it's tiny and read-only after
+    /// boot; not worth threading a shared handle through `World::load` for.
     types: RwLock<FurnitureListConfig>,
     instances: RwLock<FurnitureInstanceListConfig>,
     runtime: RwLock<Vec<RuntimeFurniture>>,
 }
 
-impl Default for FurnitureManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl FurnitureManager {
+    /// Loads this world's furniture instance list synchronously - safe to
+    /// call from `World::load` (not an `async fn`). `runtime` starts empty;
+    /// the caller must follow up with `load_runtime` once it can `.await`
+    /// (resolving each instance's visual needs the `CustomItemManager`,
+    /// which isn't available synchronously here).
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(world_root: &Path) -> Self {
         let exec_dir = std::env::current_dir().expect("Failed to get current directory");
         let types = FurnitureListConfig::load(&exec_dir);
-        let instance_list = FurnitureInstanceListConfig::load(&exec_dir);
+        let instance_list = FurnitureInstanceListConfig::load(world_root);
         Self {
-            exec_dir,
+            world_root: world_root.to_path_buf(),
             types: RwLock::new(types),
             instances: RwLock::new(instance_list),
             runtime: RwLock::new(Vec::new()),
@@ -169,7 +176,6 @@ impl FurnitureManager {
             hitbox_id: base + 1,
             fake_uuid: Uuid::new_v4(),
             hitbox_uuid: Uuid::new_v4(),
-            world: instance.world.clone(),
             chunk_pos: to_chunk_pos(&Vector2::new(
                 position.x.floor() as i32,
                 position.z.floor() as i32,
@@ -213,7 +219,6 @@ impl FurnitureManager {
         &self,
         custom_items: &CustomItemManager,
         furniture: &FurnitureConfig,
-        world: &str,
         position: Vector3<f64>,
         yaw: f32,
     ) {
@@ -221,7 +226,6 @@ impl FurnitureManager {
         let instance = FurnitureInstanceConfig {
             instance_id: Uuid::new_v4(),
             furniture_id: furniture.id.clone(),
-            world: world.to_string(),
             x: position.x,
             y: position.y,
             z: position.z,
@@ -235,7 +239,7 @@ impl FurnitureManager {
 
         let mut instances = self.instances.write().await;
         instances.instances.push(instance);
-        instances.save(&self.exec_dir);
+        instances.save(&self.world_root);
         drop(instances);
 
         self.runtime.write().await.push(state);
@@ -245,7 +249,7 @@ impl FurnitureManager {
     /// despawning it from current viewers and persisting the removal.
     /// Returns the furniture id (for a drop-the-item response) if one was
     /// removed.
-    pub async fn break_at(&self, server: &Arc<Server>, entity_id: i32) -> Option<String> {
+    pub async fn break_at(&self, world: &World, entity_id: i32) -> Option<String> {
         let mut runtime = self.runtime.write().await;
         let index = runtime.iter().position(|f| f.hitbox_id == entity_id)?;
         let removed = runtime.remove(index);
@@ -255,17 +259,10 @@ impl FurnitureManager {
         instances
             .instances
             .retain(|i| i.instance_id != removed.instance_id);
-        instances.save(&self.exec_dir);
+        instances.save(&self.world_root);
         drop(instances);
 
-        if !removed.visible_to.is_empty()
-            && let Some(world) = server
-                .worlds
-                .load()
-                .iter()
-                .find(|w| w.get_world_name() == removed.world)
-                .cloned()
-        {
+        if !removed.visible_to.is_empty() {
             let ids = [VarInt(removed.entity_id), VarInt(removed.hitbox_id)];
             for player in world.players.load().iter() {
                 if removed.visible_to.contains(&player.gameprofile.id)
@@ -280,10 +277,14 @@ impl FurnitureManager {
     }
 
     /// Re-evaluates visibility for every furniture instance against every
-    /// connected player, spawning/despawning per-viewer as they cross the
-    /// view-distance boundary - identical rule to `NpcManager::tick`.
-    /// Called once per game tick from `Server::tick_worlds`.
-    pub async fn tick(&self, server: &Arc<Server>) {
+    /// connected player in this world, spawning/despawning per-viewer as
+    /// they cross the view-distance boundary - identical rule to
+    /// `NpcManager::tick`. Called once per game tick from
+    /// `Server::tick_worlds`, once per loaded world.
+    pub async fn tick(&self, world: &World) {
+        let Some(server) = world.server.upgrade() else {
+            return;
+        };
         let tick_count = server.tick_count.load(Ordering::Relaxed);
         if tick_count % VISIBILITY_INTERVAL_TICKS != 0 {
             return;
@@ -294,40 +295,35 @@ impl FurnitureManager {
             return;
         }
 
-        for world in server.worlds.load().iter() {
-            let players = world.players.load();
-            for furniture in runtime
-                .iter_mut()
-                .filter(|f| f.world == world.get_world_name())
-            {
-                let mut in_range = HashSet::with_capacity(furniture.visible_to.len());
-                for player in players.iter() {
-                    let ClientPlatform::Java(client) = player.client.as_ref() else {
-                        continue;
-                    };
-                    let uuid = player.gameprofile.id;
-                    let center = player.get_entity().chunk_pos.load();
-                    let view_distance = get_view_distance(player).get() as i32;
-                    if !is_within_view_distance(furniture.chunk_pos, center, view_distance) {
-                        continue;
-                    }
-                    in_range.insert(uuid);
-                    if !furniture.visible_to.contains(&uuid) {
-                        Self::send_spawn(client, furniture);
-                    }
+        let players = world.players.load();
+        for furniture in runtime.iter_mut() {
+            let mut in_range = HashSet::with_capacity(furniture.visible_to.len());
+            for player in players.iter() {
+                let ClientPlatform::Java(client) = player.client.as_ref() else {
+                    continue;
+                };
+                let uuid = player.gameprofile.id;
+                let center = player.get_entity().chunk_pos.load();
+                let view_distance = get_view_distance(player).get() as i32;
+                if !is_within_view_distance(furniture.chunk_pos, center, view_distance) {
+                    continue;
                 }
-                for player in players.iter() {
-                    let uuid = player.gameprofile.id;
-                    if furniture.visible_to.contains(&uuid)
-                        && !in_range.contains(&uuid)
-                        && let ClientPlatform::Java(client) = player.client.as_ref()
-                    {
-                        let ids = [VarInt(furniture.entity_id), VarInt(furniture.hitbox_id)];
-                        client.try_enqueue_packet(&CRemoveEntities::new(&ids));
-                    }
+                in_range.insert(uuid);
+                if !furniture.visible_to.contains(&uuid) {
+                    Self::send_spawn(client, furniture);
                 }
-                furniture.visible_to = in_range;
             }
+            for player in players.iter() {
+                let uuid = player.gameprofile.id;
+                if furniture.visible_to.contains(&uuid)
+                    && !in_range.contains(&uuid)
+                    && let ClientPlatform::Java(client) = player.client.as_ref()
+                {
+                    let ids = [VarInt(furniture.entity_id), VarInt(furniture.hitbox_id)];
+                    client.try_enqueue_packet(&CRemoveEntities::new(&ids));
+                }
+            }
+            furniture.visible_to = in_range;
         }
     }
 

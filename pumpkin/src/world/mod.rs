@@ -224,6 +224,13 @@ pub struct World {
     /// Block entities indexed by chunk, so ticking only visits the currently
     /// active chunks instead of scanning every loaded block entity each tick.
     pub block_entities: DashMap<Vector2<i32>, FxHashMap<BlockPos, Arc<dyn BlockEntity>>>,
+    // EMBER start - furniture/custom blocks store their placed instances in
+    // this world's own folder (not a server-level config folder) so they
+    // travel with it if the folder is copied to another server - same
+    // per-world-index reasoning as `portal_poi` above.
+    pub furniture_manager: crate::server::furniture::FurnitureManager,
+    pub custom_block_manager: crate::server::custom_block::CustomBlockManager,
+    // EMBER end
     // EMBER start - tick soft-budget isolation
     /// `true` while a tick task for this world is in flight. Guards against
     /// `tick_worlds` spawning a second overlapping tick for the same world
@@ -301,6 +308,17 @@ impl World {
         let portal_poi = portal::PortalPoiStorage::new(level.level_folder.poi_folder.clone());
         let dragon_fight = (dimension.minecraft_name == Dimension::THE_END.minecraft_name)
             .then(|| Mutex::new(dragon_fight::DragonFight::new()));
+        // EMBER start - per-world furniture/custom block instance storage
+        //
+        // Both load synchronously here (this fn isn't async); furniture's
+        // runtime visuals need an async `CustomItemManager` lookup it can't
+        // do yet, so callers must follow up with `furniture_manager.
+        // load_runtime(...).await` once the world is fully constructed.
+        let world_root = level.level_folder.root_folder.clone();
+        let furniture_manager = crate::server::furniture::FurnitureManager::new(&world_root);
+        let custom_block_manager =
+            crate::server::custom_block::CustomBlockManager::new(&world_root);
+        // EMBER end
         Self {
             uuid: Uuid::new_v4(),
             level,
@@ -326,6 +344,10 @@ impl World {
             // EMBER start - tick soft-budget isolation
             ticking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ticking_notify: Arc::new(tokio::sync::Notify::new()),
+            // EMBER end
+            // EMBER start - per-world furniture/custom block instance storage
+            furniture_manager,
+            custom_block_manager,
             // EMBER end
         }
     }
@@ -4575,26 +4597,12 @@ impl World {
             // configured custom item back instead of the carrier's own
             // vanilla loot table - every position with no recorded custom
             // block falls through to the exact drop logic below, unchanged.
-            let ember_server = self.server.upgrade();
-            let ember_custom_block_id = if let Some(server) = &ember_server {
-                server
-                    .custom_block_manager
-                    .get_at(self.get_world_name(), position)
-                    .await
-            } else {
-                None
-            };
+            let ember_custom_block_id = self.custom_block_manager.get_at(position).await;
             if let Some(custom_block_id) = &ember_custom_block_id {
-                let server = ember_server.as_ref().unwrap();
-                server
-                    .custom_block_manager
-                    .remove(self.get_world_name(), position)
-                    .await;
+                self.custom_block_manager.remove(position).await;
                 if !flags.contains(BlockFlags::SKIP_DROPS)
-                    && let Some(cb) = server
-                        .custom_block_manager
-                        .find_by_id(custom_block_id)
-                        .await
+                    && let Some(server) = self.server.upgrade()
+                    && let Some(cb) = self.custom_block_manager.find_by_id(custom_block_id).await
                     && let Some(stack) = server
                         .custom_item_manager
                         .build_stack(&cb.custom_item_id, 1)

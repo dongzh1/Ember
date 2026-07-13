@@ -293,8 +293,10 @@ clients just see the plain base item, nothing breaks).
 Right-click a block face while holding a custom item configured as furniture (`furniture/
 furniture.toml`: `id`, `custom_item_id`, hitbox size, scale) to place it — an `item_display`
 showing that item's model plus an invisible `interaction` hitbox, packet-only and persisted
-(`furniture/instances.toml`), broadcast to everyone in view distance the same way packet-only
-NPCs are. Attack it to break it and get the item back. Third phase of the CraftEngine port.
+inside the world's own folder (`furniture_instances.toml`, so placements travel with the world
+if it's copied to another server), broadcast to everyone in view distance the same way
+packet-only NPCs are. Attack it to break it and get the item back. Third phase of the
+CraftEngine port.
 
 ### Custom blocks
 
@@ -306,7 +308,8 @@ Two ways to skin a block, fourth and final phase of the CraftEngine port:
   always facing the camera.
 - **Vanilla block carriers** (`blocks/blocks.toml`) — binds a custom block id to a real
   vanilla "carrier" block (currently `note_block` only). Right-clicking with the bound custom
-  item places the carrier's default state and records the position in `blocks/instances.toml`;
+  item places the carrier's default state and records the position in the world's own
+  `custom_block_instances.toml` (same travels-with-the-world reasoning as furniture above);
   breaking it drops the custom item instead of the carrier's vanilla loot, and the carrier's
   own interactive behavior (e.g. note block tuning) is swallowed wherever a custom block is
   recorded. Every other position keeps its exact vanilla behavior — reviewed carefully for a
@@ -596,8 +599,9 @@ URL，老用法完全不受影响。是移植 [CraftEngine](https://github.com/X
 
 手持一个配置成家具的自定义物品（`furniture/furniture.toml`：`id`、`custom_item_id`、判定箱大小、
 缩放），右键点方块面即可放置——一个显示该物品模型的 `item_display` 加一个隐形的 `interaction`
-点击判定箱，纯发包、持久化（`furniture/instances.toml`），广播给视距内所有人，和发包 NPC 系统
-同一套可见性判定。攻击它即可破坏并拿回物品。CraftEngine 移植的第三阶段。
+点击判定箱，纯发包、持久化在世界自己的文件夹里（`furniture_instances.toml`，世界文件夹复制到
+其他服务器时摆放记录也会跟着走），广播给视距内所有人，和发包 NPC 系统同一套可见性判定。攻击它
+即可破坏并拿回物品。CraftEngine 移植的第三阶段。
 
 ### 自定义方块
 
@@ -608,9 +612,10 @@ URL，老用法完全不受影响。是移植 [CraftEngine](https://github.com/X
   始终朝向摄像机。
 - **原版方块载体**（`blocks/blocks.toml`）——把一个自定义方块 id 绑定到一个真实的原版"载体"方块
   （目前只支持 `note_block`）。右键放置对应的自定义物品会在目标位置放上载体的默认状态并记录到
-  `blocks/instances.toml`；破坏时掉落自定义物品而不是载体的原版战利品，载体自己的交互行为（比如
-  音符盒调音）在记录了自定义方块的位置会被吞掉。其余所有位置的原版方块行为完全不变——逐字审查过
-  "没有记录时是否严丝合缝落回原代码"，但没有真实客户端实测验证。
+  世界自己的 `custom_block_instances.toml`（和家具同样的"跟着世界文件夹走"考虑）；破坏时掉落
+  自定义物品而不是载体的原版战利品，载体自己的交互行为（比如音符盒调音）在记录了自定义方块的
+  位置会被吞掉。其余所有位置的原版方块行为完全不变——逐字审查过"没有记录时是否严丝合缝落回原
+  代码"，但没有真实客户端实测验证。
 
 ## 继承的 Pumpkin 能力
 

@@ -1814,9 +1814,9 @@ impl JavaClient {
             // Furniture hitboxes are also never real entities. Breaking one
             // removes it (from the persisted store and every current
             // viewer) and drops the underlying custom item back.
-            if let Some(furniture_id) = server.furniture_manager.break_at(server, entity_id.0).await
+            if let Some(furniture_id) = world.furniture_manager.break_at(&world, entity_id.0).await
             {
-                if let Some(furniture) = server.furniture_manager.find_by_id(&furniture_id).await
+                if let Some(furniture) = world.furniture_manager.find_by_id(&furniture_id).await
                     && let Some(stack) = server
                         .custom_item_manager
                         .build_stack(&furniture.custom_item_id, 1)
@@ -2023,9 +2023,9 @@ impl JavaClient {
             //
             // Same as the `handle_attack` copy of this check - furniture
             // hitboxes are never real entities either.
-            if let Some(furniture_id) = server.furniture_manager.break_at(server, entity_id.0).await
+            if let Some(furniture_id) = world.furniture_manager.break_at(&world, entity_id.0).await
             {
-                if let Some(furniture) = server.furniture_manager.find_by_id(&furniture_id).await
+                if let Some(furniture) = world.furniture_manager.find_by_id(&furniture_id).await
                     && let Some(stack) = server
                         .custom_item_manager
                         .build_stack(&furniture.custom_item_id, 1)
@@ -2433,7 +2433,7 @@ impl JavaClient {
             let offset = face.to_offset();
             let target_pos = BlockPos(position.0.add_raw(offset.x, offset.y, offset.z));
 
-            if let Some(furniture) = server
+            if let Some(furniture) = world
                 .furniture_manager
                 .find_by_custom_item(&custom_item_id)
                 .await
@@ -2443,12 +2443,11 @@ impl JavaClient {
                     f64::from(target_pos.0.y),
                     f64::from(target_pos.0.z) + 0.5,
                 );
-                server
+                world
                     .furniture_manager
                     .place(
                         &server.custom_item_manager,
                         &furniture,
-                        world.get_world_name(),
                         spawn_pos,
                         entity.yaw.load(),
                     )
@@ -2460,7 +2459,7 @@ impl JavaClient {
                 return Ok(());
             }
 
-            if let Some(custom_block) = server
+            if let Some(custom_block) = world
                 .custom_block_manager
                 .find_by_custom_item(&custom_item_id)
                 .await
@@ -2474,9 +2473,9 @@ impl JavaClient {
                         BlockFlags::NOTIFY_ALL,
                     )
                     .await;
-                server
+                world
                     .custom_block_manager
-                    .place(world.get_world_name(), target_pos, &custom_block.id)
+                    .place(target_pos, &custom_block.id)
                     .await;
                 if player.gamemode.load() != GameMode::Creative {
                     item.lock().await.decrement(1);

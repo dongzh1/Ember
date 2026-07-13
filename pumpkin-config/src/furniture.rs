@@ -71,13 +71,19 @@ const fn default_scale() -> f64 {
     1.0
 }
 
-/// Placed furniture instances, `furniture/instances.toml`.
+/// Placed furniture instances for one world, `<world folder>/furniture_instances.toml`.
+///
+/// Lives inside the owning world's own folder (not a server-level config
+/// folder) so a placed instance travels with the world if its folder is
+/// copied to another server - a position is meaningless without the world
+/// it's in anyway. `FurnitureConfig`/`FurnitureListConfig` (what a furniture
+/// *type* is) stays server-level: it has no per-world information (just a
+/// `custom_item_id` and a block name looked up in the global block
+/// registry), the same way a resource pack is a server-wide install rather
+/// than something tied to any one world.
 ///
 /// Server-managed runtime state (placements/breaks mutate this and
 /// re-save), not something an admin hand-authors like `furniture.toml`.
-/// Kept in its own file for the same reason `npc/npcs.json` is separate
-/// from any settings file: a frequently-mutated list shouldn't share a
-/// file with static settings.
 #[derive(Deserialize, Serialize, Default, Clone)]
 pub struct FurnitureInstanceListConfig {
     pub instances: Vec<FurnitureInstanceConfig>,
@@ -85,7 +91,7 @@ pub struct FurnitureInstanceListConfig {
 
 impl LoadConfiguration for FurnitureInstanceListConfig {
     fn get_path() -> &'static Path {
-        Path::new("furniture/instances.toml")
+        Path::new("furniture_instances.toml")
     }
 
     fn validate(&self) {}
@@ -98,7 +104,6 @@ pub struct FurnitureInstanceConfig {
     /// without matching on (possibly-colliding) position values.
     pub instance_id: uuid::Uuid,
     pub furniture_id: String,
-    pub world: String,
     pub x: f64,
     pub y: f64,
     pub z: f64,
