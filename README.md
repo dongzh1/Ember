@@ -263,6 +263,17 @@ way riding any other entity does; closing it unmounts them with no position glit
 that expect a player sender just work without any changes). Ships with one default menu:
 return to spawn, return to your own home world, and open the global market.
 
+### Resource pack builder
+
+Off by default; enable in `resourcepack/resourcepack.toml`. Builds a resource pack from
+`resourcepack/source/` (a normal `pack.mcmeta` + `assets/...` folder) and gets it in front of
+Java clients — either via a small built-in HTTP server (`hosting = "self_hosted"`) or by
+uploading it to any S3-compatible bucket (`hosting = "s3"` — real AWS S3, Cloudflare R2, MinIO,
+...). Either way it just computes the resulting `url`/`sha1` and feeds them into the existing
+(already-working) resource-pack push — manually configuring an externally-hosted pack the old
+way still works unchanged if you'd rather do that. First phase of a larger plan to port select
+features from [CraftEngine](https://github.com/Xiao-MoMi/craft-engine) (custom items next).
+
 ## Inherited Pumpkin Features
 
 Everything from upstream Pumpkin — Ember syncs weekly and keeps full compatibility:
@@ -519,6 +530,16 @@ url = "mysql://user:pass@localhost:3306/ember"
 自定义：标题、锚点距离、以及任意数量的按钮（图标、文字标签、点击后执行的指令——以点击者
 自己的身份执行，所以 `/spawn`/`/home` 这类依赖"指令发起者就是目标玩家"的指令不用改代码
 就能直接用）。默认自带一个菜单：回到主城、回到自己的世界、打开全球市场。
+
+### 资源包生成器
+
+默认关闭，在 `resourcepack/resourcepack.toml` 开启。从 `resourcepack/source/`（一个普通的
+`pack.mcmeta`+`assets/...` 目录）生成资源包，然后想办法送到 Java 客户端手上——要么起一个内置
+的小 HTTP 服务器自托管（`hosting = "self_hosted"`），要么上传到任意 S3 兼容存储
+（`hosting = "s3"`——真实 AWS S3、Cloudflare R2、MinIO 都行）。两种方式最终都只是算出
+`url`/`sha1` 塞进已有的（本来就能正常工作的）资源包推送逻辑——想继续手动配一个外部托管的
+URL，老用法完全不受影响。是移植 [CraftEngine](https://github.com/Xiao-MoMi/craft-engine)
+部分功能这个更大计划的第一阶段（下一步是自定义物品）。
 
 ## 继承的 Pumpkin 能力
 

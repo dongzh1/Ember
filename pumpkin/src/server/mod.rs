@@ -79,6 +79,9 @@ pub mod shop;
 // EMBER start - floating packet-only menu system
 pub mod menu;
 // EMBER end
+// EMBER start - resource pack builder (self-generate + self-host/S3)
+mod resourcepack_builder;
+// EMBER end
 pub mod recipe;
 pub mod scheduler;
 pub mod seasonal_events;
@@ -255,10 +258,23 @@ impl Server {
     #[must_use]
     pub async fn new(
         basic_config: BasicConfiguration,
-        advanced_config: AdvancedConfiguration,
+        mut advanced_config: AdvancedConfiguration,
         ember_config: EmberConfiguration,
         vanilla_data: VanillaData,
     ) -> Arc<Self> {
+        // EMBER start - resource pack builder (self-generate + self-host/S3)
+        // Overwrites `resource_pack.java`'s url/sha1/enabled in place, before
+        // anything below reads them - the existing send/response logic in
+        // `net/java/{login,config}.rs` is otherwise completely unchanged.
+        if let Some((url, sha1)) = resourcepack_builder::init(
+            &std::env::current_dir().expect("Failed to get current directory"),
+        ) {
+            advanced_config.resource_pack.java.enabled = true;
+            advanced_config.resource_pack.java.url = url;
+            advanced_config.resource_pack.java.sha1 = sha1;
+        }
+        // EMBER end
+
         let permission_registry = Arc::new(RwLock::new(PermissionRegistry::new()));
         // First register the default commands. After that, plugins can put in their own.
         let command_dispatcher =

@@ -118,6 +118,13 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 indexmap.workspace = true
 
+# EMBER start - resource pack builder (self-generate + self-host/S3)
+zip.workspace = true
+tiny_http.workspace = true
+aws-sigv4.workspace = true
+aws-credential-types.workspace = true
+# EMBER end
+
 [dev-dependencies]
 tempfile.workspace = true
 

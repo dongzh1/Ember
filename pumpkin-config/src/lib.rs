@@ -48,6 +48,11 @@ pub use shop::{
 // EMBER start - floating packet-only menu system
 pub use menu::{MenuButton, MenuConfig, MenuListConfig};
 // EMBER end
+// EMBER start - resource pack builder (self-generate + self-host/S3)
+pub use resourcepack_builder::{
+    HostingMode, ResourcePackBuilderConfig, S3Config, SelfHostedConfig,
+};
+// EMBER end
 
 mod commands;
 
@@ -77,6 +82,9 @@ mod shop;
 // EMBER end
 // EMBER start - floating packet-only menu system
 mod menu;
+// EMBER end
+// EMBER start - resource pack builder (self-generate + self-host/S3)
+mod resourcepack_builder;
 // EMBER end
 mod player_data;
 mod pvp;
