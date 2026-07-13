@@ -76,6 +76,9 @@ pub mod tpa;
 // EMBER start - built-in shop/bank/market/lottery system
 pub mod shop;
 // EMBER end
+// EMBER start - floating packet-only menu system
+pub mod menu;
+// EMBER end
 pub mod recipe;
 pub mod scheduler;
 pub mod seasonal_events;
@@ -94,6 +97,9 @@ pub use home::HomeManager;
 // EMBER end
 // EMBER start - /tpa teleport request system
 pub use tpa::TpaManager;
+// EMBER end
+// EMBER start - floating packet-only menu system
+pub use menu::MenuManager;
 // EMBER end
 // EMBER start - offline-mode login verification
 pub use auth::LoginManager;
@@ -195,6 +201,11 @@ pub struct Server {
     /// One-shot chat input capture shared by the bank's "custom amount" and
     /// the market's "search" - see `shop::chat_capture` doc comment.
     pub shop_chat_capture: Arc<shop::chat_capture::ChatCaptureManager>,
+    // EMBER end
+    // EMBER start - floating packet-only menu system
+    /// Floating packet-only menus (`menu/menus.toml`): never real world
+    /// entities, opened per-player via `/menu`. See `menu::MenuManager`.
+    pub menu_manager: Arc<menu::MenuManager>,
     // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
@@ -393,6 +404,9 @@ impl Server {
         let lottery_manager = Arc::new(shop::lottery::LotteryManager::new(shop_pool));
         let shop_chat_capture = Arc::new(shop::chat_capture::ChatCaptureManager::new());
         // EMBER end
+        // EMBER start - floating packet-only menu system
+        let menu_manager = Arc::new(menu::MenuManager::new());
+        // EMBER end
 
         let server = Self {
             basic_config,
@@ -449,6 +463,7 @@ impl Server {
             market_manager,                 // EMBER
             lottery_manager,                // EMBER
             shop_chat_capture,              // EMBER
+            menu_manager,                   // EMBER
         };
         let server = Arc::new(server);
 

@@ -80,6 +80,9 @@ mod lottery;
 mod market;
 mod shop;
 // EMBER end
+// EMBER start - floating packet-only menu system
+mod menu;
+// EMBER end
 mod worldborder;
 
 #[must_use]
@@ -202,6 +205,9 @@ pub async fn default_dispatcher(
     bank::register(&mut dispatcher, registry);
     market::register(&mut dispatcher, registry);
     lottery::register(&mut dispatcher, registry);
+    // EMBER end
+    // EMBER start - floating packet-only menu system
+    menu::register(&mut dispatcher, registry);
     // EMBER end
     dispatcher
 }

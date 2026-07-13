@@ -45,6 +45,9 @@ pub use shop::{
     ShopSystemConfig,
 };
 // EMBER end
+// EMBER start - floating packet-only menu system
+pub use menu::{MenuButton, MenuConfig, MenuListConfig};
+// EMBER end
 
 mod commands;
 
@@ -71,6 +74,9 @@ mod home;
 // EMBER end
 // EMBER start - built-in shop/bank/market/lottery system
 mod shop;
+// EMBER end
+// EMBER start - floating packet-only menu system
+mod menu;
 // EMBER end
 mod player_data;
 mod pvp;

@@ -247,6 +247,22 @@ planned follow-up. Bank interest tiers can be gated by permission (`shop/shop.to
 `[bank] tiers`). Market listings never expire and are visible regardless of the seller's
 online status; buying is safe even across multiple Ember instances sharing one database.
 
+### Floating menus
+
+```
+/menu [name]                     # open a floating button menu (re-opening the same one closes it)
+```
+
+A HUD-style menu made entirely of packet-only display entities (`item_display`/`text_display`
+icons and labels, plus an invisible `interaction` hitbox per button) — never real world
+entities, visible only to the player who opened it. Opening one mounts the player on an
+invisible vehicle spawned at their own position, freezing movement (not the camera) the same
+way riding any other entity does; closing it unmounts them with no position glitch. Every menu
+(`menu/menus.toml`) is fully configurable — title, anchor distance, and any number of buttons
+(icon, label, and a command that runs as the clicking player, so commands like `/spawn`/`/home`
+that expect a player sender just work without any changes). Ships with one default menu:
+return to spawn, return to your own home world, and open the global market.
+
 ## Inherited Pumpkin Features
 
 Everything from upstream Pumpkin — Ember syncs weekly and keeps full compatibility:
@@ -489,6 +505,20 @@ url = "mysql://user:pass@localhost:3306/ember"
 市场/抽奖目前是指令界面，GUI 是后续计划。银行利率可以按权限分档（`shop/shop.toml` 的
 `[bank] tiers`）。市场挂单永不过期，不管卖家是否在线都能查到；就算多个 Ember 实例共享同一
 个数据库，购买也是安全的（原子抢单，不会出现两边都买到同一件商品）。
+
+### 悬浮菜单
+
+```
+/menu [名字]                    # 打开一个悬浮按钮菜单(再次打开同一个则关闭)
+```
+
+一个纯发包展示实体拼成的 HUD 式菜单（`item_display`/`text_display` 图标和文字标签，每个
+按钮再叠一个隐形的 `interaction` 点击判定箱）——不是真实世界实体，只有打开菜单的玩家自己
+能看见。打开时会让玩家骑乘一个刷在自己脚下位置的隐形载具，冻结移动（不冻结视角），和骑乘
+任何其他实体的效果一样；关闭时解除挂载不会有画面回跳。每个菜单（`menu/menus.toml`）都能
+自定义：标题、锚点距离、以及任意数量的按钮（图标、文字标签、点击后执行的指令——以点击者
+自己的身份执行，所以 `/spawn`/`/home` 这类依赖"指令发起者就是目标玩家"的指令不用改代码
+就能直接用）。默认自带一个菜单：回到主城、回到自己的世界、打开全球市场。
 
 ## 继承的 Pumpkin 能力
 

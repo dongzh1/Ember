@@ -21,6 +21,7 @@ use crate::error::PumpkinError;
 use crate::log_at_level;
 use crate::net::PlayerConfig;
 use crate::net::java::JavaClient;
+use crate::plugin::menu::menu_click::MenuClickEvent;
 use crate::plugin::npc::npc_click::NpcClickEvent;
 use crate::plugin::player::changed_main_hand::PlayerChangedMainHandEvent;
 use crate::plugin::player::fish::{PlayerFishEvent, PlayerFishState};
@@ -1775,6 +1776,38 @@ impl JavaClient {
                 return;
             }
             // EMBER end
+            // EMBER start - floating packet-only menu click handling
+            //
+            // Floating menu buttons are also never real entities, so a
+            // left-click ("attack") on one lands here too, same as NPCs.
+            // The menu is always closed before the event fires - cancelling
+            // only prevents the button's command from running.
+            if let Some((menu_name, command)) = server
+                .menu_manager
+                .click_command(player.gameprofile.id, entity_id.0)
+                .await
+            {
+                server.menu_manager.close(player).await;
+                send_cancellable! {{
+                    server;
+                    MenuClickEvent::new(Arc::clone(player), menu_name, Some(command));
+
+                    'after: {
+                        if let Some(command) = &event.command {
+                            let command = command.replace("%player%", &player.gameprofile.name);
+                            let source = player.get_command_source(server).await;
+                            server
+                                .command_dispatcher
+                                .read()
+                                .await
+                                .handle_command(&source, &command)
+                                .await;
+                        }
+                    }
+                }}
+                return;
+            }
+            // EMBER end
             self.kick(TextComponent::translate_cross(
                 translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED,
                 translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED,
@@ -1816,6 +1849,11 @@ impl JavaClient {
         let player_entity = &player.get_entity();
         if player_entity.is_sneaking() != sneaking {
             player_entity.set_sneaking(sneaking).await;
+            // EMBER: sneaking is the one input still available while frozen
+            // in a floating menu, so it doubles as a "close" gesture.
+            if sneaking {
+                server.menu_manager.close(player).await;
+            }
         }
         let Ok(action) = ActionType::try_from(interact.r#type.0) else {
             self.kick(TextComponent::text("Invalid action type")).await;
@@ -1917,6 +1955,36 @@ impl JavaClient {
                             let source = crate::command::CommandSender::Console
                                 .into_source(server)
                                 .await;
+                            server
+                                .command_dispatcher
+                                .read()
+                                .await
+                                .handle_command(&source, &command)
+                                .await;
+                        }
+                    }
+                }}
+                return;
+            }
+            // EMBER end
+            // EMBER start - floating packet-only menu click handling
+            //
+            // Same as the `handle_attack` copy of this check - floating
+            // menu buttons are never real entities either.
+            if let Some((menu_name, command)) = server
+                .menu_manager
+                .click_command(player.gameprofile.id, entity_id.0)
+                .await
+            {
+                server.menu_manager.close(player).await;
+                send_cancellable! {{
+                    server;
+                    MenuClickEvent::new(Arc::clone(player), menu_name, Some(command));
+
+                    'after: {
+                        if let Some(command) = &event.command {
+                            let command = command.replace("%player%", &player.gameprofile.name);
+                            let source = player.get_command_source(server).await;
                             server
                                 .command_dispatcher
                                 .read()
