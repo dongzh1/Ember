@@ -43,7 +43,7 @@ use crate::server::{Server, seasonal_events};
 use crate::world::{World, chunker};
 use pumpkin_data::block_properties::{BlockProperties, CommandBlockLikeProperties};
 use pumpkin_data::data_component_impl::{
-    BlocksAttacksImpl, ConsumableImpl, EquipmentSlot, EquippableImpl, FoodImpl,
+    BlocksAttacksImpl, ConsumableImpl, EquipmentSlot, EquippableImpl, FoodImpl, ItemModelImpl,
 };
 use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
@@ -1715,6 +1715,7 @@ impl JavaClient {
         }
     }
 
+    #[expect(clippy::too_many_lines)]
     pub async fn handle_attack(&self, player: &Arc<Player>, attack: SAttack, server: &Arc<Server>) {
         if !player.has_client_loaded() {
             return;
@@ -1805,6 +1806,27 @@ impl JavaClient {
                         }
                     }
                 }}
+                return;
+            }
+            // EMBER end
+            // EMBER start - custom furniture breaking
+            //
+            // Furniture hitboxes are also never real entities. Breaking one
+            // removes it (from the persisted store and every current
+            // viewer) and drops the underlying custom item back.
+            if let Some(furniture_id) = server.furniture_manager.break_at(server, entity_id.0).await
+            {
+                if let Some(furniture) = server.furniture_manager.find_by_id(&furniture_id).await
+                    && let Some(stack) = server
+                        .custom_item_manager
+                        .build_stack(&furniture.custom_item_id, 1)
+                        .await
+                {
+                    player
+                        .inventory
+                        .offer_or_drop_stack(stack, player.as_ref())
+                        .await;
+                }
                 return;
             }
             // EMBER end
@@ -1994,6 +2016,26 @@ impl JavaClient {
                         }
                     }
                 }}
+                return;
+            }
+            // EMBER end
+            // EMBER start - custom furniture breaking
+            //
+            // Same as the `handle_attack` copy of this check - furniture
+            // hitboxes are never real entities either.
+            if let Some(furniture_id) = server.furniture_manager.break_at(server, entity_id.0).await
+            {
+                if let Some(furniture) = server.furniture_manager.find_by_id(&furniture_id).await
+                    && let Some(stack) = server
+                        .custom_item_manager
+                        .build_stack(&furniture.custom_item_id, 1)
+                        .await
+                {
+                    player
+                        .inventory
+                        .offer_or_drop_stack(stack, player.as_ref())
+                        .await;
+                }
                 return;
             }
             // EMBER end
@@ -2370,6 +2412,48 @@ impl JavaClient {
         let entity = &player.get_entity();
         let world = entity.world.load_full();
         let block = world.get_block(&position);
+
+        // EMBER start - custom furniture placement
+        //
+        // Right-clicking a block face while holding a custom item that's
+        // configured as furniture places it instead of running normal
+        // block/item-use logic - checked (and, on a match, handled and
+        // returned) before any vanilla interaction/placement code runs.
+        if let Some(model_id) = item
+            .lock()
+            .await
+            .get_data_component::<ItemModelImpl>()
+            .map(|m| m.id.to_string())
+            && let Some(custom_item_id) =
+                server.custom_item_manager.find_id_by_model(&model_id).await
+            && let Some(furniture) = server
+                .furniture_manager
+                .find_by_custom_item(&custom_item_id)
+                .await
+        {
+            let offset = face.to_offset();
+            let spawn_pos = Vector3::new(
+                f64::from(position.0.x + offset.x) + 0.5,
+                f64::from(position.0.y + offset.y),
+                f64::from(position.0.z + offset.z) + 0.5,
+            );
+            server
+                .furniture_manager
+                .place(
+                    &server.custom_item_manager,
+                    &furniture,
+                    world.get_world_name(),
+                    spawn_pos,
+                    entity.yaw.load(),
+                )
+                .await;
+            if player.gamemode.load() != GameMode::Creative {
+                item.lock().await.decrement(1);
+            }
+            player.swing_hand(hand, true).await;
+            return Ok(());
+        }
+        // EMBER end
 
         let event = PlayerInteractEvent::new(
             player,

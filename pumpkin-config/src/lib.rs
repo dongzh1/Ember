@@ -56,6 +56,11 @@ pub use resourcepack_builder::{
 // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
 pub use custom_item::{CustomItemConfig, CustomItemListConfig};
 // EMBER end
+// EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
+pub use furniture::{
+    FurnitureConfig, FurnitureInstanceConfig, FurnitureInstanceListConfig, FurnitureListConfig,
+};
+// EMBER end
 
 mod commands;
 
@@ -91,6 +96,9 @@ mod resourcepack_builder;
 // EMBER end
 // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
 mod custom_item;
+// EMBER end
+// EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
+mod furniture;
 // EMBER end
 mod player_data;
 mod pvp;
@@ -465,4 +473,31 @@ pub trait LoadConfiguration {
 
     /// Validates the configuration after loading or merging.
     fn validate(&self);
+
+    // EMBER start - explicit re-save for runtime-mutated TOML configs
+    /// Writes the current value back to disk at `config_dir`/`get_path()`.
+    ///
+    /// `load` already self-heals missing fields on its own, but that's a
+    /// one-shot merge at startup - this is for configs a manager keeps
+    /// mutating afterward at runtime (e.g. a placed/broken instance list),
+    /// which need to persist each change themselves.
+    fn save(&self, config_dir: &Path)
+    where
+        Self: Serialize,
+    {
+        let path = config_dir.join(Self::get_path());
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(err) = fs::write(&path, toml::to_string(self).unwrap()) {
+            warn!(
+                "Couldn't save config to {}. Reason: {}",
+                path.display(),
+                err
+            );
+        }
+    }
+    // EMBER end
 }

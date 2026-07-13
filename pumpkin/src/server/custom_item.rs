@@ -48,6 +48,19 @@ impl CustomItemManager {
             .collect()
     }
 
+    /// Identifies which configured custom item a held stack is, by matching
+    /// its `ItemModel` component's path against each entry's `model` - the
+    /// only marker a placed stack carries pointing back to its config
+    /// entry, since custom items aren't a real, separate item id.
+    pub async fn find_id_by_model(&self, model: &str) -> Option<String> {
+        let config = self.config.read().await;
+        config
+            .items
+            .iter()
+            .find(|i| i.model == model)
+            .map(|i| i.id.clone())
+    }
+
     /// Builds one stack of `count` (already clamped to the base item's max
     /// stack size by the caller - same split-across-stacks convention as
     /// vanilla `/give`). `None` if `id` isn't configured, or `base_item`
@@ -59,6 +72,19 @@ impl CustomItemManager {
             .iter()
             .find(|i| i.id.eq_ignore_ascii_case(id))?;
         Self::stack_from_entry(entry, count)
+    }
+
+    /// Looks up a configured custom item, without building a stack - used
+    /// by `server::furniture::FurnitureManager` to resolve which base item
+    /// and model a placed furniture instance should render as.
+    pub async fn resolve_visual(&self, id: &str) -> Option<(&'static Item, String)> {
+        let config = self.config.read().await;
+        let entry = config
+            .items
+            .iter()
+            .find(|i| i.id.eq_ignore_ascii_case(id))?;
+        let item = Item::from_registry_key(&entry.base_item.to_lowercase())?;
+        Some((item, entry.model.clone()))
     }
 
     fn stack_from_entry(entry: &CustomItemConfig, count: u8) -> Option<ItemStack> {

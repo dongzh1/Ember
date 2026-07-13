@@ -85,6 +85,9 @@ mod resourcepack_builder;
 // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
 pub mod custom_item;
 // EMBER end
+// EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
+pub mod furniture;
+// EMBER end
 pub mod recipe;
 pub mod scheduler;
 pub mod seasonal_events;
@@ -109,6 +112,9 @@ pub use menu::MenuManager;
 // EMBER end
 // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
 pub use custom_item::CustomItemManager;
+// EMBER end
+// EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
+pub use furniture::FurnitureManager;
 // EMBER end
 // EMBER start - offline-mode login verification
 pub use auth::LoginManager;
@@ -220,6 +226,12 @@ pub struct Server {
     /// Custom items (`resourcepack/items.toml`): vanilla base items wearing
     /// a custom `minecraft:item_model` component. See `custom_item::CustomItemManager`.
     pub custom_item_manager: Arc<custom_item::CustomItemManager>,
+    // EMBER end
+    // EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
+    /// Custom furniture (`furniture/furniture.toml` + `instances.toml`):
+    /// packet-only, persisted, view-distance broadcast. See
+    /// `furniture::FurnitureManager`.
+    pub furniture_manager: Arc<furniture::FurnitureManager>,
     // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
@@ -437,6 +449,10 @@ impl Server {
         // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
         let custom_item_manager = Arc::new(custom_item::CustomItemManager::new());
         // EMBER end
+        // EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
+        let furniture_manager = Arc::new(furniture::FurnitureManager::new());
+        furniture_manager.load_runtime(&custom_item_manager).await;
+        // EMBER end
 
         let server = Self {
             basic_config,
@@ -495,6 +511,7 @@ impl Server {
             shop_chat_capture,              // EMBER
             menu_manager,                   // EMBER
             custom_item_manager,            // EMBER
+            furniture_manager,              // EMBER
         };
         let server = Arc::new(server);
 
@@ -1695,6 +1712,7 @@ impl Server {
 
         self.task_scheduler.tick(self).await;
         self.npc_manager.tick(self).await; // EMBER - packet-only NPC visibility
+        self.furniture_manager.tick(self).await; // EMBER - custom furniture visibility
 
         let mut handles = Vec::new();
         for world in self.worlds.load().iter() {

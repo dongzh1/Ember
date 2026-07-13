@@ -288,6 +288,14 @@ optional `display_name`. Second phase of the CraftEngine port — targets the mo
 item model system only; the older numeric `custom_model_data` path isn't implemented (older
 clients just see the plain base item, nothing breaks).
 
+### Custom furniture
+
+Right-click a block face while holding a custom item configured as furniture (`furniture/
+furniture.toml`: `id`, `custom_item_id`, hitbox size, scale) to place it — an `item_display`
+showing that item's model plus an invisible `interaction` hitbox, packet-only and persisted
+(`furniture/instances.toml`), broadcast to everyone in view distance the same way packet-only
+NPCs are. Attack it to break it and get the item back. Third phase of the CraftEngine port.
+
 ## Inherited Pumpkin Features
 
 Everything from upstream Pumpkin — Ember syncs weekly and keeps full compatibility:
@@ -567,6 +575,13 @@ URL，老用法完全不受影响。是移植 [CraftEngine](https://github.com/X
 `resourcepack/items.toml` 配置：`id`、`base_item`、`model`，可选 `display_name`。CraftEngine
 移植的第二阶段——只做新协议（1.21.2+）的物品模型系统，老协议数值型 `custom_model_data` 没做
 （老客户端就看到原版物品本身，不会出问题）。
+
+### 自定义家具
+
+手持一个配置成家具的自定义物品（`furniture/furniture.toml`：`id`、`custom_item_id`、判定箱大小、
+缩放），右键点方块面即可放置——一个显示该物品模型的 `item_display` 加一个隐形的 `interaction`
+点击判定箱，纯发包、持久化（`furniture/instances.toml`），广播给视距内所有人，和发包 NPC 系统
+同一套可见性判定。攻击它即可破坏并拿回物品。CraftEngine 移植的第三阶段。
 
 ## 继承的 Pumpkin 能力
 
