@@ -584,6 +584,7 @@ impl Player {
         let server = world.server.upgrade().unwrap();
 
         let player_uuid = gameprofile.id;
+        let player_name = gameprofile.name.clone();
 
         let living_entity = LivingEntity::new(Entity::from_uuid(
             player_uuid,
@@ -680,16 +681,31 @@ impl Player {
             using_hand: AtomicCell::new(None),
             // Minecraft has no way to change the default permission level of new players.
             // Minecraft's default permission level is 0.
-            permission_lvl: server
-                .data
-                .operator_config
-                .read()
-                .await
-                .get_entry(&player_uuid)
-                .map_or(
-                    AtomicCell::new(server.advanced_config.commands.default_op_level),
-                    |op| AtomicCell::new(op.level),
-                ),
+            permission_lvl: {
+                let op_entry = server
+                    .data
+                    .operator_config
+                    .read()
+                    .await
+                    .get_entry(&player_uuid)
+                    .map(|op| op.level);
+                // EMBER: this used to be silent either way, which turned a
+                // mismatched/missing ops.json entry (wrong uuid, edited the
+                // file without restarting, wrong working directory...) into
+                // a permission-check investigation instead of a one-line log
+                // read - log which source actually won.
+                let resolved = op_entry.unwrap_or(server.advanced_config.commands.default_op_level);
+                if let Some(level) = op_entry {
+                    debug!(
+                        "{player_name} ({player_uuid}) matched an ops.json entry: permission level {level:?}"
+                    );
+                } else {
+                    debug!(
+                        "{player_name} ({player_uuid}) matched no ops.json entry, using default_op_level {resolved:?}"
+                    );
+                }
+                AtomicCell::new(resolved)
+            },
             inventory,
             ender_chest_inventory,
             experience_level: AtomicI32::new(0),
