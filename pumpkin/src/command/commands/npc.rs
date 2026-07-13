@@ -743,6 +743,47 @@ impl SuggestionProvider for EntityTypeSuggestionProvider {
     }
 }
 
+/// Suggests values for `extra`, whose meaning depends on the `entity_type`
+/// already typed earlier in the same command (see `NpcCreateAsExecutor`):
+/// online player names for skin-supporting types, or every known block name
+/// for `falling_block`. `item` has no candidate list — `pumpkin-data` has no
+/// "all items" slice or id-based scan the way `Block`/`EntityType` do (only
+/// a name-keyed match), so it's left as free text.
+struct NpcExtraSuggestionProvider;
+
+impl SuggestionProvider for NpcExtraSuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move {
+            let Some(entity_type) = StringArgumentType::get(context, ARG_ENTITY_TYPE)
+                .ok()
+                .and_then(|type_name| EntityType::from_name(&type_name.to_lowercase()))
+            else {
+                return builder.build();
+            };
+
+            if supports_skin(entity_type) {
+                let names = context
+                    .server()
+                    .get_all_players()
+                    .into_iter()
+                    .map(|p| p.gameprofile.name.clone());
+                builder.filter_and_suggest_iter(names).build()
+            } else if entity_type == &EntityType::FALLING_BLOCK {
+                let names = (0u16..4096).filter_map(|id| {
+                    pumpkin_data::BlockId::new(id).map(|id| Block::from_id(id).name)
+                });
+                builder.filter_and_suggest_iter(names).build()
+            } else {
+                builder.build()
+            }
+        })
+    }
+}
+
 // EMBER: a long but flat builder chain, not complex logic - splitting it
 // would just scatter one command tree across multiple functions.
 #[expect(clippy::too_many_lines)]
@@ -776,6 +817,7 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                                     .executes(NpcCreateAsExecutor { has_extra: false })
                                     .then(
                                         argument(ARG_EXTRA, StringArgumentType::SingleWord)
+                                            .suggests(NpcExtraSuggestionProvider)
                                             .executes(NpcCreateAsExecutor { has_extra: true }),
                                     ),
                             ),

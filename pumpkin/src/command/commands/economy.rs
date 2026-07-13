@@ -22,6 +22,8 @@ use crate::command::context::command_context::CommandContext;
 use crate::command::errors::command_syntax_error::CommandSyntaxError;
 use crate::command::node::dispatcher::CommandDispatcher;
 use crate::command::node::{CommandExecutor, CommandExecutorResult};
+use crate::command::suggestion::provider::{SuggestionProvider, SuggestionProviderResult};
+use crate::command::suggestion::suggestions::SuggestionsBuilder;
 use crate::server::economy::EconomyError;
 
 const DESCRIPTION_BALANCE: &str = "Check a player's currency balances.";
@@ -87,6 +89,22 @@ fn optional_currency<'a>(
     has_currency
         .then(|| StringArgumentType::get(context, ARG_CURRENCY))
         .transpose()
+}
+
+/// Suggests every currency id configured in `economy/economy.toml`.
+struct CurrencySuggestionProvider;
+
+impl SuggestionProvider for CurrencySuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move {
+            let currencies = context.server().economy_manager.currencies();
+            builder.filter_and_suggest_iter(currencies).build()
+        })
+    }
 }
 
 struct BalanceSelfExecutor;
@@ -272,6 +290,7 @@ fn register_pay(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                         })
                         .then(
                             argument(ARG_CURRENCY, StringArgumentType::SingleWord)
+                                .suggests(CurrencySuggestionProvider)
                                 .executes(PayExecutor { has_currency: true }),
                         ),
                 ),
@@ -298,12 +317,12 @@ fn register_eco(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                                 has_currency: false,
                             })
                             .then(
-                                argument(ARG_CURRENCY, StringArgumentType::SingleWord).executes(
-                                    EcoExecutor {
+                                argument(ARG_CURRENCY, StringArgumentType::SingleWord)
+                                    .suggests(CurrencySuggestionProvider)
+                                    .executes(EcoExecutor {
                                         op: EcoOp::Give,
                                         has_currency: true,
-                                    },
-                                ),
+                                    }),
                             ),
                     ),
                 ),
@@ -317,12 +336,12 @@ fn register_eco(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                                 has_currency: false,
                             })
                             .then(
-                                argument(ARG_CURRENCY, StringArgumentType::SingleWord).executes(
-                                    EcoExecutor {
+                                argument(ARG_CURRENCY, StringArgumentType::SingleWord)
+                                    .suggests(CurrencySuggestionProvider)
+                                    .executes(EcoExecutor {
                                         op: EcoOp::Take,
                                         has_currency: true,
-                                    },
-                                ),
+                                    }),
                             ),
                     ),
                 ),
@@ -336,12 +355,12 @@ fn register_eco(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                                 has_currency: false,
                             })
                             .then(
-                                argument(ARG_CURRENCY, StringArgumentType::SingleWord).executes(
-                                    EcoExecutor {
+                                argument(ARG_CURRENCY, StringArgumentType::SingleWord)
+                                    .suggests(CurrencySuggestionProvider)
+                                    .executes(EcoExecutor {
                                         op: EcoOp::Set,
                                         has_currency: true,
-                                    },
-                                ),
+                                    }),
                             ),
                     ),
                 ),
@@ -354,12 +373,12 @@ fn register_eco(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                             has_currency: false,
                         })
                         .then(
-                            argument(ARG_CURRENCY, StringArgumentType::SingleWord).executes(
-                                EcoExecutor {
+                            argument(ARG_CURRENCY, StringArgumentType::SingleWord)
+                                .suggests(CurrencySuggestionProvider)
+                                .executes(EcoExecutor {
                                     op: EcoOp::Reset,
                                     has_currency: true,
-                                },
-                            ),
+                                }),
                         ),
                 ),
             ),

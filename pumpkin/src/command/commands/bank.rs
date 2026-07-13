@@ -15,6 +15,8 @@ use crate::command::context::command_context::CommandContext;
 use crate::command::errors::command_syntax_error::CommandSyntaxError;
 use crate::command::node::dispatcher::CommandDispatcher;
 use crate::command::node::{CommandExecutor, CommandExecutorResult};
+use crate::command::suggestion::provider::{SuggestionProvider, SuggestionProviderResult};
+use crate::command::suggestion::suggestions::SuggestionsBuilder;
 use crate::server::Server;
 use crate::server::shop::ShopError;
 
@@ -42,6 +44,22 @@ fn optional_currency<'a>(
     has_currency
         .then(|| StringArgumentType::get(context, ARG_CURRENCY))
         .transpose()
+}
+
+/// Suggests every currency id configured in `economy/economy.toml`.
+struct CurrencySuggestionProvider;
+
+impl SuggestionProvider for CurrencySuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move {
+            let currencies = context.server().economy_manager.currencies();
+            builder.filter_and_suggest_iter(currencies).build()
+        })
+    }
 }
 
 fn resolve_currency<'a>(server: &'a Server, currency: Option<&'a str>) -> String {
@@ -271,6 +289,7 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                     })
                     .then(
                         argument(ARG_CURRENCY, StringArgumentType::SingleWord)
+                            .suggests(CurrencySuggestionProvider)
                             .executes(BankBalanceExecutor { has_currency: true }),
                     ),
             )
@@ -282,6 +301,7 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                         })
                         .then(
                             argument(ARG_CURRENCY, StringArgumentType::SingleWord)
+                                .suggests(CurrencySuggestionProvider)
                                 .executes(BankDepositExecutor { has_currency: true }),
                         ),
                 ),
@@ -294,6 +314,7 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                         })
                         .then(
                             argument(ARG_CURRENCY, StringArgumentType::SingleWord)
+                                .suggests(CurrencySuggestionProvider)
                                 .executes(BankWithdrawExecutor { has_currency: true }),
                         ),
                 ),
@@ -305,6 +326,7 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                     })
                     .then(
                         argument(ARG_CURRENCY, StringArgumentType::SingleWord)
+                            .suggests(CurrencySuggestionProvider)
                             .executes(BankLogExecutor { has_currency: true }),
                     ),
             ),

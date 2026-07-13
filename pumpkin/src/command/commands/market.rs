@@ -17,6 +17,8 @@ use crate::command::context::command_context::CommandContext;
 use crate::command::errors::command_syntax_error::CommandSyntaxError;
 use crate::command::node::dispatcher::CommandDispatcher;
 use crate::command::node::{CommandExecutor, CommandExecutorResult};
+use crate::command::suggestion::provider::{SuggestionProvider, SuggestionProviderResult};
+use crate::command::suggestion::suggestions::SuggestionsBuilder;
 use crate::server::Server;
 use crate::server::shop::ShopError;
 
@@ -51,6 +53,76 @@ fn resolve_currency<'a>(server: &'a Server, currency: Option<&'a str>) -> String
     currency
         .unwrap_or_else(|| server.economy_manager.default_currency())
         .to_string()
+}
+
+/// Suggests every currency id configured in `economy/economy.toml`.
+struct CurrencySuggestionProvider;
+
+impl SuggestionProvider for CurrencySuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move {
+            let currencies = context.server().economy_manager.currencies();
+            builder.filter_and_suggest_iter(currencies).build()
+        })
+    }
+}
+
+/// Suggests every currently active listing id - what `/market buy` accepts.
+struct MarketListingIdSuggestionProvider;
+
+impl SuggestionProvider for MarketListingIdSuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move {
+            let ids = context
+                .server()
+                .market_manager
+                .active_listings()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|l| l.id.to_string());
+            builder.filter_and_suggest_iter(ids).build()
+        })
+    }
+}
+
+/// Suggests only the calling player's own active listing ids - what
+/// `/market cancel` actually accepts (cancelling someone else's listing
+/// fails), so unlike `MarketListingIdSuggestionProvider` this doesn't just
+/// list everything.
+struct MarketOwnListingIdSuggestionProvider;
+
+impl SuggestionProvider for MarketOwnListingIdSuggestionProvider {
+    fn suggest<'a>(
+        &'a self,
+        context: &'a CommandContext,
+        builder: SuggestionsBuilder,
+    ) -> SuggestionProviderResult<'a> {
+        Box::pin(async move {
+            let Some(player_uuid) = context.source.player_or_none().map(|p| p.gameprofile.id)
+            else {
+                return builder.build();
+            };
+            let ids = context
+                .server()
+                .market_manager
+                .active_listings()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| l.seller_uuid == player_uuid)
+                .map(|l| l.id.to_string());
+            builder.filter_and_suggest_iter(ids).build()
+        })
+    }
 }
 
 struct MarketSellExecutor {
@@ -258,17 +330,26 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                         })
                         .then(
                             argument(ARG_CURRENCY, StringArgumentType::SingleWord)
+                                .suggests(CurrencySuggestionProvider)
                                 .executes(MarketSellExecutor { has_currency: true }),
                         ),
                 ),
             )
             .then(literal("list").executes(MarketListExecutor))
-            .then(literal("buy").then(
-                argument(ARG_ID, IntegerArgumentType::with_min(1)).executes(MarketBuyExecutor),
-            ))
-            .then(literal("cancel").then(
-                argument(ARG_ID, IntegerArgumentType::with_min(1)).executes(MarketCancelExecutor),
-            )),
+            .then(
+                literal("buy").then(
+                    argument(ARG_ID, IntegerArgumentType::with_min(1))
+                        .suggests(MarketListingIdSuggestionProvider)
+                        .executes(MarketBuyExecutor),
+                ),
+            )
+            .then(
+                literal("cancel").then(
+                    argument(ARG_ID, IntegerArgumentType::with_min(1))
+                        .suggests(MarketOwnListingIdSuggestionProvider)
+                        .executes(MarketCancelExecutor),
+                ),
+            ),
     );
 }
 // EMBER end
