@@ -4569,7 +4569,41 @@ impl World {
                     None => self.broadcast_to_chunk(chunk_pos, &particles_packet),
                 }
             }
-            if !flags.contains(BlockFlags::SKIP_DROPS) {
+            // EMBER start - custom blocks (phase 4 of the CraftEngine portation)
+            //
+            // A carrier block wearing a custom-block record drops the
+            // configured custom item back instead of the carrier's own
+            // vanilla loot table - every position with no recorded custom
+            // block falls through to the exact drop logic below, unchanged.
+            let ember_server = self.server.upgrade();
+            let ember_custom_block_id = if let Some(server) = &ember_server {
+                server
+                    .custom_block_manager
+                    .get_at(self.get_world_name(), position)
+                    .await
+            } else {
+                None
+            };
+            if let Some(custom_block_id) = &ember_custom_block_id {
+                let server = ember_server.as_ref().unwrap();
+                server
+                    .custom_block_manager
+                    .remove(self.get_world_name(), position)
+                    .await;
+                if !flags.contains(BlockFlags::SKIP_DROPS)
+                    && let Some(cb) = server
+                        .custom_block_manager
+                        .find_by_id(custom_block_id)
+                        .await
+                    && let Some(stack) = server
+                        .custom_item_manager
+                        .build_stack(&cb.custom_item_id, 1)
+                        .await
+                {
+                    self.drop_stack(position, stack).await;
+                }
+            } else if !flags.contains(BlockFlags::SKIP_DROPS) {
+                // EMBER end
                 let tool = if let Some(player) = &cause {
                     let hand_stack = player
                         .inventory

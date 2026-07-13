@@ -88,6 +88,9 @@ pub mod custom_item;
 // EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
 pub mod furniture;
 // EMBER end
+// EMBER start - custom blocks (resource-pack-driven, phase 4 of the CraftEngine portation)
+pub mod custom_block;
+// EMBER end
 pub mod recipe;
 pub mod scheduler;
 pub mod seasonal_events;
@@ -115,6 +118,9 @@ pub use custom_item::CustomItemManager;
 // EMBER end
 // EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
 pub use furniture::FurnitureManager;
+// EMBER end
+// EMBER start - custom blocks (resource-pack-driven, phase 4 of the CraftEngine portation)
+pub use custom_block::CustomBlockManager;
 // EMBER end
 // EMBER start - offline-mode login verification
 pub use auth::LoginManager;
@@ -232,6 +238,11 @@ pub struct Server {
     /// packet-only, persisted, view-distance broadcast. See
     /// `furniture::FurnitureManager`.
     pub furniture_manager: Arc<furniture::FurnitureManager>,
+    // EMBER end
+    // EMBER start - custom blocks (resource-pack-driven, phase 4 of the CraftEngine portation)
+    /// Custom blocks (`blocks/blocks.toml` + `instances.toml`): real
+    /// blockstate-carrier blocks. See `custom_block::CustomBlockManager`.
+    pub custom_block_manager: Arc<custom_block::CustomBlockManager>,
     // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
@@ -453,6 +464,9 @@ impl Server {
         let furniture_manager = Arc::new(furniture::FurnitureManager::new());
         furniture_manager.load_runtime(&custom_item_manager).await;
         // EMBER end
+        // EMBER start - custom blocks (resource-pack-driven, phase 4 of the CraftEngine portation)
+        let custom_block_manager = Arc::new(custom_block::CustomBlockManager::new());
+        // EMBER end
 
         let server = Self {
             basic_config,
@@ -512,6 +526,7 @@ impl Server {
             menu_manager,                   // EMBER
             custom_item_manager,            // EMBER
             furniture_manager,              // EMBER
+            custom_block_manager,           // EMBER
         };
         let server = Arc::new(server);
 

@@ -59,6 +59,13 @@ pub use custom_item::{CustomItemConfig, CustomItemListConfig};
 // EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
 pub use furniture::{
     FurnitureConfig, FurnitureInstanceConfig, FurnitureInstanceListConfig, FurnitureListConfig,
+    RenderMode,
+};
+// EMBER end
+// EMBER start - custom blocks (resource-pack-driven, phase 4 of the CraftEngine portation)
+pub use custom_block::{
+    CustomBlockConfig, CustomBlockInstanceConfig, CustomBlockInstanceListConfig,
+    CustomBlockListConfig,
 };
 // EMBER end
 
@@ -99,6 +106,9 @@ mod custom_item;
 // EMBER end
 // EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
 mod furniture;
+// EMBER end
+// EMBER start - custom blocks (resource-pack-driven, phase 4 of the CraftEngine portation)
+mod custom_block;
 // EMBER end
 mod player_data;
 mod pvp;

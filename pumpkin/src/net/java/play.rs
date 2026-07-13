@@ -2413,12 +2413,15 @@ impl JavaClient {
         let world = entity.world.load_full();
         let block = world.get_block(&position);
 
-        // EMBER start - custom furniture placement
+        // EMBER start - custom furniture/block placement
         //
         // Right-clicking a block face while holding a custom item that's
-        // configured as furniture places it instead of running normal
-        // block/item-use logic - checked (and, on a match, handled and
-        // returned) before any vanilla interaction/placement code runs.
+        // configured as furniture or a custom block places it instead of
+        // running normal block/item-use logic - checked (and, on a match,
+        // handled and returned) before any vanilla interaction/placement
+        // code runs. Furniture is checked first; a held item configured as
+        // both is a misconfiguration, not something this needs to guard
+        // against further.
         if let Some(model_id) = item
             .lock()
             .await
@@ -2426,32 +2429,61 @@ impl JavaClient {
             .map(|m| m.id.to_string())
             && let Some(custom_item_id) =
                 server.custom_item_manager.find_id_by_model(&model_id).await
-            && let Some(furniture) = server
+        {
+            let offset = face.to_offset();
+            let target_pos = BlockPos(position.0.add_raw(offset.x, offset.y, offset.z));
+
+            if let Some(furniture) = server
                 .furniture_manager
                 .find_by_custom_item(&custom_item_id)
                 .await
-        {
-            let offset = face.to_offset();
-            let spawn_pos = Vector3::new(
-                f64::from(position.0.x + offset.x) + 0.5,
-                f64::from(position.0.y + offset.y),
-                f64::from(position.0.z + offset.z) + 0.5,
-            );
-            server
-                .furniture_manager
-                .place(
-                    &server.custom_item_manager,
-                    &furniture,
-                    world.get_world_name(),
-                    spawn_pos,
-                    entity.yaw.load(),
-                )
-                .await;
-            if player.gamemode.load() != GameMode::Creative {
-                item.lock().await.decrement(1);
+            {
+                let spawn_pos = Vector3::new(
+                    f64::from(target_pos.0.x) + 0.5,
+                    f64::from(target_pos.0.y),
+                    f64::from(target_pos.0.z) + 0.5,
+                );
+                server
+                    .furniture_manager
+                    .place(
+                        &server.custom_item_manager,
+                        &furniture,
+                        world.get_world_name(),
+                        spawn_pos,
+                        entity.yaw.load(),
+                    )
+                    .await;
+                if player.gamemode.load() != GameMode::Creative {
+                    item.lock().await.decrement(1);
+                }
+                player.swing_hand(hand, true).await;
+                return Ok(());
             }
-            player.swing_hand(hand, true).await;
-            return Ok(());
+
+            if let Some(custom_block) = server
+                .custom_block_manager
+                .find_by_custom_item(&custom_item_id)
+                .await
+                && let Some(carrier) = Block::from_name(&custom_block.carrier_block.to_lowercase())
+                && world.get_block_state(&target_pos).is_air()
+            {
+                world
+                    .set_block_state(
+                        &target_pos,
+                        carrier.default_state.id,
+                        BlockFlags::NOTIFY_ALL,
+                    )
+                    .await;
+                server
+                    .custom_block_manager
+                    .place(world.get_world_name(), target_pos, &custom_block.id)
+                    .await;
+                if player.gamemode.load() != GameMode::Creative {
+                    item.lock().await.decrement(1);
+                }
+                player.swing_hand(hand, true).await;
+                return Ok(());
+            }
         }
         // EMBER end
 

@@ -737,6 +737,21 @@ impl BlockRegistry {
         server: &Server,
         world: &Arc<World>,
     ) -> BlockActionResult {
+        // EMBER start - custom blocks (phase 4 of the CraftEngine portation)
+        //
+        // A carrier block wearing a custom-block record never runs its own
+        // vanilla `normal_use` (e.g. a note_block carrier cycling its pitch
+        // on right-click) - every position with no recorded custom block
+        // falls through to the exact code below, completely unchanged.
+        if server
+            .custom_block_manager
+            .get_at(world.get_world_name(), position)
+            .await
+            .is_some()
+        {
+            return BlockActionResult::Success;
+        }
+        // EMBER end
         let pumpkin_block = self.get_pumpkin_block(block.id);
         if let Some(pumpkin_block) = pumpkin_block {
             return pumpkin_block

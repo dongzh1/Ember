@@ -296,6 +296,22 @@ showing that item's model plus an invisible `interaction` hitbox, packet-only an
 (`furniture/instances.toml`), broadcast to everyone in view distance the same way packet-only
 NPCs are. Attack it to break it and get the item back. Third phase of the CraftEngine port.
 
+### Custom blocks
+
+Two ways to skin a block, fourth and final phase of the CraftEngine port:
+
+- **Display-entity blocks** — set `render_mode = "block"` on a furniture entry
+  (`furniture/furniture.toml`) to get a `block_display` instead of an `item_display`; same
+  placement/breaking/persistence as regular furniture, just a fixed orientation instead of
+  always facing the camera.
+- **Vanilla block carriers** (`blocks/blocks.toml`) — binds a custom block id to a real
+  vanilla "carrier" block (currently `note_block` only). Right-clicking with the bound custom
+  item places the carrier's default state and records the position in `blocks/instances.toml`;
+  breaking it drops the custom item instead of the carrier's vanilla loot, and the carrier's
+  own interactive behavior (e.g. note block tuning) is swallowed wherever a custom block is
+  recorded. Every other position keeps its exact vanilla behavior — reviewed carefully for a
+  byte-for-byte fallthrough when no record exists, but not verified against a real client.
+
 ## Inherited Pumpkin Features
 
 Everything from upstream Pumpkin — Ember syncs weekly and keeps full compatibility:
@@ -582,6 +598,19 @@ URL，老用法完全不受影响。是移植 [CraftEngine](https://github.com/X
 缩放），右键点方块面即可放置——一个显示该物品模型的 `item_display` 加一个隐形的 `interaction`
 点击判定箱，纯发包、持久化（`furniture/instances.toml`），广播给视距内所有人，和发包 NPC 系统
 同一套可见性判定。攻击它即可破坏并拿回物品。CraftEngine 移植的第三阶段。
+
+### 自定义方块
+
+两种贴皮方式，CraftEngine 移植的第四阶段，也是最后一阶段：
+
+- **展示实体方块**——给家具配置项加 `render_mode = "block"`(`furniture/furniture.toml`)，用
+  `block_display` 代替 `item_display`，放置/破坏/持久化和普通家具完全一样，区别只是固定朝向而不是
+  始终朝向摄像机。
+- **原版方块载体**（`blocks/blocks.toml`）——把一个自定义方块 id 绑定到一个真实的原版"载体"方块
+  （目前只支持 `note_block`）。右键放置对应的自定义物品会在目标位置放上载体的默认状态并记录到
+  `blocks/instances.toml`；破坏时掉落自定义物品而不是载体的原版战利品，载体自己的交互行为（比如
+  音符盒调音）在记录了自定义方块的位置会被吞掉。其余所有位置的原版方块行为完全不变——逐字审查过
+  "没有记录时是否严丝合缝落回原代码"，但没有真实客户端实测验证。
 
 ## 继承的 Pumpkin 能力
 

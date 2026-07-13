@@ -6,19 +6,22 @@
 // `RuntimeFurniture` (fake entity ids + the set of players it's currently
 // spawned for). Visibility is re-evaluated on an interval using the exact
 // same chunk/view-distance rule real entities use, mirroring
-// `NpcManager::tick` - the only structural difference from NPCs is that
-// furniture renders as an `item_display` (showing the same model as the
-// `CustomItemConfig` it was placed from) plus a separate `interaction`
-// hitbox for click-to-break, reusing the exact metadata-writing technique
-// from `server::menu::MenuManager`.
+// `NpcManager::tick` - the only structural difference from NPCs is the
+// rendering: an `item_display` (showing the held custom item's own model,
+// `render_mode = "item"`) or a `block_display` (showing a chosen vanilla
+// blockstate, `render_mode = "block"` - phase four's non-solid, no-core-
+// edits sibling to the real blockstate-carrier custom blocks), plus a
+// separate `interaction` hitbox for click-to-break, reusing the exact
+// metadata-writing technique from `server::menu::MenuManager`.
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use pumpkin_config::{
     FurnitureConfig, FurnitureInstanceConfig, FurnitureInstanceListConfig, FurnitureListConfig,
-    LoadConfiguration,
+    LoadConfiguration, RenderMode,
 };
+use pumpkin_data::Block;
 use pumpkin_data::data_component::DataComponent;
 use pumpkin_data::data_component_impl::ItemModelImpl;
 use pumpkin_data::entity::EntityType;
@@ -61,9 +64,22 @@ const ITEM_DISPLAY_ITEM_OLD: pumpkin_data::tracked_data::TrackedId =
     };
 const BILLBOARD_CENTER: i8 = 3;
 
+/// What a placed instance actually renders as - resolved once in
+/// `build_runtime` from the furniture type's `render_mode`, not
+/// re-evaluated per spawn.
+enum FurnitureVisual {
+    Item {
+        item: &'static Item,
+        model: String,
+    },
+    Block {
+        state_id: pumpkin_data::BlockStateId,
+    },
+}
+
 struct RuntimeFurniture {
     instance_id: Uuid,
-    /// The `item_display` visual.
+    /// The `item_display`/`block_display` visual.
     entity_id: i32,
     /// The `interaction` hitbox - what an attack/interact packet targets.
     hitbox_id: i32,
@@ -73,8 +89,7 @@ struct RuntimeFurniture {
     chunk_pos: Vector2<i32>,
     position: Vector3<f64>,
     furniture_id: String,
-    item: &'static Item,
-    model: String,
+    visual: FurnitureVisual,
     scale: f64,
     visible_to: HashSet<Uuid>,
 }
@@ -131,9 +146,20 @@ impl FurnitureManager {
             .iter()
             .find(|f| f.id.eq_ignore_ascii_case(&instance.furniture_id))?
             .clone();
-        let (item, model) = custom_items
-            .resolve_visual(&furniture.custom_item_id)
-            .await?;
+        let visual = match furniture.render_mode {
+            RenderMode::Item => {
+                let (item, model) = custom_items
+                    .resolve_visual(&furniture.custom_item_id)
+                    .await?;
+                FurnitureVisual::Item { item, model }
+            }
+            RenderMode::Block => {
+                let block = Block::from_name(&furniture.block.to_lowercase())?;
+                FurnitureVisual::Block {
+                    state_id: block.default_state.id,
+                }
+            }
+        };
 
         let base = Entity::reserve_ids(2);
         let position = Vector3::new(instance.x, instance.y, instance.z);
@@ -150,8 +176,7 @@ impl FurnitureManager {
             )),
             position,
             furniture_id: furniture.id,
-            item,
-            model,
+            visual,
             scale: furniture.scale,
             visible_to: HashSet::new(),
         })
@@ -307,10 +332,14 @@ impl FurnitureManager {
     }
 
     fn send_spawn(client: &crate::net::java::JavaClient, furniture: &RuntimeFurniture) {
+        let visual_type = match furniture.visual {
+            FurnitureVisual::Item { .. } => &EntityType::ITEM_DISPLAY,
+            FurnitureVisual::Block { .. } => &EntityType::BLOCK_DISPLAY,
+        };
         client.try_enqueue_packet(&CSpawnEntity::new(
             VarInt(furniture.entity_id),
             furniture.fake_uuid,
-            VarInt(i32::from(EntityType::ITEM_DISPLAY.id)),
+            VarInt(i32::from(visual_type.id)),
             furniture.position,
             0.0,
             0.0,
@@ -318,7 +347,7 @@ impl FurnitureManager {
             VarInt(0),
             Vector3::new(0.0, 0.0, 0.0),
         ));
-        Self::send_item_metadata(client, furniture);
+        Self::send_visual_metadata(client, furniture);
 
         // The clickable hitbox - a bare `interaction` entity, left at its
         // vanilla default size like the menu system's button hitboxes (see
@@ -338,7 +367,7 @@ impl FurnitureManager {
         ));
     }
 
-    fn send_item_metadata(client: &crate::net::java::JavaClient, furniture: &RuntimeFurniture) {
+    fn send_visual_metadata(client: &crate::net::java::JavaClient, furniture: &RuntimeFurniture) {
         let version = client.version.load();
         let mut buf = Vec::new();
         #[expect(
@@ -360,31 +389,57 @@ impl FurnitureManager {
         )
         .write(&mut buf, &version)
         .is_ok();
-        ok &= Metadata::new(TrackedData::BILLBOARD, MetaDataType::BYTE, BILLBOARD_CENTER)
-            .write(&mut buf, &version)
-            .is_ok();
-        ok &= Metadata::new(
-            TrackedData::BILLBOARD_RENDER_CONSTRAINTS_ID,
-            MetaDataType::BYTE,
-            BILLBOARD_CENTER,
-        )
-        .write(&mut buf, &version)
-        .is_ok();
 
-        let mut item_stack = ItemStack::new(1, furniture.item);
-        item_stack.patch.push((
-            DataComponent::ItemModel,
-            Some(Box::new(ItemModelImpl {
-                id: furniture.model.clone().into(),
-            })),
-        ));
-        let stack = ItemStackSerializer::from(item_stack);
-        ok &= Metadata::new(ITEM_DISPLAY_ITEM_OLD, MetaDataType::ITEM_STACK, &stack)
-            .write(&mut buf, &version)
-            .is_ok();
-        ok &= Metadata::new(TrackedData::ITEM_STACK_ID, MetaDataType::ITEM_STACK, &stack)
-            .write(&mut buf, &version)
-            .is_ok();
+        match &furniture.visual {
+            FurnitureVisual::Item { item, model } => {
+                // Billboards to the camera - an item icon should stay
+                // readable regardless of which way the player's facing.
+                ok &= Metadata::new(TrackedData::BILLBOARD, MetaDataType::BYTE, BILLBOARD_CENTER)
+                    .write(&mut buf, &version)
+                    .is_ok();
+                ok &= Metadata::new(
+                    TrackedData::BILLBOARD_RENDER_CONSTRAINTS_ID,
+                    MetaDataType::BYTE,
+                    BILLBOARD_CENTER,
+                )
+                .write(&mut buf, &version)
+                .is_ok();
+
+                let mut item_stack = ItemStack::new(1, item);
+                item_stack.patch.push((
+                    DataComponent::ItemModel,
+                    Some(Box::new(ItemModelImpl {
+                        id: model.clone().into(),
+                    })),
+                ));
+                let stack = ItemStackSerializer::from(item_stack);
+                ok &= Metadata::new(ITEM_DISPLAY_ITEM_OLD, MetaDataType::ITEM_STACK, &stack)
+                    .write(&mut buf, &version)
+                    .is_ok();
+                ok &= Metadata::new(TrackedData::ITEM_STACK_ID, MetaDataType::ITEM_STACK, &stack)
+                    .write(&mut buf, &version)
+                    .is_ok();
+            }
+            FurnitureVisual::Block { state_id } => {
+                // No billboard - a block should hold a fixed orientation
+                // like a real placed block, not spin to face the camera.
+                // `Metadata::write` remaps the state id for whichever
+                // protocol version the client is on automatically (the same
+                // special-cased handling `MetaDataType::BLOCK_STATE` gets
+                // for any block state value).
+                let state = VarInt(i32::from(state_id.as_u16()));
+                ok &= Metadata::new(TrackedData::BLOCK_STATE, MetaDataType::BLOCK_STATE, state)
+                    .write(&mut buf, &version)
+                    .is_ok();
+                ok &= Metadata::new(
+                    TrackedData::BLOCK_STATE_ID,
+                    MetaDataType::BLOCK_STATE,
+                    state,
+                )
+                .write(&mut buf, &version)
+                .is_ok();
+            }
+        }
 
         if ok {
             buf.push(0xFF);
