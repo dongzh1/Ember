@@ -116,7 +116,8 @@ mod tests {
 
     #[test]
     fn adds_custom_name_when_configured() {
-        let stack = CustomItemManager::stack_from_entry(&config(Some("Legendary Sword")), 1).unwrap();
+        let stack =
+            CustomItemManager::stack_from_entry(&config(Some("Legendary Sword")), 1).unwrap();
         assert_eq!(stack.patch.len(), 2);
         let (id, component) = &stack.patch[1];
         assert_eq!(*id, DataComponent::CustomName);
