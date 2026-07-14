@@ -7,11 +7,13 @@ use pumpkin_util::{
 use tokio::sync::RwLock;
 
 mod advancement;
+mod attribute;
 mod ban;
 mod banip;
 mod banlist;
 mod bossbar;
 mod clear;
+mod clone;
 mod damage;
 mod data;
 pub mod defaultgamemode;
@@ -44,6 +46,7 @@ mod saveall;
 mod saveoff;
 mod saveon;
 mod say;
+mod scoreboard;
 mod seed;
 mod setblock;
 mod setidletimeout;
@@ -61,6 +64,7 @@ mod time;
 mod title;
 mod tps;
 mod transfer;
+mod trigger;
 mod weather;
 mod whitelist;
 // EMBER start - /world command
@@ -202,6 +206,10 @@ pub async fn default_dispatcher(
     tag::register(&mut dispatcher, registry);
     tick::register(&mut dispatcher, registry);
     advancement::register(&mut dispatcher, registry);
+    trigger::register(&mut dispatcher, registry);
+    scoreboard::register(&mut dispatcher, registry);
+    clone::register(&mut dispatcher, registry);
+    attribute::register(&mut dispatcher, registry);
     // EMBER start - /world command
     world::register(&mut dispatcher, registry);
     // EMBER end
