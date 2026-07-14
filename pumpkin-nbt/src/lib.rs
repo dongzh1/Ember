@@ -971,5 +971,27 @@ mod test {
         assert_eq!(value, reconstructed);
     }
 
+    // EMBER: regression test for a real crash - a field whose type is a
+    // newtype struct (single-field tuple struct, e.g.
+    // `pumpkin_util::text::TextComponent(TextComponentBase)`) used to fail
+    // serialization unconditionally, which crashed the whole server the
+    // first time a packet embedding one (the dialog system's title/body
+    // text) was serialized as NBT. Serialize-only: nothing in Ember ever
+    // deserializes a `Dialog` back, so this doesn't assert a round-trip.
+    #[test]
+    fn newtype_struct_field_serializes() {
+        #[derive(Serialize)]
+        struct Wrapped(i32);
+
+        #[derive(Serialize)]
+        struct HasNewtypeField {
+            value: Wrapped,
+        }
+
+        let value = HasNewtypeField { value: Wrapped(42) };
+        let mut bytes = Vec::new();
+        to_bytes(&value, &mut bytes).expect("newtype struct fields should serialize");
+    }
+
     // TODO: More robust tests
 }

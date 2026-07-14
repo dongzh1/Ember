@@ -444,12 +444,21 @@ impl<W: NbtWriteHelper> ser::Serializer for &mut Serializer<W> {
         Ok(())
     }
 
+    // EMBER: transparently serialize the wrapped value, matching
+    // `serialize_some`'s treatment of `Option` above and serde's own
+    // documented default behavior for most formats - a newtype struct
+    // carries no NBT tag information of its own, it's purely a Rust-level
+    // wrapper (e.g. `pumpkin_util::text::TextComponent(TextComponentBase)`),
+    // so it should encode exactly as its inner value would on its own.
+    // Previously an unconditional error, which meant any packet embedding
+    // a `TextComponent` inside an NBT-encoded structure (the dialog
+    // system's `title`/body text) failed to serialize at all.
     fn serialize_newtype_struct<T: ?Sized + Serialize>(
         self,
         _name: &'static str,
-        _value: &T,
+        value: &T,
     ) -> Result<()> {
-        Err(Error::UnsupportedType("newtype struct".to_string()))
+        value.serialize(self)
     }
 
     fn serialize_newtype_variant<T: ?Sized + Serialize>(
