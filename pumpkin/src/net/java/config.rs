@@ -79,8 +79,13 @@ impl JavaClient {
         server: &Server,
         packet: SConfigResourcePack,
     ) {
-        let resource_config = &server.advanced_config.resource_pack.java;
-        if resource_config.enabled {
+        // EMBER: resolved the same way the send site in `net/java/login.rs`
+        // picked it - see `Server::resolve_java_resource_pack`. Using the
+        // same function here is what keeps this in sync with a 26.x+
+        // client actually having been sent a *different* (per-version)
+        // pack: re-deriving the expected UUID from only the legacy config
+        // would mismatch every such response.
+        if let Some(resource_config) = server.resolve_java_resource_pack(self.version.load()) {
             let expected_uuid =
                 uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_DNS, resource_config.url.as_bytes());
 

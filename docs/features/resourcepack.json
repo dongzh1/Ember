@@ -1,19 +1,22 @@
 {
   "feature": "resourcepack",
-  "summary": "服务器启动时自动从本地素材文件夹打包生成资源包，并通过内置HTTP服务器自托管、或上传到S3兼容对象存储来分发给客户端，自动写入 pumpkin.toml 里原有的资源包 URL/SHA1 配置，管理员不用自己另外搭建资源包托管环境。",
+  "summary": "服务器启动时自动从本地素材文件夹打包生成资源包，并通过内置HTTP服务器自托管、或上传到S3兼容对象存储来分发给客户端。共用同一份素材(assets/)，但会按客户端版本分别打包多份 pack.mcmeta：1.21.x 共用一份旧式 pack_format，26.1/26.2 各自精确对应自己的 min_format/max_format，连进来的客户端各自拿到匹配自己版本的那一份，不用管理员另外搭建资源包托管环境。",
   "commands": [],
   "config_files": [
-    "resourcepack/resourcepack.toml — 构建器本身的总开关(enabled)、素材源目录(source_dir)、托管方式(hosting: self_hosted/s3)及各自的详细参数",
-    "resourcepack/source/ — 资源包源文件夹(pack.mcmeta + assets/...)，首次启动如果不存在会自动生成一个占位 pack.mcmeta，真正的贴图/模型等美术素材需要管理员自己放进去",
+    "resourcepack/resourcepack.toml — 构建器本身的总开关(enabled)、素材源目录(source_dir)、托管方式(hosting: self_hosted/s3)及各自的详细参数；只有这一个总开关，没有单独控制\"要不要按版本分包\"的开关——只要构建器本身开着，legacy+每个已知26.x版本都会自动各打一份",
+    "resourcepack/source/ — 资源包源文件夹(assets/...)，所有版本共用同一份，首次启动如果不存在会自动生成，真正的贴图/模型等美术素材需要管理员自己放进去",
+    "resourcepack/source/pack.mcmeta — legacy(1.21及更早)变体的 pack.mcmeta，位置和以前一样，老配置不用动；不存在时自动生成默认值(pack_format:75)",
+    "resourcepack/pack.mcmeta.26_1、resourcepack/pack.mcmeta.26_2 — 26.1/26.2 各自的 pack.mcmeta 覆盖文件（和 source_dir 同级，不在 assets/ 里面），不存在时用内置默认值(min_format=max_format 分别是84/88)",
     "resourcepack/items.toml（间接相关）— 自定义物品的 model 字段要指向这个资源包里的实际模型文件路径，两个配置文件之间没有代码校验，只是约定共用同一套 assets 目录结构"
   ],
   "notes": [
-    "这个功能没有任何游戏内命令，是服务器启动阶段自动运行一次的流程：读取 resourcepack.toml → 把 source_dir 打包成 zip → 自托管或上传 S3 → 计算 SHA1 → 覆盖写入 pumpkin.toml 中 [resource_pack.java] 的 enabled/url/sha1 三个字段。",
-    "enabled=false（默认值）时整个流程完全不运行；如果你在 pumpkin.toml 里手动配置了外部资源包 URL，这个手动配置完全不受影响，两者是叠加关系而不是互斥关系。",
-    "重要提醒：resourcepack.toml 里的 prompt_message 和 force 这两个字段目前代码里没有任何地方会读取它们，是没接线的死配置——真正生效的提示语/是否强制玩家接受，来自 pumpkin.toml 自己 [resource_pack.java] 段下同名的 prompt_message/force 字段（两边同名但完全独立，互不影响）。建议直接去 pumpkin.toml 里设置这两项；这一点比较反直觉，建议找开发者确认是否本该同步却漏写了。",
-    "贴图/模型等资源包素材需要管理员自己准备并放进 source_dir（默认 resourcepack/source/），构建器只负责打包和分发，不会自动生成任何美术资源。",
-    "自托管模式默认监听 0.0.0.0:25566；如果服务器在 NAT/反向代理/域名后面，必须手动填 public_url，否则客户端拿到的地址可能是它根本连不上的内网地址。",
-    "S3 模式兼容任何 S3 协议的对象存储（AWS S3、Cloudflare R2、MinIO 等），不是 AWS 专属。",
-    "失败处理很宽松：不管是打包失败、自托管端口绑定失败还是 S3 上传失败，都只会打一条错误日志，服务器仍然会正常启动，不会因为资源包这一步出问题就拒绝开服。"
+    "这个功能没有任何游戏内命令，是服务器启动阶段自动运行一次的流程：读取 resourcepack.toml → 给 legacy 和每个已知 26.x 版本各打一个 zip(共用 assets，只有 pack.mcmeta 不同) → 自托管或上传 S3 → 计算各自 SHA1 → legacy 那份覆盖写入 pumpkin.toml 中 [resource_pack.java] 的 enabled/url/sha1，其余按版本存在 Server 自己的字段里，实际发送哪一份由连接客户端自己的协议版本决定。",
+    "只有 Ember 能在协议层面区分开、且资源包格式确实不同的版本才会单独打包(目前是 26.1、26.2)；26.1.2 是纯客户端 hotfix，协议号和资源包格式都和 26.1 完全一样，天然并入 26.1 那一份，不需要（也没法）单独区分。",
+    "enabled=false（默认值）时整个流程完全不运行（所有版本都不打包）；如果你在 pumpkin.toml 里手动配置了外部资源包 URL，这个手动配置完全不受影响，两者是叠加关系而不是互斥关系——不过手动配置目前只能覆盖 legacy 那一份，26.x+ 版本仍然会用构建器打的包。",
+    "重要提醒：resourcepack.toml 里的 prompt_message 和 force 这两个字段目前代码里没有任何地方会读取它们，是没接线的死配置——真正生效的提示语/是否强制玩家接受，来自 pumpkin.toml 自己 [resource_pack.java] 段下同名的 prompt_message/force 字段（两边同名但完全独立，互不影响，且这两个字段是所有版本共用的，没有按版本区分）。建议直接去 pumpkin.toml 里设置这两项；这一点比较反直觉，建议找开发者确认是否本该同步却漏写了。",
+    "贴图/模型等资源包素材需要管理员自己准备并放进 source_dir（默认 resourcepack/source/），构建器只负责打包和分发，不会自动生成任何美术资源；目前没有证据表明这些素材本身跨 1.21.x/26.x 不兼容(只有 pack.mcmeta 的声明格式确认不同)，如果以后发现某些素材在老版本客户端上表现异常，需要另外处理，不是这次改动的验证范围。",
+    "自托管模式默认监听 0.0.0.0:25566，每个版本各自的 zip 走不同路径(/pack-legacy.zip、/pack-26.1.zip、/pack-26.2.zip)；如果服务器在 NAT/反向代理/域名后面，legacy 用 public_url 覆盖，26.x+ 版本用 public_url_modern（必须包含字面量 {version} 占位符，会被替换成 26-1/26-2 这种形式，因为不同版本需要不同的 URL，不能像 legacy 那样用一个固定字符串）。",
+    "S3 模式兼容任何 S3 协议的对象存储（AWS S3、Cloudflare R2、MinIO 等），不是 AWS 专属；每个版本会各自上传一个对象，object_key 自动加上后缀区分(如 resourcepack.zip → resourcepack-26-1.zip)。",
+    "失败处理很宽松：不管是某个版本打包失败、自托管端口绑定失败还是 S3 上传失败，都只会打一条错误日志，服务器仍然会正常启动；某个 26.x 版本的包构建失败时，那个版本的客户端会自动退回收到 legacy 包，不会完全收不到任何资源包。"
   ]
 }

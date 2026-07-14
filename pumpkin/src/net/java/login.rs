@@ -389,25 +389,34 @@ impl JavaClient {
             self.send_packet_now(&CConfigServerLinks::new(&links)).await;
         }
 
-        let resource_config = &server.advanced_config.resource_pack.java;
-        if resource_config.enabled {
-            let uuid = Uuid::new_v3(&uuid::Uuid::NAMESPACE_DNS, resource_config.url.as_bytes());
-            let resource_pack = CConfigAddResourcePack::new(
-                &uuid,
-                &resource_config.url,
-                &resource_config.sha1,
-                resource_config.force,
-                if resource_config.prompt_message.is_empty() {
-                    None
-                } else {
-                    Some(TextComponent::text(resource_config.prompt_message.clone()))
-                },
-            );
+        // EMBER: which pack (legacy vs. one of the 26.x+ variants) depends
+        // on this client's own version - see
+        // `Server::resolve_java_resource_pack` (also called from
+        // `net/java/config.rs`'s response handling, so the two can never
+        // disagree about what was actually sent).
+        match server.resolve_java_resource_pack(self.version.load()) {
+            Some(resource_config) => {
+                let uuid = Uuid::new_v3(&uuid::Uuid::NAMESPACE_DNS, resource_config.url.as_bytes());
+                let resource_pack = CConfigAddResourcePack::new(
+                    &uuid,
+                    resource_config.url,
+                    resource_config.sha1,
+                    resource_config.force,
+                    if resource_config.prompt_message.is_empty() {
+                        None
+                    } else {
+                        Some(TextComponent::text(
+                            resource_config.prompt_message.to_string(),
+                        ))
+                    },
+                );
 
-            self.send_packet_now(&resource_pack).await;
-        } else {
-            // This will be invoked by our resource pack handler in the case of the above branch.
-            self.send_known_packs().await;
+                self.send_packet_now(&resource_pack).await;
+            }
+            None => {
+                // This will be invoked by our resource pack handler in the case of the above branch.
+                self.send_known_packs().await;
+            }
         }
         debug!("login acknowledged");
     }

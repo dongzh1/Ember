@@ -68,11 +68,18 @@ pub enum HostingMode {
 pub struct SelfHostedConfig {
     pub bind_addr: String,
     pub port: u16,
-    /// Overrides the auto-built `http://<bind_addr>:<port>/...` URL - needed
-    /// whenever the server's public address differs from `bind_addr`
-    /// (behind NAT/a reverse proxy/a domain name), which this process has
-    /// no way to detect on its own.
+    /// Overrides the auto-built `http://<bind_addr>:<port>/pack-legacy.zip`
+    /// URL for the legacy (pre-26.1) pack variant - needed whenever the
+    /// server's public address differs from `bind_addr` (behind NAT/a
+    /// reverse proxy/a domain name), which this process has no way to
+    /// detect on its own.
     pub public_url: String,
+    /// Same idea as `public_url`, but for the per-version 26.1+ variants -
+    /// there are multiple of these (one per known 26.x release) so a single
+    /// fixed URL can't stand in for all of them. Must contain the literal
+    /// `{version}` placeholder (replaced with e.g. `26-1`/`26-2`); empty
+    /// auto-builds `http://<bind_addr>:<port>/pack-{version}.zip`.
+    pub public_url_modern: String,
 }
 
 impl Default for SelfHostedConfig {
@@ -81,6 +88,7 @@ impl Default for SelfHostedConfig {
             bind_addr: "0.0.0.0".to_string(),
             port: 25566,
             public_url: String::new(),
+            public_url_modern: String::new(),
         }
     }
 }

@@ -275,13 +275,22 @@ return to spawn, return to your own home world, and open the global market.
 ### Resource pack builder
 
 Off by default; enable in `resourcepack/resourcepack.toml`. Builds a resource pack from
-`resourcepack/source/` (a normal `pack.mcmeta` + `assets/...` folder) and gets it in front of
-Java clients — either via a small built-in HTTP server (`hosting = "self_hosted"`) or by
-uploading it to any S3-compatible bucket (`hosting = "s3"` — real AWS S3, Cloudflare R2, MinIO,
-...). Either way it just computes the resulting `url`/`sha1` and feeds them into the existing
-(already-working) resource-pack push — manually configuring an externally-hosted pack the old
-way still works unchanged if you'd rather do that. First phase of a larger plan to port select
-features from [CraftEngine](https://github.com/Xiao-MoMi/craft-engine) (custom items next).
+`resourcepack/source/` (a normal `assets/...` folder) and gets it in front of Java clients —
+either via a small built-in HTTP server (`hosting = "self_hosted"`) or by uploading it to any
+S3-compatible bucket (`hosting = "s3"` — real AWS S3, Cloudflare R2, MinIO, ...). First phase of
+a larger plan to port select features from [CraftEngine](https://github.com/Xiao-MoMi/craft-engine)
+(custom items next).
+
+Builds and serves more than one variant, keyed by the connecting client's own protocol version,
+since Minecraft's `pack.mcmeta` format itself changed structurally around the 26.x line (old
+clients read a single `pack_format` number, 26.1+ clients expect `min_format`/`max_format`
+instead): one shared variant for everything up to 1.21.11 (`resourcepack/source/pack.mcmeta`,
+unchanged location), plus one precisely-versioned variant per 26.x release Ember can tell apart
+(`resourcepack/pack.mcmeta.26_1`, `pack.mcmeta.26_2`, ...) — all sharing the same `assets/` tree,
+only the injected `pack.mcmeta` differs. Missing an override file just falls back to a sensible
+built-in default for that version. Manually configuring an externally-hosted pack the old way
+(`pumpkin.toml`'s own `[resource_pack.java]`) still works unchanged for the legacy variant if
+you'd rather do that.
 
 ### Custom items
 
@@ -620,12 +629,19 @@ url = "mysql://user:pass@localhost:3306/ember"
 ### 资源包生成器
 
 默认关闭，在 `resourcepack/resourcepack.toml` 开启。从 `resourcepack/source/`（一个普通的
-`pack.mcmeta`+`assets/...` 目录）生成资源包，然后想办法送到 Java 客户端手上——要么起一个内置
+`assets/...` 目录）生成资源包，然后想办法送到 Java 客户端手上——要么起一个内置
 的小 HTTP 服务器自托管（`hosting = "self_hosted"`），要么上传到任意 S3 兼容存储
-（`hosting = "s3"`——真实 AWS S3、Cloudflare R2、MinIO 都行）。两种方式最终都只是算出
-`url`/`sha1` 塞进已有的（本来就能正常工作的）资源包推送逻辑——想继续手动配一个外部托管的
-URL，老用法完全不受影响。是移植 [CraftEngine](https://github.com/Xiao-MoMi/craft-engine)
-部分功能这个更大计划的第一阶段（下一步是自定义物品）。
+（`hosting = "s3"`——真实 AWS S3、Cloudflare R2、MinIO 都行）。是移植
+[CraftEngine](https://github.com/Xiao-MoMi/craft-engine)部分功能这个更大计划的第一阶段
+（下一步是自定义物品）。
+
+会按连接客户端自己的协议版本打包/分发不止一份——因为 Minecraft 的 `pack.mcmeta` 声明格式本身
+在 26.x 前后有结构性变化（老版本认单一 `pack_format` 数字，26.1+ 版本改成 `min_format`/
+`max_format` 区间）：1.21 到 1.21.11 共用一份（`resourcepack/source/pack.mcmeta`，位置和以前
+一样不用动），26.x 系列里 Ember 能区分开的每个版本再各自精确一份（`resourcepack/pack.mcmeta.26_1`、
+`pack.mcmeta.26_2`……）——全部共用同一份 `assets/`，只有注入的 `pack.mcmeta` 不一样。覆盖文件
+不存在就用内置的合理默认值。想继续手动配一个外部托管的 URL（`pumpkin.toml` 自己的
+`[resource_pack.java]`），对 legacy 那一份来说老用法完全不受影响。
 
 ### 自定义物品
 

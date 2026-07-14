@@ -86,7 +86,7 @@ pub mod placeholder;
 pub mod hud;
 // EMBER end
 // EMBER start - resource pack builder (self-generate + self-host/S3)
-mod resourcepack_builder;
+pub(crate) mod resourcepack_builder;
 // EMBER end
 // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
 pub mod custom_item;
@@ -259,6 +259,17 @@ pub struct Server {
     /// a custom `minecraft:item_model` component. See `custom_item::CustomItemManager`.
     pub custom_item_manager: Arc<custom_item::CustomItemManager>,
     // EMBER end
+    // EMBER start - resource pack builder: per-version (26.x+) pack variants
+    /// The 26.x+ resource pack variants `resourcepack_builder::init` managed
+    /// to build, alongside the legacy one already folded into
+    /// `advanced_config.resource_pack.java`. See
+    /// `Server::resolve_java_resource_pack`, the only place this should be
+    /// read from - never index into it directly.
+    pub(crate) versioned_resource_packs: Vec<(
+        pumpkin_util::version::JavaMinecraftVersion,
+        resourcepack_builder::ResourcePackVariant,
+    )>,
+    // EMBER end
     /// All the dimensions that exist on the server.
     pub dimensions: Vec<Dimension>,
     /// Assigns unique IDs to containers.
@@ -312,16 +323,29 @@ impl Server {
         vanilla_data: VanillaData,
     ) -> Arc<Self> {
         // EMBER start - resource pack builder (self-generate + self-host/S3)
-        // Overwrites `resource_pack.java`'s url/sha1/enabled in place, before
-        // anything below reads them - the existing send/response logic in
-        // `net/java/{login,config}.rs` is otherwise completely unchanged.
-        if let Some((url, sha1)) = resourcepack_builder::init(
+        // Overwrites `resource_pack.java`'s url/sha1/enabled in place with
+        // the legacy (pre-26.1) variant, before anything below reads them -
+        // the existing send/response logic in `net/java/{login,config}.rs`
+        // is otherwise completely unchanged, it just now goes through
+        // `resolve_java_resource_pack` (below) to pick the right variant.
+        let built_packs = resourcepack_builder::init(
             &std::env::current_dir().expect("Failed to get current directory"),
-        ) {
+        );
+        if let Some((url, sha1)) = built_packs.legacy {
             advanced_config.resource_pack.java.enabled = true;
             advanced_config.resource_pack.java.url = url;
             advanced_config.resource_pack.java.sha1 = sha1;
         }
+        let versioned_resource_packs = built_packs
+            .per_version
+            .into_iter()
+            .map(|(version, url, sha1)| {
+                (
+                    version,
+                    resourcepack_builder::ResourcePackVariant { url, sha1 },
+                )
+            })
+            .collect();
         // EMBER end
 
         let permission_registry = Arc::new(RwLock::new(PermissionRegistry::new()));
@@ -551,6 +575,7 @@ impl Server {
             placeholder_manager,            // EMBER
             hud_manager,                    // EMBER
             custom_item_manager,            // EMBER
+            versioned_resource_packs,       // EMBER
         };
         let server = Arc::new(server);
 
