@@ -3176,7 +3176,7 @@ impl Player {
                 client
                     .send_packet_now(
                         &pumpkin_protocol::java::client::config::CConfigShowDialog::new(
-                            IdOr::Value(DialogNBT(dialog)),
+                            IdOr::Value(DialogNBT::from_dialog(dialog)),
                         ),
                     )
                     .await;
@@ -3184,7 +3184,7 @@ impl Player {
             pumpkin_protocol::ConnectionState::Play => {
                 client
                     .send_packet_now(&pumpkin_protocol::java::client::play::CPlayShowDialog::new(
-                        IdOr::Value(DialogNBT(dialog)),
+                        IdOr::Value(DialogNBT::from_dialog(dialog)),
                     ))
                     .await;
             }

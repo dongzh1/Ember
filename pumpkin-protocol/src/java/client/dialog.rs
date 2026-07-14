@@ -151,7 +151,7 @@ mod tests {
         };
 
         let mut bytes = Vec::new();
-        pumpkin_nbt::to_bytes(&DialogNBT(&dialog), &mut bytes)
+        pumpkin_nbt::to_bytes(&DialogNBT::from_dialog(&dialog), &mut bytes)
             .expect("a Dialog full of TextComponent fields should serialize as NBT");
     }
 }
