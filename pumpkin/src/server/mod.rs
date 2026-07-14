@@ -767,6 +767,7 @@ impl Server {
     /// the global configuration for this world — used by ephemeral dungeon
     /// instances. After creation, a world with an `ember-world.toml`
     /// sidecar is prewarmed in the background per its residency policy.
+    #[expect(clippy::too_many_lines)]
     pub async fn create_world_with(
         self: &Arc<Self>,
         name: String,
@@ -818,6 +819,19 @@ impl Server {
         let name_clone = name.clone();
         let world = tokio::task::spawn_blocking(move || {
             let world_path = server.basic_config.get_world_path().join(name_clone);
+            // EMBER: a brand-new world has no folder yet, but
+            // load_world_level_info below writes level.dat straight into it
+            // with no such fallback - File::create then fails NotFound,
+            // logged as a confusing "Info not found!" (WorldInfoError's
+            // From<io::Error> maps that io::ErrorKind to InfoNotFound). Log
+            // and keep going rather than abort world creation over it, same
+            // as that function's own non-panicking philosophy.
+            if let Err(e) = std::fs::create_dir_all(&world_path) {
+                error!(
+                    "Failed to create world directory {}: {e}",
+                    world_path.display()
+                );
+            }
             let registry = server.block_registry.clone();
             // EMBER: each world loads its own level.dat instead of reusing
             // the default world's `level_info` — otherwise every world
