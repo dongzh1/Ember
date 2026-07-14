@@ -1,0 +1,65 @@
+{
+  "feature": "world",
+  "summary": "运行时多世界管理:创建/加载/卸载/传送/克隆/转换存储格式/预热区块,一个命令覆盖整个世界生命周期。",
+  "commands": [
+    {
+      "usage": "/world list",
+      "description": "列出当前已加载的所有世界,显示每个世界的维度类型和在线玩家数。",
+      "permission": "OP 3级 (ember:command.world)"
+    },
+    {
+      "usage": "/world load <name>",
+      "description": "加载一个世界;若同名世界文件夹不存在则直接创建。世界名以 `_nether`/`_end` 结尾时会创建对应维度(下界/末地)而非主世界,以便与去掉后缀的同名世界组成传送门配对(见 Server::get_paired_world)。",
+      "permission": "OP 3级 (ember:command.world)"
+    },
+    {
+      "usage": "/world unload <name>",
+      "description": "撤离世界内玩家(传送到默认世界作为兜底目的地)、保存并卸载该世界。不能卸载默认世界(已加载世界列表中的第一个)。",
+      "permission": "OP 3级 (ember:command.world)"
+    },
+    {
+      "usage": "/world tp <name>",
+      "description": "将自己传送到指定已加载世界的出生点。仅玩家可用。",
+      "permission": "OP 3级 (ember:command.world)"
+    },
+    {
+      "usage": "/world prewarm <name>",
+      "description": "后台将该世界已存储的区域(region)预先加载进内存,最多 64 个区域(MAX_PREWARM_REGIONS 硬上限),忽略该世界自身的小地图自动预热策略上限。",
+      "permission": "OP 3级 (ember:command.world)"
+    },
+    {
+      "usage": "/world delete <name>",
+      "description": "彻底删除一个世界的数据(磁盘文件夹,以及使用 easy+mysql 后端时对应的数据库行)。世界必须处于未加载、未在卸载中,且不是默认世界。",
+      "permission": "OP 3级 (ember:command.world)"
+    },
+    {
+      "usage": "/world convert <name> <format> [border]",
+      "description": "迁移一个未加载世界的区块存储格式(anvil|linear|pump|easy)。旧文件重命名为 *.bak。可选 border 参数会把世界裁剪为以原点为中心、边长为 border 的正方形区域(区域外内容直接跳过不转换),并把所选格式与 border 一并写入该世界的 ember-world.toml,今后即使全局默认格式变化也不会再影响这个世界。",
+      "permission": "OP 3级 (ember:command.world)"
+    },
+    {
+      "usage": "/world clone <source> <destination> [save]",
+      "description": "把一个已加载世界的数据完整复制为一个新世界并加载(SlimeWorld 式克隆),easy+mysql 后端下会连数据库行一起复制。`save` 只是默认行为的显式同义写法,可以省略。",
+      "permission": "OP 3级 (ember:command.world)"
+    },
+    {
+      "usage": "/world clone <source> <destination> readonly",
+      "description": "创建一个只读的内存世界实例,直接读取源世界已存储的数据,不复制任何文件;所有修改只留在内存里,卸载后即丢弃,多个只读克隆可以共享同一份源数据内存。",
+      "permission": "OP 3级 (ember:command.world)"
+    }
+  ],
+  "config_files": [
+    "pumpkin.toml — 顶层 [world.chunk] 段:全局默认区块存储后端(anvil/linear/pump/easy)以及 easy 的子后端(file/mysql)参数,对没有自己 ember-world.toml 覆盖的世界生效。",
+    "<世界文件夹>/ember-world.toml — 每个世界自己的配置 sidecar,可覆盖 border(世界边界,决定是否判定为“小地图”)、generate(seed/void/ocean)、mode(read_write/read_only)、source(只读克隆的源世界名)、chunk(该世界自己的存储后端)、autosave_ticks。/world convert 会自动写入这个文件;管理员也可以手动创建或编辑。"
+  ],
+  "notes": [
+    "区块存储后端一览:anvil = 原版 .mca 区域文件格式;linear = Linear 单文件区域格式;pump = Pumpkin 自研原生格式;easy(Ember 默认)= 按区域 zstd 压缩 + 空区块剪枝 + 原子写入,又分两种子后端——easy+file(默认,存本地磁盘)和 easy+mysql(存共享 MySQL 数据库,可让多个服务端共享同一个世界的数据)。",
+    "easy+mysql 的写权限(read_write)同一时间只能有一台服务器持有,由数据库里的心跳锁保护;其余想接入同一世界的服务器需要在自己的 ember-world.toml 里显式声明 mode = read_only,不会自动抢锁或自动降级。",
+    "默认世界 = 已加载世界列表里的第一个(通常对应 pumpkin.toml 里的 default_level_name,默认值 \"world\"),它不能被 /world unload 或 /world delete,/spawn 传送的正是这个世界,其它世界被卸载时也会把玩家兜底传送到这里。",
+    "/world convert 和 /world delete 都要求目标世界当前处于未加载状态(先 /world unload)。",
+    "/world clone(非 readonly)要求源世界当前必须已加载,否则报错“world is not loaded”;readonly 克隆则相反,可以直接读取一个当前未加载、只存在于磁盘上的世界(命令的 tab 补全里,readonly 的源世界补全包含了未加载的世界,普通克隆的源世界补全只包含已加载的世界,是两套不同的候选列表)。",
+    "border <= 512 格(SMALL_MAP_MAX_BORDER 常量)的世界会被判定为“小地图”:整体加载进内存、可整体克隆并自动预热;大于此值或没有边界的世界按区域懒加载。",
+    "世界名以 _nether/_end 结尾的命名约定只影响 /world load 创建的维度类型和传送门配对逻辑,不影响其它子命令。",
+    "world 命令树只注册了一个权限节点(ember:command.world),挂在顶层 command(\"world\", ...) 上,所有子命令(list/load/unload/tp/prewarm/delete/convert/clone)共用同一权限——目前没有办法只放开其中某个子命令而不放开其它子命令。"
+  ]
+}

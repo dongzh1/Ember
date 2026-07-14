@@ -1,0 +1,52 @@
+{
+  "feature": "economy",
+  "summary": "Ember内置的多货币经济系统,基于MySQL存储玩家余额,是bank/market/shop/lottery四个功能共享的货币底座。默认关闭,需要在economy/economy.toml里配置MySQL连接并enabled=true才能使用。",
+  "commands": [
+    {
+      "usage": "/balance",
+      "description": "查询自己在每一种已配置货币下的余额,一次性列出所有货币(不是只显示默认货币)。",
+      "permission": "所有人默认可用 (ember:command.economy.balance, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/balance <player>",
+      "description": "查询指定玩家在每一种已配置货币下的余额。",
+      "permission": "OP 3级 (ember:command.economy.balance.others)"
+    },
+    {
+      "usage": "/pay <player> <amount> [currency]",
+      "description": "从自己的余额转账给另一名玩家;不填currency时使用配置的默认货币。不能转给自己,amount必须为正整数。",
+      "permission": "所有人默认可用 (ember:command.economy.pay, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/eco give <player> <amount> [currency]",
+      "description": "管理员给指定玩家增加余额,amount必须为正整数。",
+      "permission": "OP 3级 (ember:command.economy.eco)"
+    },
+    {
+      "usage": "/eco take <player> <amount> [currency]",
+      "description": "管理员扣减指定玩家余额,amount必须为正整数;余额不足会失败并保持原样,不会扣成负数。",
+      "permission": "OP 3级 (ember:command.economy.eco)"
+    },
+    {
+      "usage": "/eco set <player> <amount> [currency]",
+      "description": "管理员直接把指定玩家的余额设为某个值,amount可以为0。",
+      "permission": "OP 3级 (ember:command.economy.eco)"
+    },
+    {
+      "usage": "/eco reset <player> [currency]",
+      "description": "把指定玩家的余额重置为配置里的starting_balance。",
+      "permission": "OP 3级 (ember:command.economy.eco)"
+    }
+  ],
+  "config_files": [
+    "economy/economy.toml — enabled(总开关,默认false)、url(MySQL连接串)、default_currency(命令不指定货币时用哪个,默认\"coins\")、currencies(货币列表,每项有id和display_name)、starting_balance(新账户/从未持有某货币时的起始余额)"
+  ],
+  "notes": [
+    "enabled默认是false;没配MySQL或没开启时,以上所有命令都会回复\"经济系统未启用\"这类提示,而不是报错或崩溃。",
+    "货币定义在配置文件里,不是数据库表——新增/删除货币需要改economy.toml,不能靠命令动态创建。",
+    "账户是懒创建的:从没写过库的玩家查余额时只会拿到starting_balance这个只读默认值,真正在数据库里插入一行要等第一次deposit/withdraw/set/transfer发生。",
+    "扣款类操作(withdraw/transfer/pay/eco take)全部用条件更新语句(UPDATE ... WHERE balance >= ?)做原子判断,并发操作不会把余额扣成负数;跨账户转账(pay)额外用了数据库事务,要么两边都变化要么都不变。",
+    "/balance一次性显示所有已配置货币的余额;/pay和/eco系列只操作一种货币,不填currency参数时用配置的default_currency,这一点和/balance的\"全都显示\"不同,容易被误解。",
+    "bank/market/shop/lottery四个功能的货币都是直接复用这里的EconomyManager,不是各自独立的一套余额系统。"
+  ]
+}

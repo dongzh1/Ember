@@ -1,0 +1,20 @@
+{
+  "feature": "spawn",
+  "summary": "把玩家传送回服务器主城(默认世界)出生点的快捷命令。",
+  "commands": [
+    {
+      "usage": "/spawn",
+      "description": "把自己传送到主城世界(默认世界,即已加载世界列表中的第一个)的出生点。",
+      "permission": "所有玩家 (ember:command.spawn,默认允许 PermissionDefault::Allow)"
+    }
+  ],
+  "config_files": [
+    "无专属配置文件。出生点坐标直接读取主城世界自己的 level.dat(spawn_x/spawn_y/spawn_z),和原版机制、以及 /world tp 用的是同一套读取逻辑(spawn_of 辅助函数)。主城世界本身由 pumpkin.toml 的 default_level_name 决定(默认 \"world\"),是服务器启动时最先加载的那个世界。"
+  ],
+  "notes": [
+    "“主城”就是默认世界(server.worlds.load().first()),和 /world unload / /world delete 明确拒绝操作的那个世界、以及卸载其它世界时玩家的兜底传送目标,是同一个世界。",
+    "与 /world tp <name>(OP 专用,可传送到任意已加载世界)不同,/spawn 面向所有玩家开放、不需要参数,并且永远只传送到主城这一个世界的出生点。",
+    "只能由玩家执行,控制台或命令方块调用会被拒绝。",
+    "如果主城世界因故未加载(理论上不应发生,因为它是默认世界且不可被卸载),/spawn 会报错“主城世界未加载”而不是崩溃或传到别处。"
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "feature": "market",
+  "summary": "玩家对玩家的全服拍卖行:任何人可以把手持物品挂牌出售,任何人(包括卖家离线时)都能购买,成交时系统按比例从卖家收益里抽取手续费。",
+  "commands": [
+    {
+      "usage": "/market sell <price> [currency]",
+      "description": "把手上正拿着的整组物品堆叠挂牌出售,price可以是0(白送);不填currency用economy的默认货币。能挂多少条同时在售,受自己解锁的挂单位数分档限制。",
+      "permission": "所有人默认可用 (ember:command.market, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/market list",
+      "description": "列出全服当前所有在售的挂单(最多显示200条,按挂牌时间倒序),含挂单编号、数量、单价、货币、卖家名。",
+      "permission": "所有人默认可用 (ember:command.market, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/market buy <id>",
+      "description": "按挂单编号购买;扣款成功后物品直接发到背包,背包满则掉落在脚下。",
+      "permission": "所有人默认可用 (ember:command.market, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/market cancel <id>",
+      "description": "下架自己的挂单,物品原样退回背包/掉落。只能下架自己的挂单,取消不收手续费。",
+      "permission": "所有人默认可用 (ember:command.market, PermissionDefault::Allow)"
+    }
+  ],
+  "config_files": [
+    "shop/shop.toml 的 [market] 表 — commission_rate(成交手续费率,如0.05即5%,从卖家收益里扣)、min_commission(手续费最低值,按比例算出来更低时也至少收这么多)、slot_tiers(挂单数量分档数组,每项含可选permission和max_listings,不配置时默认上限是5条)",
+    "shop/shop.toml 的顶层 enabled/url — 市场与商店、银行、抽奖共用同一个总开关和同一个MySQL连接"
+  ],
+  "notes": [
+    "手续费只在成交(buy)时从卖家的收益里扣,挂牌(sell)本身不收上架费——挂出去卖不掉也不会倒扣钱。",
+    "挂单数量上限按权限分档解析,和bank的利率分档同一套逻辑:玩家满足的所有slot_tiers里取max_listings最大的一档生效。",
+    "购买用数据库层面的原子删除(DELETE ... LIMIT 1并判断受影响行数)保证同一个挂单不会被两个人同时买走,即使多个Ember实例共享同一个MySQL也安全;如果买家扣款失败(比如余额不够),挂单会自动原样恢复,不会出现\"东西没了但没人付钱\"的情况。",
+    "挂单永不过期,只会因为成交或卖家自己/market cancel而消失——系统不会自动清理长期卖不出去的旧挂单,管理员如果想清理需要自己动数据库(ember_market_listings表)。",
+    "卖家不需要在线也能被购买——收款直接进MySQL里的economy余额,不像某些参考实现(PixelShop)那样需要一张\"离线卖家代收\"邮箱表。",
+    "挂牌的物品只认原版物品注册名(item registry key),不支持Ember自定义物品(CraftEngine移植出来的那一套)。"
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "feature": "placeholder",
+  "summary": "类似PlaceholderAPI的%占位符%文本替换系统。它本身不是一个面向玩家的功能,而是一个共享的服务器级工具库(PlaceholderManager):注册一个名字对应一个解析函数,其他系统在显示文本时把模板交给它展开。目前的使用方(消费者)是HUD系统,未来聊天/计分板/NPC名字等系统都可以复用它而不必各自重新实现一套占位符解析。",
+  "commands": [],
+  "config_files": [],
+  "placeholders": [
+    {
+      "name": "player_name",
+      "description": "玩家的正版用户名(player.gameprofile.name)"
+    },
+    {
+      "name": "player_health",
+      "description": "玩家当前生命值,四舍五入取整显示(不带小数)"
+    },
+    {
+      "name": "player_max_health",
+      "description": "玩家最大生命值,四舍五入取整显示"
+    },
+    {
+      "name": "player_food",
+      "description": "玩家当前饥饿值(饱食度等级,0-20的整数)"
+    },
+    {
+      "name": "player_x",
+      "description": "玩家当前坐标X,取整显示"
+    },
+    {
+      "name": "player_y",
+      "description": "玩家当前坐标Y,取整显示"
+    },
+    {
+      "name": "player_z",
+      "description": "玩家当前坐标Z,取整显示"
+    },
+    {
+      "name": "player_world",
+      "description": "玩家当前所在世界的名字"
+    },
+    {
+      "name": "player_gamemode",
+      "description": "玩家当前游戏模式的名字(如survival/creative/adventure/spectator)"
+    },
+    {
+      "name": "player_ping",
+      "description": "玩家当前延迟(毫秒)"
+    },
+    {
+      "name": "server_online",
+      "description": "服务器当前在线玩家人数"
+    },
+    {
+      "name": "server_tps",
+      "description": "服务器当前TPS,保留1位小数"
+    },
+    {
+      "name": "server_mspt",
+      "description": "服务器当前每tick耗时(毫秒),保留1位小数"
+    }
+  ],
+  "notes": [
+    "没有任何斜杠命令,也没有独立的配置文件——它是纯代码注册表(HashMap),启动时由builtins()一次性填入内置项,不从磁盘读取,配置文件里的%xxx%文本(比如hud.toml的title)才是它的真正'调用方'。",
+    "未识别的占位符名字(拼写错误)会原样保留在输出文本中,例如%typo%,不会被替换成空字符串,也不会报错——方便一眼看出配置写错了,但也意味着错别字不会在日志里报警,需要肉眼检查显示效果。",
+    "player_/server_前缀只是命名习惯,注册表其实是一张不分前缀的扁平表(名字整体作为key),不会像PlaceholderAPI那样按第一个下划线拆分并分发到某个'expansion'。",
+    "register()方法支持运行时动态注册新占位符,重名会直接覆盖之前的解析函数(后注册的生效),目前代码里只有内置的13个,没有发现其他系统调用register()追加自定义占位符。",
+    "server_online/server_tps/server_mspt在拿不到server的弱引用时(player.world().server.upgrade()失败)返回空字符串,而不是报错或保留原样的%占位符%文本,这与'未识别占位符'的兜底行为不一致,可能导致模板里这几项偶尔静默消失,值得留意。"
+  ]
+}

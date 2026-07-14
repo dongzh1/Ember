@@ -1077,9 +1077,10 @@ impl Entity {
             visible,
         );
         self.send_meta_data(
-            &[Metadata::new(
+            &[Metadata::with_fallback_type(
                 TrackedData::CUSTOM_NAME,
                 MetaDataType::OPTIONAL_TEXT_COMPONENT,
+                MetaDataType::OPTIONAL_COMPONENT, // EMBER: v26.1+ renamed this slot, see Metadata::fallback_type
                 Some(name),
             )],
             Some(&bedrock_meta),

@@ -1,0 +1,27 @@
+{
+  "feature": "hud",
+  "summary": "每个玩家一条持续显示的boss血条式HUD,标题内容用%占位符%拼接(生命值、坐标、世界名、在线人数、TPS等),定时刷新。玩法思路参考Paper插件BetterHud,但不是移植其Java实现。",
+  "commands": [
+    {
+      "usage": "/hud toggle",
+      "description": "开启/关闭自己的HUD显示,并立即生效(不用等下一次刷新);状态会持久化保存,下次登录仍保持上次的选择",
+      "permission": "所有人默认可用 (ember:command.hud.toggle, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/hud reload",
+      "description": "重新从磁盘读取hud/hud.toml配置(标题模板、刷新间隔、总开关、字体等);不影响玩家各自的开关偏好,那部分存在另一个文件里",
+      "permission": "OP 3级 (ember:command.hud.reload)"
+    }
+  ],
+  "config_files": [
+    "hud/hud.toml — 全局HUD设置:enabled(系统总开关,默认false)、refresh_ticks(内容刷新间隔,单位tick,默认20即1秒)、enabled_by_default(从未用过/hud toggle的玩家是否默认显示,默认true)、title(标题模板字符串,用%占位符%拼接,默认内容包含生命值/坐标/世界名/在线人数/TPS)、font(可选的自定义资源包字体命名空间,默认为空即使用客户端默认字体)",
+    "hud/player_state.toml — 每个玩家的HUD开关偏好(uuid + enabled),由/hud toggle自动写入和维护,不建议手动编辑"
+  ],
+  "notes": [
+    "hud.toml里的enabled总开关默认是false——这是需要管理员显式打开的功能,不开的话即使玩家权限允许执行/hud toggle,系统级的周期刷新也不会运行(tick()函数开头会在config.enabled为false时直接跳过全部玩家)。",
+    "/hud toggle开启时也会检查这个总开关(set_enabled内部会读一次hud.toml的enabled):总开关关着的时候,玩家的开关偏好照样会保存(等管理员之后把总开关打开就会立即生效),但不会先出来一条之后再也不刷新的'卡死'HUD——这一点最初实现时有过不一致(已修复),写在这里备查。",
+    "boss条本身的血量进度(填充比例)固定显示玩家当前生命值/最大生命值的百分比,和title文本是两回事;想在标题文字里也显示生命值数字需要自己在title模板里写%player_health%等占位符。",
+    "title模板可用的全部占位符来自server::placeholder::PlaceholderManager的内置注册表,建议同时查看placeholder.json;模板里拼错的占位符名字会原样保留在显示文本中(如%typo%),不会报错也不会消失。",
+    "reload只重新加载hud.toml,不会重置或重新加载player_state.toml里每个玩家的开关偏好。"
+  ]
+}

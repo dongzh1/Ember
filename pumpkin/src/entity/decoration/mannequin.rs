@@ -84,9 +84,10 @@ impl MannequinEntity {
     pub fn set_description(&self, description: Option<TextComponent>) {
         self.description.store(Arc::new(description.clone()));
         self.get_entity().send_meta_data(
-            &[Metadata::new(
+            &[Metadata::with_fallback_type(
                 TrackedData::DESCRIPTION,
                 MetaDataType::OPTIONAL_TEXT_COMPONENT,
+                MetaDataType::OPTIONAL_COMPONENT, // EMBER: v26.1+ renamed this slot, see Metadata::fallback_type
                 description,
             )],
             None,
@@ -201,9 +202,10 @@ impl EntityBase for MannequinEntity {
                 None,
             );
             entity.send_meta_data(
-                &[Metadata::new(
+                &[Metadata::with_fallback_type(
                     TrackedData::DESCRIPTION,
                     MetaDataType::OPTIONAL_TEXT_COMPONENT,
+                    MetaDataType::OPTIONAL_COMPONENT, // EMBER: v26.1+ renamed this slot, see Metadata::fallback_type
                     (**self.description.load()).clone(),
                 )],
                 None,

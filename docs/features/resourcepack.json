@@ -1,0 +1,19 @@
+{
+  "feature": "resourcepack",
+  "summary": "服务器启动时自动从本地素材文件夹打包生成资源包，并通过内置HTTP服务器自托管、或上传到S3兼容对象存储来分发给客户端，自动写入 pumpkin.toml 里原有的资源包 URL/SHA1 配置，管理员不用自己另外搭建资源包托管环境。",
+  "commands": [],
+  "config_files": [
+    "resourcepack/resourcepack.toml — 构建器本身的总开关(enabled)、素材源目录(source_dir)、托管方式(hosting: self_hosted/s3)及各自的详细参数",
+    "resourcepack/source/ — 资源包源文件夹(pack.mcmeta + assets/...)，首次启动如果不存在会自动生成一个占位 pack.mcmeta，真正的贴图/模型等美术素材需要管理员自己放进去",
+    "resourcepack/items.toml（间接相关）— 自定义物品的 model 字段要指向这个资源包里的实际模型文件路径，两个配置文件之间没有代码校验，只是约定共用同一套 assets 目录结构"
+  ],
+  "notes": [
+    "这个功能没有任何游戏内命令，是服务器启动阶段自动运行一次的流程：读取 resourcepack.toml → 把 source_dir 打包成 zip → 自托管或上传 S3 → 计算 SHA1 → 覆盖写入 pumpkin.toml 中 [resource_pack.java] 的 enabled/url/sha1 三个字段。",
+    "enabled=false（默认值）时整个流程完全不运行；如果你在 pumpkin.toml 里手动配置了外部资源包 URL，这个手动配置完全不受影响，两者是叠加关系而不是互斥关系。",
+    "重要提醒：resourcepack.toml 里的 prompt_message 和 force 这两个字段目前代码里没有任何地方会读取它们，是没接线的死配置——真正生效的提示语/是否强制玩家接受，来自 pumpkin.toml 自己 [resource_pack.java] 段下同名的 prompt_message/force 字段（两边同名但完全独立，互不影响）。建议直接去 pumpkin.toml 里设置这两项；这一点比较反直觉，建议找开发者确认是否本该同步却漏写了。",
+    "贴图/模型等资源包素材需要管理员自己准备并放进 source_dir（默认 resourcepack/source/），构建器只负责打包和分发，不会自动生成任何美术资源。",
+    "自托管模式默认监听 0.0.0.0:25566；如果服务器在 NAT/反向代理/域名后面，必须手动填 public_url，否则客户端拿到的地址可能是它根本连不上的内网地址。",
+    "S3 模式兼容任何 S3 协议的对象存储（AWS S3、Cloudflare R2、MinIO 等），不是 AWS 专属。",
+    "失败处理很宽松：不管是打包失败、自托管端口绑定失败还是 S3 上传失败，都只会打一条错误日志，服务器仍然会正常启动，不会因为资源包这一步出问题就拒绝开服。"
+  ]
+}

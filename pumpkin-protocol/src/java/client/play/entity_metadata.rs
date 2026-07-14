@@ -58,6 +58,17 @@ impl ClientPacket for CSetEntityMetadata {
 pub struct Metadata<T> {
     pub index: TrackedId,
     pub r#type: MetaDataType,
+    // EMBER start - versioned type rename support
+    /// Tried when `r#type` doesn't exist (id < 0) in the recipient's
+    /// protocol version. Some metadata *types themselves* were renamed
+    /// across versions rather than just moved to a new id - e.g. the
+    /// "optional chat component" slot was `OPTIONAL_TEXT_COMPONENT` (id 6)
+    /// through v1.21.11, then became a differently-named `OPTIONAL_COMPONENT`
+    /// (also id 6) from v26.1 onward. A single fixed `MetaDataType` constant
+    /// can't resolve for both eras, so callers that need to span the rename
+    /// pass the other era's constant here via [`Metadata::with_fallback_type`].
+    pub fallback_type: Option<MetaDataType>,
+    // EMBER end
     pub value: T,
 }
 
@@ -66,9 +77,26 @@ impl<T> Metadata<T> {
         Self {
             index,
             r#type,
+            fallback_type: None, // EMBER
             value,
         }
     }
+
+    // EMBER start - versioned type rename support
+    pub const fn with_fallback_type(
+        index: TrackedId,
+        r#type: MetaDataType,
+        fallback_type: MetaDataType,
+        value: T,
+    ) -> Self {
+        Self {
+            index,
+            r#type,
+            fallback_type: Some(fallback_type),
+            value,
+        }
+    }
+    // EMBER end
 
     pub fn write<W: std::io::Write>(
         &self,
@@ -84,7 +112,14 @@ impl<T> Metadata<T> {
             return Ok(());
         }
 
-        let remapped_type_id = self.r#type.id(*version);
+        let mut remapped_type_id = self.r#type.id(*version);
+        if remapped_type_id < 0 {
+            // EMBER: the primary type doesn't exist in this protocol version -
+            // try the other era's name for the same slot before giving up.
+            if let Some(fallback_type) = self.fallback_type {
+                remapped_type_id = fallback_type.id(*version);
+            }
+        }
         if remapped_type_id < 0 {
             // Metadata type does not exist in this protocol version.
             return Ok(());

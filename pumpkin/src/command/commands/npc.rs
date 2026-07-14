@@ -7,12 +7,14 @@
 //                                            (player/mannequin skin), a block name
 //                                            (falling_block), or an item name (item)
 //   /npc remove <name>              - delete an NPC
-//   /npc list                       - list all NPCs
+//   /npc list                       - list all NPCs (clickable -> /npc info)
+//   /npc info <name>                - clickable property viewer/editor
 //   /npc move <name>                - move an existing NPC to your position
 //   /npc skin <name> <player>       - re-copy an NPC's skin from an online player
 //   /npc setaction <name> <command> - run a console command on click (%player% placeholder)
 //   /npc clearaction <name>         - make the NPC purely decorative again
 //   /npc lookat <name> on|off       - continuously face the nearest visible player
+//   /npc gravity <name> on|off      - fall when the block underneath isn't solid
 //   /npc sneak <name> on|off        - client-side crouch pose
 //   /npc swing <name>               - play the swing-main-arm animation once
 //   /npc moveto <name>              - walk (not teleport) to your position
@@ -30,6 +32,8 @@ use pumpkin_data::entity::EntityType;
 use pumpkin_data::item::Item;
 use pumpkin_util::PermissionLvl;
 use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry};
+use pumpkin_util::text::click::ClickEvent;
+use pumpkin_util::text::hover::HoverEvent;
 use pumpkin_util::text::{TextComponent, color::NamedColor};
 
 use crate::command::argument_builder::{ArgumentBuilder, argument, command, literal};
@@ -44,7 +48,7 @@ use crate::command::suggestion::provider::{SuggestionProvider, SuggestionProvide
 use crate::command::suggestion::suggestions::SuggestionsBuilder;
 use crate::data::npc::NpcEntry;
 use crate::entity::EntityBase;
-use crate::server::npc::supports_skin;
+use crate::server::npc::{resolve_entity_type, supports_skin};
 
 const DESCRIPTION: &str = "Manage packet-only NPCs: create, remove, list, move, re-skin.";
 const PERMISSION: &str = "ember:command.npc";
@@ -70,6 +74,73 @@ fn err_text(msg: impl Into<String>) -> TextComponent {
 fn ok_text(msg: impl Into<String>) -> TextComponent {
     TextComponent::text(msg.into()).color_named(NamedColor::Green)
 }
+
+// EMBER start - NPC info (clickable property viewer/editor)
+/// A clickable `[label]` button that runs `command` immediately on click -
+/// same mechanism `tpa.rs`'s accept/deny buttons and `help.rs`'s command
+/// links already use. For instant toggles, not for anything destructive
+/// enough to want a second chance before it fires.
+fn run_button(label: &str, color: NamedColor, command: String, hover: &str) -> TextComponent {
+    TextComponent::text(format!("[{label}]"))
+        .color_named(color)
+        .click_event(ClickEvent::RunCommand {
+            command: command.into(),
+        })
+        .hover_event(HoverEvent::show_text(TextComponent::text(
+            hover.to_string(),
+        )))
+}
+
+/// A clickable `[label]` button that pre-fills `command` into the chat box
+/// instead of running it - for edits that need a typed value, and for
+/// anything irreversible (still one click away, but not a single misclick).
+fn suggest_button(label: &str, command: String, hover: &str) -> TextComponent {
+    TextComponent::text(format!("[{label}]"))
+        .color_named(NamedColor::Aqua)
+        .click_event(ClickEvent::SuggestCommand {
+            command: command.into(),
+        })
+        .hover_event(HoverEvent::show_text(TextComponent::text(
+            hover.to_string(),
+        )))
+}
+
+/// A plain `label: value` line, no button - for read-only info.
+fn info_line(label: &str, value: impl Into<String>) -> TextComponent {
+    TextComponent::text(format!("{label}: "))
+        .color_named(NamedColor::Gray)
+        .add_child(
+            TextComponent::text(format!("{}\n", value.into())).color_named(NamedColor::White),
+        )
+}
+
+/// A `label: 开/关 [switch]` line for a per-NPC boolean toggle, where
+/// `subcommand` is the `/npc <subcommand> <name> on|off` command that flips
+/// it (`lookat`/`sneak`/`gravity` today).
+fn toggle_line(label: &str, npc_name: &str, subcommand: &str, enabled: bool) -> TextComponent {
+    let (state_text, state_color) = if enabled {
+        ("开", NamedColor::Green)
+    } else {
+        ("关", NamedColor::Red)
+    };
+    let (next_label, next_state) = if enabled {
+        ("关闭", "off")
+    } else {
+        ("开启", "on")
+    };
+    TextComponent::text(format!("{label}: "))
+        .color_named(NamedColor::Gray)
+        .add_child(TextComponent::text(state_text).color_named(state_color))
+        .add_child(TextComponent::text(" "))
+        .add_child(run_button(
+            next_label,
+            NamedColor::Yellow,
+            format!("/npc {subcommand} {npc_name} {next_state}"),
+            &format!("点击{next_label} {label}"),
+        ))
+        .add_child(TextComponent::text("\n"))
+}
+// EMBER end
 
 /// An NPC's name doubles as its fake tab-list username (see
 /// `server::npc::NpcManager::send_spawn`), so it's held to the same charset
@@ -118,6 +189,7 @@ impl CommandExecutor for NpcCreateExecutor {
                 wander_radius: None,
                 hidden_from: std::collections::HashSet::new(),
                 visible_distance: None,
+                gravity: false,
             };
 
             let server = context.server();
@@ -239,6 +311,7 @@ impl CommandExecutor for NpcCreateAsExecutor {
                 wander_radius: None,
                 hidden_from: std::collections::HashSet::new(),
                 visible_distance: None,
+                gravity: false,
             };
 
             if let Err(e) = context.server().npc_manager.create(entry).await {
@@ -288,19 +361,217 @@ impl CommandExecutor for NpcListExecutor {
                 feedback(context, TextComponent::text("No NPCs exist.")).await;
                 return Ok(0);
             }
-            let mut lines = vec![format!("NPCs ({}):", npcs.len())];
+            let mut message = TextComponent::text(format!("NPCs ({}):\n", npcs.len()))
+                .color_named(NamedColor::Gray);
             for npc in &npcs {
-                lines.push(format!(
-                    "  {} @ {} ({:.1}, {:.1}, {:.1})",
-                    npc.name, npc.world, npc.x, npc.y, npc.z
-                ));
+                message = message
+                    .add_child(
+                        TextComponent::text(format!(
+                            "  {} @ {} ({:.1}, {:.1}, {:.1}) ",
+                            npc.name, npc.world, npc.x, npc.y, npc.z
+                        ))
+                        .color_named(NamedColor::White),
+                    )
+                    .add_child(run_button(
+                        "详情",
+                        NamedColor::Aqua,
+                        format!("/npc info {}", npc.name),
+                        "查看/修改这个NPC的属性",
+                    ))
+                    .add_child(TextComponent::text("\n"));
             }
-            feedback(context, TextComponent::text(lines.join("\n"))).await;
+            feedback(context, message).await;
             #[expect(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             Ok(npcs.len() as i32)
         })
     }
 }
+
+// EMBER start - NPC info (clickable property viewer/editor)
+fn info_header_and_position(entry: &NpcEntry) -> TextComponent {
+    let name = entry.name.as_str();
+    TextComponent::text(format!("=== NPC '{name}' ===\n"))
+        .color_named(NamedColor::Gold)
+        .add_child(info_line("类型", entry.entity_type.clone()))
+        .add_child(
+            TextComponent::text("位置: ")
+                .color_named(NamedColor::Gray)
+                .add_child(
+                    TextComponent::text(format!(
+                        "{} ({:.1}, {:.1}, {:.1}) yaw={:.0} ",
+                        entry.world, entry.x, entry.y, entry.z, entry.yaw
+                    ))
+                    .color_named(NamedColor::White),
+                )
+                .add_child(suggest_button(
+                    "移到我的位置",
+                    format!("/npc move {name}"),
+                    "先站到目标位置,再点击执行",
+                ))
+                .add_child(TextComponent::text("\n")),
+        )
+}
+
+fn info_skin_line(entry: &NpcEntry) -> Option<TextComponent> {
+    if !supports_skin(resolve_entity_type(entry)) {
+        return None;
+    }
+    let name = entry.name.as_str();
+    let skin_desc = entry
+        .skin
+        .as_ref()
+        .map_or_else(|| "默认".to_string(), |_| "已自定义".to_string());
+    Some(
+        TextComponent::text("皮肤: ")
+            .color_named(NamedColor::Gray)
+            .add_child(TextComponent::text(skin_desc).color_named(NamedColor::White))
+            .add_child(TextComponent::text(" "))
+            .add_child(suggest_button(
+                "改",
+                format!("/npc skin {name} "),
+                "输入一个在线玩家名,复制其皮肤",
+            ))
+            .add_child(TextComponent::text("\n")),
+    )
+}
+
+fn info_action_line(entry: &NpcEntry) -> TextComponent {
+    let name = entry.name.as_str();
+    let action_desc = entry
+        .click_command
+        .clone()
+        .unwrap_or_else(|| "无(纯装饰)".to_string());
+    TextComponent::text("点击指令: ")
+        .color_named(NamedColor::Gray)
+        .add_child(TextComponent::text(action_desc).color_named(NamedColor::White))
+        .add_child(TextComponent::text(" "))
+        .add_child(suggest_button(
+            "改",
+            format!("/npc setaction {name} "),
+            "输入玩家点击这个NPC时执行的控制台命令,%player%会替换成点击者",
+        ))
+        .add_child(run_button(
+            "清除",
+            NamedColor::Red,
+            format!("/npc clearaction {name}"),
+            "清除点击指令,NPC变回纯装饰",
+        ))
+        .add_child(TextComponent::text("\n"))
+}
+
+fn info_wander_line(entry: &NpcEntry) -> TextComponent {
+    let name = entry.name.as_str();
+    let wander_desc = entry
+        .wander_radius
+        .map_or_else(|| "未启用".to_string(), |r| format!("{r:.0} 格"));
+    TextComponent::text("漫游半径: ")
+        .color_named(NamedColor::Gray)
+        .add_child(TextComponent::text(wander_desc).color_named(NamedColor::White))
+        .add_child(TextComponent::text(" "))
+        .add_child(suggest_button(
+            "改",
+            format!("/npc wander {name} on "),
+            "输入漫游半径(格数)",
+        ))
+        .add_child(run_button(
+            "关闭",
+            NamedColor::Yellow,
+            format!("/npc wander {name} off"),
+            "停止漫游,原地停下",
+        ))
+        .add_child(TextComponent::text("\n"))
+}
+
+fn info_distance_line(entry: &NpcEntry) -> TextComponent {
+    let name = entry.name.as_str();
+    let distance_desc = entry.visible_distance.map_or_else(
+        || "默认(跟随观察者客户端视距)".to_string(),
+        |d| format!("{d:.0} 格"),
+    );
+    TextComponent::text("可见距离: ")
+        .color_named(NamedColor::Gray)
+        .add_child(TextComponent::text(distance_desc).color_named(NamedColor::White))
+        .add_child(TextComponent::text(" "))
+        .add_child(suggest_button(
+            "改",
+            format!("/npc distance {name} "),
+            "输入可见距离(格数)",
+        ))
+        .add_child(TextComponent::text("\n"))
+}
+
+fn info_footer_line(entry: &NpcEntry) -> TextComponent {
+    let name = entry.name.as_str();
+    TextComponent::text("其他: ")
+        .color_named(NamedColor::Gray)
+        .add_child(run_button(
+            "挥手",
+            NamedColor::Yellow,
+            format!("/npc swing {name}"),
+            "播放一次挥手动画",
+        ))
+        .add_child(TextComponent::text(" "))
+        .add_child(suggest_button(
+            "移除NPC",
+            format!("/npc remove {name}"),
+            "彻底删除这个NPC,不可撤销 - 点击后请再确认一次按回车",
+        ))
+}
+
+/// Builds the full `/npc info` message. Split out from the executor itself
+/// purely to keep it under clippy's line-count lint - same reasoning
+/// `server::npc::NpcManager::send_spawn`/`send_spawn_metadata` already
+/// split on.
+fn build_info_message(entry: &NpcEntry) -> TextComponent {
+    let mut message = info_header_and_position(entry);
+    if let Some(skin_line) = info_skin_line(entry) {
+        message = message.add_child(skin_line);
+    }
+    message = message
+        .add_child(toggle_line(
+            "看向玩家",
+            &entry.name,
+            "lookat",
+            entry.look_at_nearest_player,
+        ))
+        .add_child(toggle_line("潜行", &entry.name, "sneak", entry.sneaking))
+        .add_child(toggle_line("重力", &entry.name, "gravity", entry.gravity))
+        .add_child(info_action_line(entry))
+        .add_child(info_wander_line(entry))
+        .add_child(info_distance_line(entry));
+    if !entry.hidden_from.is_empty() {
+        message = message.add_child(info_line(
+            "对指定玩家隐藏",
+            format!("{} 人", entry.hidden_from.len()),
+        ));
+    }
+    message.add_child(info_footer_line(entry))
+}
+
+struct NpcInfoExecutor;
+impl CommandExecutor for NpcInfoExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let requested_name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let npcs = context.server().npc_manager.list().await;
+            let Some(entry) = npcs
+                .iter()
+                .find(|n| n.name.eq_ignore_ascii_case(&requested_name))
+            else {
+                feedback(
+                    context,
+                    err_text(format!("No NPC named '{requested_name}' exists.")),
+                )
+                .await;
+                return Ok(0);
+            };
+
+            feedback(context, build_info_message(entry)).await;
+            Ok(1)
+        })
+    }
+}
+// EMBER end
 
 struct NpcMoveExecutor;
 impl CommandExecutor for NpcMoveExecutor {
@@ -652,6 +923,35 @@ impl CommandExecutor for NpcLookAtExecutor {
     }
 }
 
+// EMBER start - NPC gravity
+struct NpcGravityExecutor {
+    enabled: bool,
+}
+impl CommandExecutor for NpcGravityExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let result = context
+                .server()
+                .npc_manager
+                .set_gravity(&name, self.enabled)
+                .await;
+            match result {
+                Ok(()) => {
+                    let state = if self.enabled { "on" } else { "off" };
+                    feedback(context, ok_text(format!("NPC '{name}' gravity {state}."))).await;
+                    Ok(1)
+                }
+                Err(e) => {
+                    feedback(context, err_text(e)).await;
+                    Ok(0)
+                }
+            }
+        })
+    }
+}
+// EMBER end
+
 struct NpcSneakExecutor {
     sneaking: bool,
 }
@@ -833,6 +1133,13 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
             )
             .then(literal("list").executes(NpcListExecutor))
             .then(
+                literal("info").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .executes(NpcInfoExecutor),
+                ),
+            )
+            .then(
                 literal("move").then(
                     argument(ARG_NAME, StringArgumentType::SingleWord)
                         .suggests(NpcNameSuggestionProvider)
@@ -872,6 +1179,14 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                         .suggests(NpcNameSuggestionProvider)
                         .then(literal("on").executes(NpcLookAtExecutor { enabled: true }))
                         .then(literal("off").executes(NpcLookAtExecutor { enabled: false })),
+                ),
+            )
+            .then(
+                literal("gravity").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(NpcNameSuggestionProvider)
+                        .then(literal("on").executes(NpcGravityExecutor { enabled: true }))
+                        .then(literal("off").executes(NpcGravityExecutor { enabled: false })),
                 ),
             )
             .then(

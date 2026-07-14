@@ -65,6 +65,11 @@ pub struct NpcEntry {
     /// normal client view distance (the default).
     #[serde(default)]
     pub visible_distance: Option<f64>,
+    /// Whether this NPC falls when the block beneath it isn't solid.
+    /// Off by default: an admin-placed NPC's exact `y` is deliberate, and
+    /// flipping every existing NPC to fall on upgrade would be a surprise.
+    #[serde(default)]
+    pub gravity: bool,
     // EMBER end
 }
 

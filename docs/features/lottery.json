@@ -1,0 +1,28 @@
+{
+  "feature": "lottery",
+  "summary": "消耗货币的抽奖系统,按权重随机抽奖,支持保底机制(连续多次不中会强制从保底奖池里抽)和每日抽取次数上限。玩家发指令才抽一次,不是按时间自动开奖。",
+  "commands": [
+    {
+      "usage": "/lottery",
+      "description": "列出所有已配置的奖池名字。",
+      "permission": "所有人默认可用 (ember:command.lottery, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/lottery <pool>",
+      "description": "花费该奖池配置的费用抽奖一次,按权重随机中一个奖品并直接发到背包(背包满则掉落在脚下)。",
+      "permission": "所有人默认可用 (ember:command.lottery, PermissionDefault::Allow)"
+    }
+  ],
+  "config_files": [
+    "shop/lottery.toml — 奖池列表,每项(LotteryPoolConfig)含:name/title、permission(可选,当前代码未生效,见下方说明)、daily_limit(每人每日抽取上限,-1为不限)、cost_currency/cost_amount(每次抽奖花费,不填currency用economy默认货币)、pity(可选保底配置:threshold多少次未中强制保底、group保底时只从这个分组标签的奖品里抽)、prizes数组(每项:item原版物品注册名、amount数量、weight权重、可选group分组标签、可选broadcast_message中奖全服广播文案,支持{player}/{prize}占位符)",
+    "shop/shop.toml 的顶层 enabled/url — 抽奖与商店、银行、市场共用同一个总开关和同一个MySQL连接,但shop.toml本身没有lottery专属设置项,奖池的全部参数都在lottery.toml里"
+  ],
+  "notes": [
+    "抽奖是纯粹\"玩家发指令触发一次\"的拉取式模型——没有定时开奖、没有固定开奖时间点,也没有\"票数攒够自动开奖\"的机制,每次/lottery <pool>都是独立结算一次。",
+    "扣费顺序是先扣钱、再验证每日限额并计数:如果扣费成功但验证限额时发现名额刚好被并发的另一次抽奖占满,系统会自动把钱退回去。也就是说失败的唯一后果最多是\"扣了钱但没抽到奖\",且有确定的自动退款路径,不会出现\"抽到奖但没扣钱\"。",
+    "保底机制是分组制的:pity.threshold次不中强制触发保底之后,只会从prizes里group字段等于pity.group的奖品中按权重再抽一次,不是直接发固定奖品;抽中保底或本身没配pity时,保底计数会相应重置或不生效。",
+    "daily_limit按自然日计算(代码用UTC日期比较,不是玩家所在时区或服务器本地时区),达到上限后再抽会直接报错且不扣费。",
+    "【建议核实,已用grep核实过】LotteryPoolConfig的permission字段(注释暗示的用途是限制哪些玩家能用该奖池)在当前代码里没有被读取或判断——搜索了lottery.rs命令文件和server::shop::lottery管理器,没有任何地方引用pool.permission。也就是说配置了也不会生效,任何拥有基础ember:command.lottery权限的玩家都能对所有奖池调用/lottery <pool>,不要依赖它做权限分层。",
+    "奖品同样只认原版物品注册名,不支持Ember自定义物品(CraftEngine移植出来的那一套)。"
+  ]
+}

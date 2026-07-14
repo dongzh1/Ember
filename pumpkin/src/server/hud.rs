@@ -87,8 +87,14 @@ impl HudManager {
     }
 
     /// Sets a player's HUD preference, persists it, and immediately shows
-    /// or hides their boss bar (doesn't wait for the next `tick`).
-    pub async fn set_enabled(&self, player: &Player, enabled: bool) {
+    /// or hides their boss bar (doesn't wait for the next `tick`). Returns
+    /// `false` if `enabled` was requested but the feature's own master
+    /// switch (`hud.toml`'s `enabled`) is currently off — the preference is
+    /// still saved (so it takes effect the moment an admin flips the master
+    /// switch back on), it just doesn't show a boss bar yet, matching
+    /// `tick`'s own gate (which would otherwise show one once here and then
+    /// never refresh it again).
+    pub async fn set_enabled(&self, player: &Player, enabled: bool) -> bool {
         let uuid = player.gameprofile.id;
 
         let mut state = self.player_state.write().await;
@@ -100,15 +106,20 @@ impl HudManager {
         state.save(&self.exec_dir);
         drop(state);
 
-        if enabled {
-            let config = self.config.read().await.clone();
-            self.show_or_update(player, &config).await;
-        } else {
+        if !enabled {
             let removed = self.active.write().await.remove(&uuid);
             if let Some(bossbar_uuid) = removed {
                 player.remove_bossbar(bossbar_uuid).await;
             }
+            return true;
         }
+
+        let config = self.config.read().await.clone();
+        if !config.enabled {
+            return false;
+        }
+        self.show_or_update(player, &config).await;
+        true
     }
 
     /// Re-evaluates every online player's HUD content on the configured

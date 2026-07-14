@@ -39,12 +39,15 @@ impl CommandExecutor for HudToggleExecutor {
                 .is_enabled_for_command(player.gameprofile.id)
                 .await;
             let now_enabled = !currently_on;
-            server
+            let took_effect = server
                 .hud_manager
                 .set_enabled(&player_arc, now_enabled)
                 .await;
 
-            let message = if now_enabled {
+            let message = if !took_effect {
+                "HUD preference saved, but the HUD feature is currently disabled server-wide \
+                 (hud.toml's `enabled` is false) - it'll show once an admin turns that on."
+            } else if now_enabled {
                 "HUD enabled."
             } else {
                 "HUD disabled."

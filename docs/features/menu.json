@@ -1,0 +1,29 @@
+{
+  "feature": "menu",
+  "summary": "纯数据包驱动的悬浮菜单系统:在玩家眼前用隐形载具+文字/物品展示实体拼出标题和一排按钮,把玩家挂载在隐形载具上冻结原地,点击按钮执行命令。不写入世界任何实体或存档,关闭后完全清理。",
+  "commands": [
+    {
+      "usage": "/menu",
+      "description": "打开menu/menus.toml中配置的第一个菜单;如果玩家当前已经打开的正是这个菜单,则改为关闭它(开关式行为)",
+      "permission": "所有人默认可用 (ember:command.menu, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/menu <name>",
+      "description": "打开指定名字的菜单;如果玩家当前已经打开的正是这个菜单,则改为关闭它",
+      "permission": "所有人默认可用 (ember:command.menu, PermissionDefault::Allow)"
+    }
+  ],
+  "config_files": [
+    "menu/menus.toml — 菜单列表:每个菜单包含name(菜单名,供/menu <name>引用)、title(标题文本)、distance(标题/按钮生成在玩家眼前的距离,默认3格)、title_height(标题相对锚点的垂直高度,默认0.8格)、buttons数组;每个button包含item(图标物品注册名)、label(按钮文字)、command(点击后执行的命令,支持%player%占位符)、offset_right/offset_up/offset_forward(相对锚点的三向偏移,单位格)、scale(缩放,默认1.5)"
+  ],
+  "notes": [
+    "该命令的默认权限是Allow(所有玩家都能用),不是OP限定——这是刻意设计给普通玩家用的功能,和/npc、/hud reload等管理类命令的默认权限不同。",
+    "按钮的command以点击者自己的身份和权限执行(等同于点击者亲自输入了这条命令),而不是控制台身份——这与NPC的setaction命令(以控制台身份执行,见npc.json的notes)正好相反,配置按钮命令时要确认普通玩家确实有权限执行它。",
+    "command同样支持%player%占位符,会被替换为点击者的名字。",
+    "菜单没有持久化的'当前打开状态',纯粹是运行时内存态+客户端数据包,服务器重启或玩家重新登录都不会恢复之前打开的菜单。",
+    "菜单的位置只在打开那一刻计算一次(玩家眼睛位置沿水平朝向前移distance格),之后不会跟随玩家转头持续更新——但因为玩家被挂载在隐形载具上无法真正走动,这在实际体验上不是问题;抬头低头(pitch)在计算锚点时会被忽略,不会导致菜单倾斜。",
+    "目前明确不支持Bedrock客户端,open()方法里会直接返回'Floating menus aren't supported on Bedrock clients yet.'的错误。",
+    "按钮的可点击热区(interaction实体)固定使用原版默认的约1x1大小,menus.toml里无法单独调整某个按钮热区的宽高。",
+    "如果menus.toml里menus列表为空,/menu会报错提示'No menus are configured'。"
+  ]
+}

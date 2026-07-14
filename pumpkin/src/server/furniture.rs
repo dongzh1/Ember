@@ -209,16 +209,12 @@ impl FurnitureManager {
             Storage::File { .. } | Storage::Mysql { .. } => return Vec::new(),
         };
 
-        let pool = match sqlx::mysql::MySqlPoolOptions::new()
-            .max_connections(4)
-            .connect(&url)
-            .await
-        {
+        let pool = match crate::server::ember_db::connect_ember_database(&url).await {
             Ok(pool) => pool,
             Err(e) => {
                 error!(
-                    "Furniture manager: failed to connect to mysql ({url}): {e} - furniture in \
-                     this world won't load or persist until this is fixed."
+                    "Furniture manager: {e} - furniture in this world won't load or persist \
+                     until this is fixed."
                 );
                 return Vec::new();
             }

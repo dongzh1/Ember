@@ -1,0 +1,25 @@
+{
+  "feature": "custom_item",
+  "summary": "让一个真实的原版物品（比如钻石剑）附加上自定义的 minecraft:item_model 组件模型，从而在不引入新物品ID的前提下做出「自定义物品」的外观；耐久、最大堆叠数等一切游戏属性完全继承自它所依附的那个原版物品。",
+  "commands": [
+    {
+      "usage": "/customitem give <player> <id> [count]",
+      "description": "给目标玩家一个（或指定数量个）在 items.toml 中配置好的自定义物品。count 省略时默认给 1 个；数量超过该原版物品的最大堆叠上限时会像原版 /give 一样自动拆分成多组塞进背包/掉落在地上。id 不存在时会提示错误且不会给予任何东西。",
+      "permission": "OP 3级（权限节点 ember:command.customitem）"
+    },
+    {
+      "usage": "/customitem list",
+      "description": "列出 items.toml 中已配置的所有自定义物品 id。",
+      "permission": "OP 3级（权限节点 ember:command.customitem）"
+    }
+  ],
+  "config_files": [
+    "resourcepack/items.toml — 自定义物品列表，每一项包含：id（给命令/家具/自定义方块系统引用的名字）、base_item（真正的原版物品注册名，决定耐久/最大堆叠等一切原版行为）、model（写入 minecraft:item_model 组件的模型路径，需要在资源包里有对应的模型文件）、display_name（可选，自定义显示名称）"
+  ],
+  "notes": [
+    "自定义物品的本质是「原版物品 + 一个模型组件」，协议层面并不存在真正的新物品ID——这也是 CraftEngine 在 Paper 插件生态里采用的同一套思路。",
+    "只支持 1.21.2 及以上版本客户端使用的新版 item_model 组件；旧版数字式 custom_model_data 组件在上游 Pumpkin 里本来就是一个没有接线的桩（没有注册对应的 NBT/网络编解码），所以低版本客户端看到的只会是原版外观，不会显示自定义模型——这不是 Ember 引入的限制，是上游还没实现。",
+    "model 字段指向的贴图/模型文件需要管理员自己放进资源包构建器的 source_dir 里；两个配置文件之间没有做交叉校验，路径写错不会报错，只会导致客户端显示原版外观而不是自定义模型。",
+    "base_item 填了一个不存在的原版物品注册名时，这个自定义物品在 give/list 等所有功能里都会失效（等同于未配置），同样不会报错提醒。"
+  ]
+}

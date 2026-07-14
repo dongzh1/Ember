@@ -97,6 +97,9 @@ pub mod furniture;
 // EMBER start - custom blocks (resource-pack-driven, phase 4 of the CraftEngine portation)
 pub mod custom_block;
 // EMBER end
+// EMBER start - dedicated MySQL database for Ember's own auxiliary storage
+mod ember_db;
+// EMBER end
 pub mod recipe;
 pub mod scheduler;
 pub mod seasonal_events;

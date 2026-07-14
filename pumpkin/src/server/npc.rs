@@ -23,9 +23,10 @@ use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::java::client::play::{
     Animation, CEntityAnimation, CEntityPositionSync, CHeadRot, CPlayerInfoUpdate, CRemoveEntities,
-    CRemovePlayerInfo, CSetEntityMetadata, CSpawnEntity, Metadata, Player as InfoPlayer,
-    PlayerAction, PlayerInfoFlags,
+    CRemovePlayerInfo, CSetEntityMetadata, CSpawnEntity, CUpdateEntityRot, Metadata,
+    Player as InfoPlayer, PlayerAction, PlayerInfoFlags,
 };
+use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector2::{Vector2, to_chunk_pos};
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::text::TextComponent;
@@ -60,6 +61,13 @@ const MOVE_STEP_BLOCKS: f64 = 0.3;
 /// How long a wandering NPC waits at each stop before picking a new target.
 const WANDER_PAUSE_MIN_TICKS: i32 = 40;
 const WANDER_PAUSE_MAX_TICKS: i32 = 120;
+// EMBER end
+
+// EMBER start - NPC gravity
+/// Blocks fallen per `MOVEMENT_INTERVAL_TICKS` call while airborne (~4
+/// blocks/s) — a fixed rate, not real accelerating gravity, close enough to
+/// vanilla's ~3.92 blocks/s terminal velocity for a "don't float" correction.
+const FALL_STEP_BLOCKS: f64 = 0.4;
 // EMBER end
 
 // EMBER start - NPC escort (guide)
@@ -412,6 +420,25 @@ impl NpcManager {
         config.save();
         Ok(())
     }
+
+    // EMBER start - NPC gravity
+    /// Toggles falling when airborne. Picked up by the next `tick()`, like
+    /// `look_at_nearest_player` — no respawn needed, since nothing about the
+    /// spawn packet itself changes.
+    pub async fn set_gravity(&self, name: &str, enabled: bool) -> Result<(), String> {
+        let mut config = self.config.write().await;
+        let Some(entry) = config
+            .npcs
+            .iter_mut()
+            .find(|n| n.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("No NPC named '{name}' exists."));
+        };
+        entry.gravity = enabled;
+        config.save();
+        Ok(())
+    }
+    // EMBER end
 
     /// Sets the crouch pose. Forces a respawn (like `set_skin`) since the
     /// pose is part of the metadata sent once at spawn time, not re-sent
@@ -804,6 +831,8 @@ impl NpcManager {
                         Self::update_escort(npc, &players);
                     } else if npc.goal.is_some() || npc.wander.is_some() {
                         Self::move_npc(npc, tick_count, &players);
+                    } else if entry.gravity {
+                        Self::apply_gravity(npc, world, &players);
                     }
                 }
             }
@@ -1004,12 +1033,73 @@ impl NpcManager {
             return;
         }
         npc.last_sent_head_yaw = Some(head_yaw);
+        // EMBER: keep the body yaw in sync with the head, or a stationary
+        // look-at only ever swivels the head while the body stays frozen at
+        // its last movement/spawn orientation - the same gap `step_towards`/
+        // `update_escort` don't have, since they already turn the whole body.
+        npc.yaw = yaw;
 
         for player in players {
             if npc.visible_to.contains(&player.gameprofile.id)
                 && let ClientPlatform::Java(client) = player.client.as_ref()
             {
                 client.try_enqueue_packet(&CHeadRot::new(VarInt(npc.entity_id), head_yaw));
+                client.try_enqueue_packet(&CUpdateEntityRot::new(
+                    VarInt(npc.entity_id),
+                    head_yaw,
+                    0,
+                    true,
+                ));
+            }
+        }
+    }
+    // EMBER end
+
+    // EMBER start - NPC gravity
+    /// Simple non-accelerating fall: steps `npc` down by `FALL_STEP_BLOCKS`
+    /// while the block at its feet is non-solid, snapping onto the surface
+    /// instead of tunneling through it once solid ground is reached. Not
+    /// real physics (no acceleration, no terminal-velocity curve) - just
+    /// enough that a misplaced or terrain-orphaned NPC doesn't float. Only
+    /// runs while idle (no active goal/wander/escort); those already own the
+    /// NPC's `y` via their own straight-line movement toward a target.
+    fn apply_gravity(
+        npc: &mut RuntimeNpc,
+        world: &Arc<crate::world::World>,
+        players: &[Arc<Player>],
+    ) {
+        let feet = BlockPos::new(
+            npc.position.x.floor() as i32,
+            (npc.position.y - 0.01).floor() as i32,
+            npc.position.z.floor() as i32,
+        );
+        if world.get_block_state(&feet).is_solid() {
+            return;
+        }
+
+        let old_position = npc.position;
+        let mut new_y = npc.position.y - FALL_STEP_BLOCKS;
+        let mut on_ground = false;
+        let below = BlockPos::new(feet.0.x, (new_y - 0.01).floor() as i32, feet.0.z);
+        if world.get_block_state(&below).is_solid() {
+            new_y = f64::from(below.0.y) + 1.0;
+            on_ground = true;
+        }
+        npc.position = Vector3::new(npc.position.x, new_y, npc.position.z);
+
+        let velocity = npc.position.sub(&old_position);
+        for player in players {
+            if npc.visible_to.contains(&player.gameprofile.id)
+                && let ClientPlatform::Java(client) = player.client.as_ref()
+            {
+                client.try_enqueue_packet(&CEntityPositionSync::new(
+                    VarInt(npc.entity_id),
+                    npc.position,
+                    velocity,
+                    npc.yaw,
+                    0.0,
+                    on_ground,
+                ));
             }
         }
     }
@@ -1115,9 +1205,10 @@ impl NpcManager {
         // Every non-player kind needs its name sent explicitly: a player
         // gets a nametag "for free" from its tab-list username, nothing
         // else does.
-        ok &= Metadata::new(
+        ok &= Metadata::with_fallback_type(
             TrackedData::CUSTOM_NAME,
             MetaDataType::OPTIONAL_TEXT_COMPONENT,
+            MetaDataType::OPTIONAL_COMPONENT, // EMBER: v26.1+ renamed this slot, see Metadata::fallback_type
             Some(TextComponent::text(entry.name.clone())),
         )
         .write(&mut buf, &version)

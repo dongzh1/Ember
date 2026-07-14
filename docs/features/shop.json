@@ -1,0 +1,29 @@
+{
+  "feature": "shop",
+  "summary": "服务器管理员配置的固定商店,玩家用/shop <名字>打开GUI逐件购买/出售/赎回,卖价会随实际成交动态涨跌(卖多了跌价,每天自动回涨)。",
+  "commands": [
+    {
+      "usage": "/shop",
+      "description": "列出所有已配置的商店名字。",
+      "permission": "所有人默认可用 (ember:command.shop, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/shop <name>",
+      "description": "打开指定商店的GUI(9x3箱子界面)。左键/右键点上面两排的商品格购买1个;底部固定槽位分别是\"出售手持物品(整组)\"和\"赎回上一次卖出的物品\"。",
+      "permission": "所有人默认可用 (ember:command.shop, PermissionDefault::Allow)"
+    }
+  ],
+  "config_files": [
+    "shop/shop.toml 的 [shop] 表 — buy_markup_pct(买价相对卖价的加价比例,默认0.10)、decay_every_n_sold(卖出多少件触发一次跌价,默认10)、price_decay_pct(每次跌价的百分比,默认0.01即1%)、min_price_pct(跌价下限,占该商品base_sell_price的比例,默认0.1即最低跌到基础价的10%)、daily_recovery_multiplier(每天价格回涨的倍数,默认1.5)、redeemable_expiry_hours(赎回资格保留多少小时,默认24)",
+    "shop/shops.toml — 具体商店列表,每个商店有name/title,以及items数组(每项:item原版物品注册名、currency、base_sell_price卖价基准、base_buy_price是否可买、limit每日购买上限(-1不限)、permission隐藏该格子用的权限——当前代码未生效,见下方说明)",
+    "shop/shop.toml 的顶层 enabled/url — 商店与银行、市场、抽奖共用同一个总开关和同一个MySQL连接"
+  ],
+  "notes": [
+    "【建议核实,已用grep核实过】ShopItem的permission字段(TOML注释写的用途是\"没有这个权限就隐藏该商品格子\")在当前代码里完全没有被读取——搜索了整个server::shop模块和shop_menu.rs的build_inventory函数,没有任何地方引用entry.permission。也就是说配置里填了这个字段也不会生效,能打开这个商店的玩家都能看到全部商品格子,不要依赖它做权限分层。",
+    "商店是全服共享的固定配置,不区分世界也不挂在NPC身上——代码里没有任何按世界或按NPC限定商店可见性/可用性的逻辑,/shop <name>在任何世界执行效果都一样。",
+    "价格是动态的:真实卖出会累积\"已卖出量\",每达到decay_every_n_sold件卖价跌一次(跌到min_price_pct封底);系统每24小时自动把跌价商品向base_sell_price回涨,涨回基础价就清除该商品的价格记录。买价=卖价+加价,买入操作本身不影响价格。",
+    "\"赎回\"槽位只保留玩家最近一次卖出的那一件(新卖出会覆盖旧的赎回记录,不是队列),按当前买价结算(不是按卖出时的价格),超过redeemable_expiry_hours后失效——失效是惰性判断(玩家再次打开商店时才检查过期),没有后台清理任务。",
+    "代码里已经预留了bulk_purchase_amounts辅助函数(64叠→1/5/10/32/64件,16叠→1/4/8/12/16件),但目前没有任何地方调用它——参考实现(PixelShop)有的\"右键弹批量购买档位子菜单\"这次没做,GUI左键/右键点击目前都只能一次买1个。",
+    "购买/出售在GUI里失败时(比如余额不足、超过每日限购)目前是静默不生效,不会弹文字提示告诉玩家具体失败原因。"
+  ]
+}

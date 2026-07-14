@@ -1,0 +1,37 @@
+{
+  "feature": "tpa",
+  "summary": "玩家之间互相发起的传送请求系统:请求传送到对方(/tpa)或请求对方传送过来(/tpahere),对方可以接受或拒绝,120 秒未回应自动失效。",
+  "commands": [
+    {
+      "usage": "/tpa <player>",
+      "description": "向目标玩家发起传送请求——若被接受,发起者会被传送到目标玩家身边。",
+      "permission": "所有玩家 (ember:command.tpa,默认允许 PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/tpahere <player>",
+      "description": "向目标玩家发起“传送到我这里”的请求——若被接受,目标玩家会被传送到发起者身边。",
+      "permission": "所有玩家 (ember:command.tpahere,默认允许 PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/tpaaccept",
+      "description": "接受自己当前收到的传送请求,并按请求类型执行实际传送(/tpa 请求会把发起者传过来,/tpahere 请求会把自己传过去)。",
+      "permission": "所有玩家 (ember:command.tpaaccept,默认允许 PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/tpadeny",
+      "description": "拒绝自己当前收到的传送请求。",
+      "permission": "所有玩家 (ember:command.tpadeny,默认允许 PermissionDefault::Allow)"
+    }
+  ],
+  "config_files": [
+    "无配置文件——所有待处理请求只保存在内存里(TpaManager 内部的 HashMap,按接收者 UUID 索引),不写数据库也不落盘,服务器重启后所有待处理请求会全部丢失,这是预期行为。"
+  ],
+  "notes": [
+    "⚠️ 请求超时时间(120 秒,源码常量 REQUEST_TIMEOUT_SECS)是写死在代码里的,没有任何配置文件可以调整——如果需要改成可配置项,需要修改代码并重新编译,建议和老大确认是否有必要开放这个配置。",
+    "没有 /tpacancel 之类的“撤回”命令:发起者发出请求后无法主动撤销,只能等待 120 秒超时,或者对同一个目标重新发起一次请求(新请求会直接覆盖同一接收者身上的旧请求,不会排队,也不会通知被覆盖的旧请求发起者)。",
+    "每个接收者同一时间只保留一条待处理请求——哪怕请求来自不同的人,新请求也会直接顶替旧请求。",
+    "聊天提示里的 [接受]/[拒绝] 按钮通过 ClickEvent::RunCommand 直接运行 /tpaaccept 或 /tpadeny,和手动输入命令效果完全一样,方便手机端或不熟悉命令的玩家操作。",
+    "不能对自己发起传送请求(/tpa 和 /tpahere 都会检查目标是否为自己)。",
+    "如果 /tpaaccept 时发起者已经下线,该请求会被消耗掉(移除)但不会执行传送,并提示“对方已经不在线了”——这意味着这条待处理请求就作废了,发起者需要重新发起。"
+  ]
+}

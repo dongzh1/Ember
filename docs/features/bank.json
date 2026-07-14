@@ -1,0 +1,37 @@
+{
+  "feature": "bank",
+  "summary": "在economy钱包之外再提供一层银行账户,支持存款/取款,并按玩家权限分档给每日复利利息;利息结算是懒惰触发(每次查询/存取款前先结算),不是后台定时任务。",
+  "commands": [
+    {
+      "usage": "/bank balance [currency]",
+      "description": "查询自己的银行账户余额(会先结算应得利息),同时显示当前分档的存款上限和日利率。不填currency用economy的默认货币。",
+      "permission": "所有人默认可用 (ember:command.bank, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/bank deposit <amount> [currency]",
+      "description": "把economy钱包里的钱存入银行账户;存入后超过所在分档的max_balance上限会被拒绝,金额不动。",
+      "permission": "所有人默认可用 (ember:command.bank, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/bank withdraw <amount> [currency]",
+      "description": "把银行账户里的钱取回economy钱包;取款超过当前银行余额会被拒绝(不允许透支)。",
+      "permission": "所有人默认可用 (ember:command.bank, PermissionDefault::Allow)"
+    },
+    {
+      "usage": "/bank log [currency]",
+      "description": "查看自己最近10条银行流水(存款/取款/利息入账各一行)。",
+      "permission": "所有人默认可用 (ember:command.bank, PermissionDefault::Allow)"
+    }
+  ],
+  "config_files": [
+    "shop/shop.toml 的 [bank] 表 — tiers数组,每个分档(BankTier)包含:permission(可选权限节点,留空代表兜底档,必须至少保留一条无permission的档位)、max_balance(该档银行存款上限)、daily_rate(日利率,如0.001即0.1%/天)、max_interest_per_settlement(单次结算最多能入账多少利息)",
+    "shop/shop.toml 的顶层 enabled/url — 银行与商店、市场、抽奖共用同一个总开关和同一个MySQL连接,没有单独给银行的开关"
+  ],
+  "notes": [
+    "四个子系统(商店/银行/市场/抽奖)共用shop/shop.toml里同一个enabled开关和同一个MySQL连接池,任何一个没配置好会影响全部四个。",
+    "利息是复利公式:interest = 本金×(1+daily_rate)^经过天数 − 本金,每次结算按max_interest_per_settlement封顶(封顶是\"每次结算\"而不是\"账户终身\"),结算后的时间戳会精确前移相应天数,不会因为频繁查询/存取款而产生时间漂移或利息重复计算。",
+    "分档规则和market的挂单位数分档是同一套逻辑:玩家满足的所有tier(持有其permission,或该tier没设permission)里,取max_balance最大的一档生效。",
+    "存款超限或取款超额都是直接拒绝并原样保留,不会像有些同类系统那样自动截断到上限——要么全额成功要么完全不生效。",
+    "/bank log只是给玩家自查用的最近10条记录(数据库表本身不清理旧记录,只是查询限制了10条),不是完整的管理员审计工具。"
+  ]
+}

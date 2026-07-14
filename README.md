@@ -78,6 +78,9 @@ Edit `pumpkin.toml` and restart — see [Configuration](#configuration) below.
 
 All settings live in `pumpkin.toml` in the server's working directory.
 
+Looking for a quick command/permission/config-file reference instead of prose? Each Ember feature
+also has a small `docs/features/<name>.json` cheat sheet (e.g. `docs/features/npc.json`).
+
 ### EasyWorld formats
 
 `easy` is Ember's **default** chunk format (best compression, empty-chunk pruning, atomic
@@ -181,8 +184,10 @@ via their type-specific data.
                                                 # player/mannequin skins, block/item name for
                                                 # falling_block/item)
 /npc remove|list|move|skin <name> ...
+/npc info <name>                               # clickable property viewer/editor in chat
 /npc setaction <name> <command>                # run a console command on click (%player% placeholder)
 /npc lookat <name> on|off                      # continuously face the nearest visible player
+/npc gravity <name> on|off                     # fall when the block underneath isn't solid
 /npc sneak <name> on|off                       # client-side crouch pose
 /npc swing <name>                              # play the swing-main-arm animation once
 /npc moveto <name>                              # walk (not teleport) to your position
@@ -194,6 +199,10 @@ via their type-specific data.
 /npc escort <name> <player> here               # lead <player> to your position; ends on arrival
 /npc escort <name> stop                        # stop escorting
 ```
+
+`/npc info <name>` prints every configured property with clickable buttons — toggles (look-at/sneak/
+gravity) flip immediately, value fields (skin/action/wander/distance/position) pre-fill the edit
+command into your chat box instead. `/npc list`'s entries link to it too.
 
 Skins are always copied from a currently-online player (never resolved against Mojang).
 
@@ -442,6 +451,9 @@ cargo build --release
 
 所有配置都在服务端工作目录下的 `pumpkin.toml` 里。
 
+想快速查某个功能有哪些指令/权限/配置文件而不想翻长文？每个 Ember 功能都配了一份简易的
+`docs/features/<功能名>.json` 速查表（例如 `docs/features/npc.json`）。
+
 ### EasyWorld 世界格式
 
 一种格式，两个后端；加载方式按地图大小**自动**决定，你只选后端。完整说明见 [`docs/easyworld.md`](docs/easyworld.md)。
@@ -522,8 +534,10 @@ url = "mysql://user:pass@localhost:3306/ember"
 /npc create <名字> as <实体类型> [附加参数]       # 生成任意实体类型(附加参数:player/mannequin
                                                   # 填玩家名换皮肤,falling_block/item 填方块/物品名)
 /npc remove|list|move|skin <名字> ...
+/npc info <名字>                                 # 聊天框里可点击的属性查看/编辑面板
 /npc setaction <名字> <命令>                     # 点击时以控制台身份执行命令(%player% 占位符)
 /npc lookat <名字> on|off                        # 持续朝向最近的可见玩家
+/npc gravity <名字> on|off                       # 脚下没有实心方块时下落
 /npc sneak <名字> on|off                         # 客户端下蹲姿态
 /npc swing <名字>                                # 播放一次挥手动画
 /npc moveto <名字>                               # 走(不是瞬移)到你的位置
@@ -535,6 +549,10 @@ url = "mysql://user:pass@localhost:3306/ember"
 /npc escort <名字> <玩家> here                   # 带该玩家到你的位置,到达后自动结束
 /npc escort <名字> stop                          # 停止护送
 ```
+
+`/npc info <名字>` 会列出这个 NPC 全部已配置的属性,每一项都能点:开关类(看向玩家/下蹲/重力)
+点击立即生效,数值类(皮肤/点击指令/游荡半径/可见距离/位置)点击会把对应指令预填进聊天输入框,
+自己确认/修改后再回车执行；`/npc list` 的每一行也能直接点进对应的 info。
 
 皮肤始终从当前在线玩家复制（不联网解析 Mojang 用户名）。
 

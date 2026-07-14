@@ -1,0 +1,135 @@
+{
+  "feature": "npc",
+  "summary": "纯数据包驱动的假NPC系统:不是真实世界实体,不写入区块存档,只通过按视距生成/销毁的数据包让客户端看到。可以扮演任意实体类型(不只是假玩家),支持换肤、点击执行命令、看向玩家、下蹲、重力、行走/游荡/护送等简单行为。",
+  "commands": [
+    {
+      "usage": "/npc create <name>",
+      "description": "在自己当前位置创建一个新NPC,默认扮演player类型,使用自己当前的皮肤",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc create <name> <player>",
+      "description": "创建NPC,并使用指定在线玩家的皮肤,而不是命令发送者自己的皮肤",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc create <name> as <entity_type>",
+      "description": "创建NPC并指定其扮演的实体类型(如zombie、villager、armor_stand等),使用该类型的默认外观",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc create <name> as <entity_type> <extra>",
+      "description": "创建NPC并指定实体类型,extra的含义随类型而定:player/mannequin类型时extra是在线玩家名(作为皮肤来源),falling_block类型时extra是方块注册名,item类型时extra是物品注册名;其他实体类型不接受extra参数(填了会报错)",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc remove <name>",
+      "description": "删除一个NPC,并立即向所有当前能看到它的玩家发送消失数据包",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc list",
+      "description": "列出所有已创建的NPC及其所在世界和坐标(可在控制台执行)",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc move <name>",
+      "description": "把NPC瞬间传送到命令发送者当前的位置和朝向,并把这个新坐标永久写入NPC的存档('家'坐标)",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc skin <name> <player>",
+      "description": "从一个在线玩家身上重新复制皮肤给NPC(仅entity_type为player/mannequin的NPC支持,其他类型会报错)",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc setaction <name> <command>",
+      "description": "设置点击NPC时执行的命令,命令中的%player%会被替换为点击者的名字;该命令以控制台身份(而非点击者身份)执行,见notes",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc clearaction <name>",
+      "description": "清除点击命令,NPC恢复为纯装饰性(点击无任何反应)",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc lookat <name> on|off",
+      "description": "开启/关闭NPC持续转头朝向最近的可见玩家(店主式效果)",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc gravity <name> on|off",
+      "description": "开启/关闭NPC重力:开启后若脚下没有实心方块会缓慢下落直到落地,默认关闭;不是真实物理加速度,是固定速度下落(约4格/秒)",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc sneak <name> on|off",
+      "description": "开启/关闭NPC的下蹲姿势(纯客户端视觉效果,不影响判定)",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc swing <name>",
+      "description": "让NPC播放一次挥动主手动画,一次性效果,不会持久化保存",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc moveto <name>",
+      "description": "让NPC步行(而非瞬移)走到命令发送者当前位置;不会更新NPC存档里的'家'坐标,见notes",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc wander <name> on <radius>",
+      "description": "开启随机游荡:NPC会在其'家'坐标周围<radius>格范围内随机走动、停顿再继续,radius必须是不小于1的整数",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc wander <name> off",
+      "description": "停止游荡",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc hide <name> <player>",
+      "description": "让NPC对指定玩家隐藏,不管距离多近都不可见;目标玩家可以是当前离线的(支持按OP/白名单/封禁列表缓存或正版信息解析,见notes)",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc show <name> <player>",
+      "description": "撤销hide,该玩家进入视距范围后可以重新看到NPC",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc distance <name> [blocks]",
+      "description": "设置NPC的自定义可见距离(格),完全替换查看者自己的客户端视距设置;不填blocks则重置为使用每个查看者各自的正常视距",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc escort <name> <player>",
+      "description": "让NPC无限期跟随指定在线玩家(跟随模式),与玩家保持约3格距离",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc escort <name> <player> here",
+      "description": "让NPC带领指定在线玩家走到命令发送者当前位置(引路模式),到达后自动结束;若玩家掉队超过约6格NPC会暂停等待,若相距≥24格则直接瞬移追上而不是一路走过去",
+      "permission": "OP 3级 (ember:command.npc)"
+    },
+    {
+      "usage": "/npc escort <name> stop",
+      "description": "停止护送,不论当前是跟随模式还是引路模式",
+      "permission": "OP 3级 (ember:command.npc)"
+    }
+  ],
+  "config_files": [
+    "npc/npcs.json — 所有NPC的持久化定义:名字、所在世界、坐标与朝向、皮肤材质属性、entity_type(实体类型)、falling_block的方块名/item的物品名、点击命令、看向玩家/下蹲/重力/游荡半径/隐藏名单/自定义可见距离等全部状态"
+  ],
+  "notes": [
+    "整个/npc命令树只有一个权限节点(ember:command.npc,OP 3级),没有按子命令再细分权限。",
+    "setaction配置的点击命令以控制台身份(完全权限)执行,不是以点击者的权限执行——这与/menu按钮命令(以点击玩家自己的权限执行)正好相反,配置时要小心,任何能点到NPC的人都可能触发一条console级别的命令。",
+    "create/move/moveto、以及escort ... here 这几种用法必须由玩家本人执行(需要读取发送者当前坐标);其余子命令都是按NPC名字操作,理论上控制台也能执行(list已验证不要求玩家身份)。",
+    "move(瞬移并永久更新'家'坐标)和moveto(步行、不写入存档)是两个容易混淆的不同命令:重启服务器后,moveto造成的位移会丢失,NPC会回到最后一次move/create保存的坐标。",
+    "源码文件顶部的功能列表注释(npc.rs第1-26行)遗漏了gravity子命令,注释与实际代码没有完全同步,已在本文件中补全,建议顺手更新那段注释。",
+    "moveto/wander/escort的移动都是直线步进,没有寻路和碰撞检测,可能穿模穿墙穿地板。",
+    "只有entity_type为player或mannequin才支持换肤(skin命令/create时提供玩家皮肤);falling_block的extra必须是合法方块名,item的extra必须是合法物品名,其他实体类型创建时若提供extra会直接报错。",
+    "hide/show的目标玩家参数(GameProfileArgumentType)比create/skin/escort用的玩家参数(EntityArgumentType::Player)宽松:前者可以是离线玩家(按在线->用户名缓存->OP/封禁/白名单列表->正版接口的顺序解析),后者必须是当前在线玩家。",
+    "NPC名字会被复用为entity_type=player时的假玩家tab列表用户名,因此限定1-16个字符、只能是字母数字和下划线,与原版正版用户名字符集一致。"
+  ]
+}
