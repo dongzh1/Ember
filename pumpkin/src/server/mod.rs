@@ -79,6 +79,12 @@ pub mod shop;
 // EMBER start - floating packet-only menu system
 pub mod menu;
 // EMBER end
+// EMBER start - PAPI-style placeholder system
+pub mod placeholder;
+// EMBER end
+// EMBER start - HUD system (boss-bar display, references BetterHud)
+pub mod hud;
+// EMBER end
 // EMBER start - resource pack builder (self-generate + self-host/S3)
 mod resourcepack_builder;
 // EMBER end
@@ -112,6 +118,12 @@ pub use tpa::TpaManager;
 // EMBER end
 // EMBER start - floating packet-only menu system
 pub use menu::MenuManager;
+// EMBER end
+// EMBER start - PAPI-style placeholder system
+pub use placeholder::PlaceholderManager;
+// EMBER end
+// EMBER start - HUD system (boss-bar display, references BetterHud)
+pub use hud::HudManager;
 // EMBER end
 // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
 pub use custom_item::CustomItemManager;
@@ -227,6 +239,17 @@ pub struct Server {
     /// Floating packet-only menus (`menu/menus.toml`): never real world
     /// entities, opened per-player via `/menu`. See `menu::MenuManager`.
     pub menu_manager: Arc<menu::MenuManager>,
+    // EMBER end
+    // EMBER start - PAPI-style placeholder system
+    /// `%player_health%`-style variable expansion, shared by any system
+    /// that wants it (currently `hud::HudManager`). See
+    /// `placeholder::PlaceholderManager`.
+    pub placeholder_manager: Arc<placeholder::PlaceholderManager>,
+    // EMBER end
+    // EMBER start - HUD system (boss-bar display, references BetterHud)
+    /// Per-player boss-bar HUD (`hud/hud.toml`), refreshed on an interval.
+    /// See `hud::HudManager`.
+    pub hud_manager: Arc<hud::HudManager>,
     // EMBER end
     // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
     /// Custom items (`resourcepack/items.toml`): vanilla base items wearing
@@ -450,6 +473,12 @@ impl Server {
         // EMBER start - floating packet-only menu system
         let menu_manager = Arc::new(menu::MenuManager::new());
         // EMBER end
+        // EMBER start - PAPI-style placeholder system
+        let placeholder_manager = Arc::new(placeholder::PlaceholderManager::new());
+        // EMBER end
+        // EMBER start - HUD system (boss-bar display, references BetterHud)
+        let hud_manager = Arc::new(hud::HudManager::new());
+        // EMBER end
         // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
         let custom_item_manager = Arc::new(custom_item::CustomItemManager::new());
         // EMBER end
@@ -516,6 +545,8 @@ impl Server {
             lottery_manager,                // EMBER
             shop_chat_capture,              // EMBER
             menu_manager,                   // EMBER
+            placeholder_manager,            // EMBER
+            hud_manager,                    // EMBER
             custom_item_manager,            // EMBER
         };
         let server = Arc::new(server);
@@ -1763,6 +1794,7 @@ impl Server {
 
         self.task_scheduler.tick(self).await;
         self.npc_manager.tick(self).await; // EMBER - packet-only NPC visibility
+        self.hud_manager.tick(self).await; // EMBER - per-player boss-bar HUD refresh
 
         let mut handles = Vec::new();
         for world in self.worlds.load().iter() {

@@ -322,6 +322,26 @@ Two ways to skin a block, fourth and final phase of the CraftEngine port:
   position keeps its exact vanilla behavior — reviewed carefully for a byte-for-byte fallthrough
   when no record exists, but not verified against a real client.
 
+### Placeholders & HUD
+
+A `%player_health%`-style variable registry (in the spirit of Bukkit/Paper's PlaceholderAPI,
+simplified to one flat table since every Ember system lives in the same process) backs a
+per-player boss-bar HUD (in the spirit of the plugin
+[BetterHud](https://github.com/toxicity188/BetterHud)), refreshed on an interval:
+
+```
+/hud toggle    # turn your own HUD on/off
+/hud reload    # re-read hud/hud.toml (admin)
+```
+
+Off by default; enable in `hud/hud.toml`. The default title template (`%player_health%/
+%player_max_health%❤ | %player_world% (x, y, z) | N online | tps %server_tps%`) uses only
+vanilla Unicode symbols — no custom resource pack required to try it. Swap in a custom font
+namespace (`font` in the config) once you have matching font-provider assets in the resource
+pack builder's `source_dir` for fancier icons. Built-in placeholders cover player health/food/
+position/world/gamemode/ping and server online-count/TPS/MSPT; any other system can register
+its own via `PlaceholderManager::register` instead of reinventing token replacement.
+
 ## Inherited Pumpkin Features
 
 Everything from upstream Pumpkin — Ember syncs weekly and keeps full compatibility:
@@ -627,6 +647,25 @@ URL，老用法完全不受影响。是移植 [CraftEngine](https://github.com/X
   后端时同样存进那个世界自己的数据库）；破坏时掉落自定义物品而不是载体的原版战利品，载体自己的
   交互行为（比如音符盒调音）在记录了自定义方块的位置会被吞掉。其余所有位置的原版方块行为完全
   不变——逐字审查过"没有记录时是否严丝合缝落回原代码"，但没有真实客户端实测验证。
+
+### 占位符系统与 HUD
+
+一套 `%player_health%` 风格的变量注册系统（参考 Bukkit/Paper 生态的 PlaceholderAPI，简化成一张
+扁平表——Ember 所有系统都在同一个进程里，不需要 PAPI 那套跨插件 jar 的复杂派发），支撑一个按玩家
+持续显示、定时刷新的 boss bar HUD（参考插件 [BetterHud](https://github.com/toxicity188/BetterHud)
+的思路）：
+
+```
+/hud toggle    # 开关自己的 HUD
+/hud reload    # 重新读取 hud/hud.toml（管理员）
+```
+
+默认关闭，在 `hud/hud.toml` 开启。默认标题模板（`%player_health%/%player_max_health%❤ | 世界名
+(x, y, z) | N 人在线 | tps %server_tps%`）只用原版自带的 Unicode 符号——不需要任何自定义资源包
+就能直接试用。等有了字体贴图素材，把 provider JSON+贴图放进资源包生成器的 `source_dir`，配置里填
+一下 `font` 命名空间即可换成更花哨的自定义图标。内置占位符覆盖玩家血量/饱食度/坐标/世界/游戏模式/
+延迟，以及服务器在线人数/TPS/MSPT；其他系统想要 `%...%` 展开可以直接调用
+`PlaceholderManager::register` 注册自己的解析器，不用重新发明一套 token 替换逻辑。
 
 ## 继承的 Pumpkin 能力
 

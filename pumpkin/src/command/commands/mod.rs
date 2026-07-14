@@ -89,6 +89,9 @@ mod shop;
 // EMBER start - floating packet-only menu system
 mod menu;
 // EMBER end
+// EMBER start - HUD system (boss-bar display, references BetterHud)
+mod hud;
+// EMBER end
 // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
 mod custom_item;
 // EMBER end
@@ -224,6 +227,9 @@ pub async fn default_dispatcher(
     // EMBER end
     // EMBER start - floating packet-only menu system
     menu::register(&mut dispatcher, registry);
+    // EMBER end
+    // EMBER start - HUD system (boss-bar display, references BetterHud)
+    hud::register(&mut dispatcher, registry);
     // EMBER end
     // EMBER start - custom items (resource-pack-driven, phase 2 of the CraftEngine portation)
     custom_item::register(&mut dispatcher, registry);
