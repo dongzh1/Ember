@@ -217,6 +217,10 @@ impl Chunk {
                 block_ticks: ChunkTickScheduler::default(),
                 fluid_ticks: ChunkTickScheduler::default(),
                 pending_block_entities: Mutex::default(),
+                // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+                ember_custom_blocks: Mutex::default(),
+                ember_furniture: Mutex::default(),
+                // EMBER end
                 light_engine: Mutex::new(ChunkLight::default()),
                 light_populated: AtomicBool::new(false),
                 status: ChunkStatus::Empty,
@@ -311,6 +315,10 @@ impl Chunk {
             block_ticks: ChunkTickScheduler::default(),
             fluid_ticks: ChunkTickScheduler::from_iter(proto_chunk.fluid_ticks),
             pending_block_entities: Mutex::new(pending_block_entities),
+            // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+            ember_custom_blocks: Mutex::default(),
+            ember_furniture: Mutex::default(),
+            // EMBER end
             status: proto_chunk.stage.into(),
             blending_data: proto_chunk.blending_data,
         };

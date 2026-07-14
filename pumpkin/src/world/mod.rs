@@ -135,6 +135,9 @@ use pumpkin_world::{
     CURRENT_BEDROCK_MC_VERSION, biome, chunk::io::Dirtiable, inventory::Inventory,
 };
 use pumpkin_world::{chunk::ChunkData, world::BlockAccessor};
+// EMBER start - chunk-embedded storage for ember custom blocks/furniture
+use pumpkin_world::chunk::EmberFurnitureEntry;
+// EMBER end
 use pumpkin_world::{level::Level, tick::TickPriority};
 pub use pumpkin_world::{world::BlockFlags, world_info::LevelData};
 use rand::seq::SliceRandom;
@@ -300,11 +303,6 @@ impl World {
         dimension: Dimension,
         block_registry: Arc<BlockRegistry>,
         server: Weak<Server>,
-        // EMBER: this world's resolved chunk backend - furniture/custom
-        // block storage mirrors it (mysql-backend worlds share placements
-        // through the same connection the chunk data itself uses; other
-        // backends fall back to a per-world TOML file).
-        chunk_config: &pumpkin_config::chunk::ChunkConfig,
     ) -> Self {
         // TODO
         let generation_settings = GenerationSettings::from_dimension(&dimension);
@@ -315,17 +313,16 @@ impl World {
             .then(|| Mutex::new(dragon_fight::DragonFight::new()));
         // EMBER start - per-world furniture/custom block instance storage
         //
-        // Both load synchronously here (this fn isn't async); resolving
-        // visuals (furniture) and connecting to mysql (either, when this
-        // world's chunk backend is mysql) need async work this can't do
-        // yet, so callers must follow up with `furniture_manager.
-        // load_runtime(...).await` / `custom_block_manager.
-        // connect_mysql(...).await` once the world is fully constructed.
-        let world_root = level.level_folder.root_folder.clone();
-        let furniture_manager =
-            crate::server::furniture::FurnitureManager::new(&world_root, chunk_config);
-        let custom_block_manager =
-            crate::server::custom_block::CustomBlockManager::new(&world_root, chunk_config);
+        // Placement data itself lives in each chunk's own
+        // `ember_custom_blocks`/`ember_furniture` fields (see
+        // `pumpkin_world::chunk::ChunkData`), so neither manager needs the
+        // world's root folder or chunk backend config anymore - both
+        // automatically follow whichever backend this world's chunks
+        // already use. `furniture_manager` still needs an async follow-up
+        // (`load_runtime(...).await`, once the world is fully constructed)
+        // to resolve custom-item visuals and scan existing placements.
+        let furniture_manager = crate::server::furniture::FurnitureManager::new();
+        let custom_block_manager = crate::server::custom_block::CustomBlockManager::new();
         // EMBER end
         Self {
             uuid: Uuid::new_v4(),
@@ -4629,9 +4626,9 @@ impl World {
             // configured custom item back instead of the carrier's own
             // vanilla loot table - every position with no recorded custom
             // block falls through to the exact drop logic below, unchanged.
-            let ember_custom_block_id = self.custom_block_manager.get_at(position).await;
+            let ember_custom_block_id = self.get_ember_custom_block(position);
             if let Some(custom_block_id) = &ember_custom_block_id {
-                self.custom_block_manager.remove(position).await;
+                self.remove_ember_custom_block(position);
                 if !flags.contains(BlockFlags::SKIP_DROPS)
                     && let Some(server) = self.server.upgrade()
                     && let Some(cb) = self.custom_block_manager.find_by_id(custom_block_id).await
@@ -5152,6 +5149,82 @@ impl World {
             });
         }
     }
+
+    // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+    /// Reads which ember custom block (if any) is at `pos`, straight from
+    /// the owning chunk's own data - not a pre-built world-wide index (see
+    /// `ChunkData::ember_custom_blocks`'s doc comment for why: every real
+    /// caller already has the chunk loaded at the point it asks, so there's
+    /// nothing to pre-populate). Returns `None` if the chunk isn't
+    /// currently resident, which never happens at a real call site (this is
+    /// only ever consulted from interaction hooks on an already-loaded,
+    /// already-rendered chunk).
+    pub fn get_ember_custom_block(&self, pos: &BlockPos) -> Option<String> {
+        self.level
+            .read_chunk_sync(&pos.chunk_position(), |chunk| {
+                chunk.ember_custom_blocks.lock().unwrap().get(pos).cloned()
+            })
+            .flatten()
+    }
+
+    /// Records `pos` as holding ember custom block `block_id`, and marks
+    /// the chunk dirty so it gets flushed on the next autosave/unload/
+    /// shutdown - same mechanism `add_block_entity_nbt` already relies on.
+    pub fn set_ember_custom_block(&self, pos: BlockPos, block_id: &str) {
+        self.level.read_chunk_sync(&pos.chunk_position(), |chunk| {
+            chunk
+                .ember_custom_blocks
+                .lock()
+                .unwrap()
+                .insert(pos, block_id.to_string());
+            chunk.mark_dirty(true);
+        });
+    }
+
+    /// Removes any ember custom block record at `pos`, returning its id if
+    /// one was there.
+    pub fn remove_ember_custom_block(&self, pos: &BlockPos) -> Option<String> {
+        self.level
+            .read_chunk_sync(&pos.chunk_position(), |chunk| {
+                let removed = chunk.ember_custom_blocks.lock().unwrap().remove(pos);
+                if removed.is_some() {
+                    chunk.mark_dirty(true);
+                }
+                removed
+            })
+            .flatten()
+    }
+
+    /// Adds a placed ember furniture instance to the chunk it falls in.
+    pub fn add_ember_furniture(&self, chunk_pos: Vector2<i32>, entry: &EmberFurnitureEntry) {
+        self.level.read_chunk_sync(&chunk_pos, |chunk| {
+            chunk.ember_furniture.lock().unwrap().push(entry.clone());
+            chunk.mark_dirty(true);
+        });
+    }
+
+    /// Removes a placed ember furniture instance (by its stable
+    /// `instance_id`, not the ephemeral runtime entity id) from the chunk
+    /// it was recorded in.
+    pub fn remove_ember_furniture(
+        &self,
+        chunk_pos: Vector2<i32>,
+        instance_id: Uuid,
+    ) -> Option<EmberFurnitureEntry> {
+        self.level
+            .read_chunk_sync(&chunk_pos, |chunk| {
+                let mut furniture = chunk.ember_furniture.lock().unwrap();
+                let index = furniture
+                    .iter()
+                    .position(|entry| entry.instance_id == instance_id)?;
+                let removed = furniture.remove(index);
+                drop(furniture);
+                chunk.mark_dirty(true);
+                Some(removed)
+            })
+            .flatten()
+    }
+    // EMBER end
 
     pub fn update_block_entity(&self, block_entity: &Arc<dyn BlockEntity>) {
         let block_pos = block_entity.get_position();

@@ -243,7 +243,7 @@ fn region_coords(rx: i32, rz: i32) -> Vec<Vector2<i32>> {
 }
 
 /// Fetches every stored chunk of one region from `saver`.
-async fn pull_region<D: Send + Sync>(
+pub(crate) async fn pull_region<D: Send + Sync>(
     saver: &Arc<dyn FileIO<Data = D>>,
     folder: &LevelFolder,
     rx: i32,

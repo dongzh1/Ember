@@ -184,6 +184,16 @@ pub(crate) fn is_prunable_chunk(chunk: &crate::chunk::ChunkData) -> bool {
         return false;
     }
 
+    // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+    // Furniture in particular never touches block state (packet-only display
+    // entity), so an all-air chunk holding only furniture must not be pruned.
+    if !chunk.ember_custom_blocks.lock().unwrap().is_empty()
+        || !chunk.ember_furniture.lock().unwrap().is_empty()
+    {
+        return false;
+    }
+    // EMBER end
+
     true
 }
 

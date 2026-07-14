@@ -61,16 +61,10 @@ pub use resourcepack_builder::{
 pub use custom_item::{CustomItemConfig, CustomItemListConfig};
 // EMBER end
 // EMBER start - custom furniture (resource-pack-driven, phase 3 of the CraftEngine portation)
-pub use furniture::{
-    FurnitureConfig, FurnitureInstanceConfig, FurnitureInstanceListConfig, FurnitureListConfig,
-    RenderMode,
-};
+pub use furniture::{FurnitureConfig, FurnitureListConfig, RenderMode};
 // EMBER end
 // EMBER start - custom blocks (resource-pack-driven, phase 4 of the CraftEngine portation)
-pub use custom_block::{
-    CustomBlockConfig, CustomBlockInstanceConfig, CustomBlockInstanceListConfig,
-    CustomBlockListConfig,
-};
+pub use custom_block::{CustomBlockConfig, CustomBlockListConfig};
 // EMBER end
 
 mod commands;

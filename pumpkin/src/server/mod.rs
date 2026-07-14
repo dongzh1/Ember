@@ -97,9 +97,6 @@ pub mod furniture;
 // EMBER start - custom blocks (resource-pack-driven, phase 4 of the CraftEngine portation)
 pub mod custom_block;
 // EMBER end
-// EMBER start - dedicated MySQL database for Ember's own auxiliary storage
-mod ember_db;
-// EMBER end
 pub mod recipe;
 pub mod scheduler;
 pub mod seasonal_events;
@@ -603,16 +600,9 @@ impl Server {
                         .color_named(NamedColor::DarkGreen)
                         .to_pretty_console()
                 );
-                let (level, chunk_config) =
+                let (level, _chunk_config) =
                     into_level(dim.clone(), &config, path, seed, Some(pool), Some(budget));
-                let world = Arc::new(World::load(
-                    level.clone(),
-                    l_info,
-                    dim,
-                    registry,
-                    weak,
-                    &chunk_config,
-                ));
+                let world = Arc::new(World::load(level.clone(), l_info, dim, registry, weak));
                 let portal: Arc<dyn WorldPortalExt> = Arc::new(WorldPortal(world.clone()));
                 level.world_portal.store(Arc::new(Some(portal)));
                 world
@@ -645,18 +635,14 @@ impl Server {
         // configured border was silently storage/generation-only — enforced
         // against players in none of them, however-configured.
         for world in server.worlds.load().iter() {
-            // EMBER: finishes constructing this world's furniture -
-            // `World::load` can only load the persisted instance list
-            // synchronously; resolving each instance's visual needs the
-            // (server-level) `CustomItemManager`, only reachable here.
+            // EMBER: finishes constructing this world's furniture - scans
+            // this world's chunks for placed furniture and resolves each
+            // instance's visual, which needs the (server-level)
+            // `CustomItemManager`, only reachable here.
             world
                 .furniture_manager
-                .load_runtime(&server.custom_item_manager)
+                .load_runtime(world, &server.custom_item_manager)
                 .await;
-            // EMBER: only actually connects if this world's chunk backend
-            // is mysql (a no-op otherwise - file storage already loaded
-            // synchronously in `World::load`).
-            world.custom_block_manager.connect_mysql().await;
 
             let root = world.level.level_folder.root_folder.clone();
             if let Some(sidecar) = pumpkin_config::ember_world::EmberWorldConfig::load(&root) {
@@ -792,7 +778,6 @@ impl Server {
     /// the global configuration for this world — used by ephemeral dungeon
     /// instances. After creation, a world with an `ember-world.toml`
     /// sidecar is prewarmed in the background per its residency policy.
-    #[expect(clippy::too_many_lines)]
     pub async fn create_world_with(
         self: &Arc<Self>,
         name: String,
@@ -869,7 +854,7 @@ impl Server {
                 Arc::new(level_config.unwrap_or_else(|| server.advanced_config.world.clone()));
             let seed = l_info.load().world_gen_settings.seed;
 
-            let (level, chunk_config) = pumpkin_world::dimension::into_level(
+            let (level, _chunk_config) = pumpkin_world::dimension::into_level(
                 dimension.clone(),
                 &config,
                 world_path,
@@ -877,14 +862,7 @@ impl Server {
                 Some(server.gen_pool.clone()),
                 Some(server.gen_budget.clone()), // EMBER
             );
-            let world: World = World::load(
-                level.clone(),
-                l_info,
-                dimension,
-                registry,
-                weak,
-                &chunk_config,
-            );
+            let world: World = World::load(level.clone(), l_info, dimension, registry, weak);
             let world = Arc::new(world);
             let portal: Arc<dyn WorldPortalExt> = Arc::new(WorldPortal(world.clone()));
             level.world_portal.store(Arc::new(Some(portal)));
@@ -902,9 +880,8 @@ impl Server {
         // matching comment on the startup-world loop in `Server::new`.
         world
             .furniture_manager
-            .load_runtime(&self.custom_item_manager)
+            .load_runtime(&world, &self.custom_item_manager)
             .await;
-        world.custom_block_manager.connect_mysql().await;
 
         // Size-based policy: enforce the max border and prewarm small maps.
         if let Some((border, cap)) = runtime {

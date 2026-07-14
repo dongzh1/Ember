@@ -64,6 +64,10 @@ fn base_chunk(pos: Vector2<i32>, min_y: i32, height: i32) -> ChunkData {
         block_ticks: ChunkTickScheduler::default(),
         fluid_ticks: ChunkTickScheduler::default(),
         pending_block_entities: std::sync::Mutex::new(rustc_hash::FxHashMap::default()),
+        // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+        ember_custom_blocks: std::sync::Mutex::new(rustc_hash::FxHashMap::default()),
+        ember_furniture: std::sync::Mutex::new(Vec::new()),
+        // EMBER end
         light_engine: std::sync::Mutex::new(ChunkLight {
             sky_light: vec![LightContainer::new_empty(15); section_count].into_boxed_slice(),
             block_light: vec![LightContainer::new_empty(0); section_count].into_boxed_slice(),

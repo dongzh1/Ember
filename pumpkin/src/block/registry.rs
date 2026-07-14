@@ -743,7 +743,7 @@ impl BlockRegistry {
         // vanilla `normal_use` (e.g. a note_block carrier cycling its pitch
         // on right-click) - every position with no recorded custom block
         // falls through to the exact code below, completely unchanged.
-        if world.custom_block_manager.get_at(position).await.is_some() {
+        if world.get_ember_custom_block(position).is_some() {
             return BlockActionResult::Success;
         }
         // EMBER end

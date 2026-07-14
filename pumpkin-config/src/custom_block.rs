@@ -31,11 +31,11 @@ impl LoadConfiguration for CustomBlockListConfig {
 /// **default state** at the target position - a resource pack retextures
 /// that carrier's default-state model independently of any ordinary
 /// instance of that block placed elsewhere in the world, without needing to
-/// touch the carrier's own real block-state properties at all. A separate,
-/// server-managed position index (`blocks/instances.toml`, not the block
-/// state itself and not a vanilla `BlockEntity`) is what actually
-/// identifies "this position is custom block X" - see
-/// `server::custom_block` for the exact interception points
+/// touch the carrier's own real block-state properties at all. Which
+/// position is secretly which custom block id lives in the owning chunk's
+/// own `ChunkData::ember_custom_blocks` field (not this config, and not a
+/// vanilla `BlockEntity`) - see `pumpkin_world::chunk::EmberCustomBlockEntry`
+/// and `server::custom_block` for the exact interception points
 /// (`normal_use`/breaking) that consult it.
 ///
 /// Pick a carrier whose vanilla behavior you don't mind losing the
@@ -58,42 +58,5 @@ pub struct CustomBlockConfig {
     /// Vanilla block resource name (e.g. `note_block`) whose default state
     /// is placed as the visual/physical carrier.
     pub carrier_block: String,
-}
-
-/// Placed custom block instances for one world,
-/// `<world folder>/custom_block_instances.toml`.
-///
-/// Lives inside the owning world's own folder (not a server-level config
-/// folder) so the index travels with the world if its folder is copied to
-/// another server - a position is meaningless without the world it's in
-/// anyway. `CustomBlockConfig`/`CustomBlockListConfig` (what a custom block
-/// *type* is) stays server-level: it has no per-world information, the same
-/// way a resource pack is a server-wide install rather than something tied
-/// to any one world.
-///
-/// Server-managed runtime state (placements/breaks mutate this and
-/// re-save). The carrier block itself is saved/loaded through the normal
-/// world save format like any other block (it's a real block); this file is
-/// only the extra "which position is secretly which custom block id" index
-/// vanilla has no concept of.
-#[derive(Deserialize, Serialize, Default, Clone)]
-pub struct CustomBlockInstanceListConfig {
-    pub instances: Vec<CustomBlockInstanceConfig>,
-}
-
-impl LoadConfiguration for CustomBlockInstanceListConfig {
-    fn get_path() -> &'static Path {
-        Path::new("custom_block_instances.toml")
-    }
-
-    fn validate(&self) {}
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-pub struct CustomBlockInstanceConfig {
-    pub block_id: String,
-    pub x: i32,
-    pub y: i32,
-    pub z: i32,
 }
 // EMBER end

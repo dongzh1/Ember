@@ -310,17 +310,15 @@ clients just see the plain base item, nothing breaks).
 
 Right-click a block face while holding a custom item configured as furniture (`furniture/
 furniture.toml`: `id`, `custom_item_id`, hitbox size, scale) to place it — an `item_display`
-showing that item's model plus an invisible `interaction` hitbox, packet-only and persisted
-inside the world's own folder (`furniture_instances.toml`, so placements travel with the world
-if it's copied to another server), broadcast to everyone in view distance the same way
-packet-only NPCs are. Attack it to break it and get the item back. Third phase of the
-CraftEngine port.
+showing that item's model plus an invisible `interaction` hitbox, packet-only, broadcast to
+everyone in view distance the same way packet-only NPCs are. Attack it to break it and get the
+item back. Third phase of the CraftEngine port.
 
-Placements follow whichever chunk backend the world itself uses: a `file`-backend world keeps
-the TOML above; a `mysql`-backend world (shared read-write/read-only across multiple servers)
-stores the same rows in that world's own database instead, over the same connection its chunk
-data already uses — so every server actually sharing that world sees the same furniture, not
-just whichever one has the local file.
+Placements are stored inside the owning chunk's own data (in the spirit of a Paper plugin's
+`PersistentDataContainer`), not a separate file or database — they ride along with whichever
+backend that world's chunks already use (`file` or `mysql`), so a `mysql`-backend world shared
+read-write/read-only across multiple servers automatically shows the same furniture everywhere,
+with no extra configuration.
 
 ### Custom blocks
 
@@ -332,13 +330,12 @@ Two ways to skin a block, fourth and final phase of the CraftEngine port:
   always facing the camera.
 - **Vanilla block carriers** (`blocks/blocks.toml`) — binds a custom block id to a real
   vanilla "carrier" block (currently `note_block` only). Right-clicking with the bound custom
-  item places the carrier's default state and records the position in the world's own
-  `custom_block_instances.toml` (same travels-with-the-world reasoning as furniture above, and
-  the same mysql-backend sharing when that's the world's chunk backend); breaking it drops the
-  custom item instead of the carrier's vanilla loot, and the carrier's own interactive behavior
-  (e.g. note block tuning) is swallowed wherever a custom block is recorded. Every other
-  position keeps its exact vanilla behavior — reviewed carefully for a byte-for-byte fallthrough
-  when no record exists, but not verified against a real client.
+  item places the carrier's default state and records the position inside the owning chunk's
+  own data (same chunk-embedded storage as furniture above); breaking it drops the custom item
+  instead of the carrier's vanilla loot, and the carrier's own interactive behavior (e.g. note
+  block tuning) is swallowed wherever a custom block is recorded. Every other position keeps its
+  exact vanilla behavior — reviewed carefully for a byte-for-byte fallthrough when no record
+  exists, but not verified against a real client.
 
 ### Placeholders & HUD
 
@@ -660,13 +657,13 @@ url = "mysql://user:pass@localhost:3306/ember"
 
 手持一个配置成家具的自定义物品（`furniture/furniture.toml`：`id`、`custom_item_id`、判定箱大小、
 缩放），右键点方块面即可放置——一个显示该物品模型的 `item_display` 加一个隐形的 `interaction`
-点击判定箱，纯发包、持久化在世界自己的文件夹里（`furniture_instances.toml`，世界文件夹复制到
-其他服务器时摆放记录也会跟着走），广播给视距内所有人，和发包 NPC 系统同一套可见性判定。攻击它
-即可破坏并拿回物品。CraftEngine 移植的第三阶段。
+点击判定箱，纯发包，广播给视距内所有人，和发包 NPC 系统同一套可见性判定。攻击它即可破坏并拿回
+物品。CraftEngine 移植的第三阶段。
 
-摆放记录跟着世界自己选的区块存储后端走：`file` 后端就是上面说的 TOML；`mysql` 后端（世界被多台
-服务器读写/只读共享）会把这些记录存进这个世界自己的数据库，复用区块数据本来就在用的同一个连接
-——这样真正共享同一个世界的每台服务器看到的家具都是一致的，不会只有存了本地文件的那一台能看到。
+摆放记录直接存在所在区块自己的数据里（做法类似 Paper 插件的 `PersistentDataContainer`），不是
+单独的文件或数据库——自动跟着这个世界的区块本来用的存储后端走（`file` 或 `mysql` 都一样），
+`mysql` 后端（世界被多台服务器读写/只读共享）的情况下不需要任何额外配置，每台服务器看到的家具
+自然就是一致的。
 
 ### 自定义方块
 
@@ -677,10 +674,9 @@ url = "mysql://user:pass@localhost:3306/ember"
   始终朝向摄像机。
 - **原版方块载体**（`blocks/blocks.toml`）——把一个自定义方块 id 绑定到一个真实的原版"载体"方块
   （目前只支持 `note_block`）。右键放置对应的自定义物品会在目标位置放上载体的默认状态并记录到
-  世界自己的 `custom_block_instances.toml`（和家具同样的"跟着世界文件夹走"考虑，世界是 `mysql`
-  后端时同样存进那个世界自己的数据库）；破坏时掉落自定义物品而不是载体的原版战利品，载体自己的
-  交互行为（比如音符盒调音）在记录了自定义方块的位置会被吞掉。其余所有位置的原版方块行为完全
-  不变——逐字审查过"没有记录时是否严丝合缝落回原代码"，但没有真实客户端实测验证。
+  所在区块自己的数据里（和家具同样的区块内嵌存储）；破坏时掉落自定义物品而不是载体的原版战利品，
+  载体自己的交互行为（比如音符盒调音）在记录了自定义方块的位置会被吞掉。其余所有位置的原版方块
+  行为完全不变——逐字审查过"没有记录时是否严丝合缝落回原代码"，但没有真实客户端实测验证。
 
 ### 占位符系统与 HUD
 

@@ -631,6 +631,43 @@ impl Level {
     }
     // EMBER end
 
+    // EMBER start - ember furniture whole-world scan (no live Level needed)
+    /// Scans every persisted chunk of this world and collects all placed
+    /// furniture, regardless of whether that chunk is currently resident in
+    /// `loaded_chunks`. Needed because `FurnitureManager::tick` must
+    /// broadcast visibility for *all* placed furniture, not just furniture
+    /// in currently-loaded chunks - unlike ember custom blocks (looked up
+    /// on demand via `read_chunk_sync`, always at an interaction point
+    /// where the chunk is already loaded), there's no chunk-unload hook to
+    /// lazily populate/depopulate a runtime index against, so an eager
+    /// whole-world scan at world-load time is the lowest-risk option.
+    /// Mirrors `prewarm_storage`'s "read region files directly, bypass the
+    /// live chunk system" approach.
+    pub async fn scan_ember_furniture(&self) -> Vec<crate::chunk::EmberFurnitureEntry> {
+        let mut out = Vec::new();
+        for (rx, rz) in self.chunk_saver.list_regions(&self.level_folder).await {
+            let (loaded, skipped) = crate::chunk::convert::pull_region(
+                &self.chunk_saver,
+                &self.level_folder,
+                rx,
+                rz,
+                |c: &SyncChunk| Vector2::new(c.x, c.z),
+            )
+            .await;
+            if skipped > 0 {
+                warn!(
+                    "scan_ember_furniture: skipped {skipped} corrupt chunk(s) in region ({rx}, {rz}) of {}",
+                    self.level_folder.root_folder.display(),
+                );
+            }
+            for (_, chunk) in loaded {
+                out.extend(chunk.ember_furniture.lock().unwrap().iter().cloned());
+            }
+        }
+        out
+    }
+    // EMBER end
+
     pub fn list_cached(&self) {
         for entry in self.loaded_chunks.iter() {
             debug!("In map: {:?}", entry.key());

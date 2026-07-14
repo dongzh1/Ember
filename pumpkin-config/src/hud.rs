@@ -77,12 +77,13 @@ fn default_title() -> String {
 /// Per-player HUD on/off preferences, `hud/player_state.toml`.
 ///
 /// Server-managed runtime state (`/hud toggle` mutates and re-saves this),
-/// not something an admin hand-authors like `hud.toml` - same "own file,
-/// separate from static settings" reasoning as `FurnitureInstanceListConfig`.
-/// A player's preference here is a server-wide setting, not a per-world one
-/// (whether *this player* wants to see a HUD isn't information about which
-/// world they're standing in), so unlike furniture/custom block instances
-/// it stays server-level rather than moving into any one world's folder.
+/// not something an admin hand-authors like `hud.toml` - its own file,
+/// separate from static settings, for the same reason any mutable
+/// server-managed list is kept apart from admin-edited config. A player's
+/// preference here is a server-wide setting, not a per-world one (whether
+/// *this player* wants to see a HUD isn't information about which world
+/// they're standing in), so unlike furniture/custom block placements it
+/// stays server-level rather than living inside any one world's chunk data.
 #[derive(Deserialize, Serialize, Default, Clone)]
 pub struct HudPlayerStateListConfig {
     pub players: Vec<HudPlayerStateConfig>,

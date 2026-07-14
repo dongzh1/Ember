@@ -28,7 +28,15 @@ use pumpkin_util::math::vector2::Vector2;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ChunkData, ChunkHeightmaps, ChunkLight, ChunkParsingError, ChunkSections,
+    ChunkData,
+    ChunkHeightmaps,
+    ChunkLight,
+    ChunkParsingError,
+    ChunkSections,
+    // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+    EmberCustomBlockEntry,
+    EmberFurnitureEntry,
+    // EMBER end
     palette::{BiomePalette, BlockPalette},
 };
 pub mod anvil;
@@ -176,6 +184,16 @@ impl ChunkData {
                 }
                 std::sync::Mutex::new(block_entities)
             },
+            // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+            ember_custom_blocks: {
+                let mut blocks = FxHashMap::default();
+                for entry in chunk_data.ember_custom_blocks {
+                    blocks.insert(BlockPos::new(entry.x, entry.y, entry.z), entry.block_id);
+                }
+                std::sync::Mutex::new(blocks)
+            },
+            ember_furniture: std::sync::Mutex::new(chunk_data.ember_furniture),
+            // EMBER end
             light_engine: std::sync::Mutex::new(light_engine),
             light_populated: AtomicBool::new(chunk_data.light_correct),
             status: chunk_data.status,
@@ -199,6 +217,22 @@ impl ChunkData {
             let entities_guard = self.pending_block_entities.lock().unwrap();
             entities_guard.values().cloned().collect::<Vec<_>>()
         };
+
+        // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+        let ember_custom_blocks_nbt = {
+            let guard = self.ember_custom_blocks.lock().unwrap();
+            guard
+                .iter()
+                .map(|(pos, block_id)| EmberCustomBlockEntry {
+                    x: pos.0.x,
+                    y: pos.0.y,
+                    z: pos.0.z,
+                    block_id: block_id.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let ember_furniture_nbt = self.ember_furniture.lock().unwrap().clone();
+        // EMBER end
 
         let light_lock = self.light_engine.lock().unwrap();
         let heightmap_lock = self.heightmap.lock().unwrap();
@@ -228,6 +262,10 @@ impl ChunkData {
             block_ticks: &self.block_ticks.to_vec(),
             fluid_ticks: &self.fluid_ticks.to_vec(),
             block_entities: &block_entities_nbt,
+            // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+            ember_custom_blocks: &ember_custom_blocks_nbt,
+            ember_furniture: &ember_furniture_nbt,
+            // EMBER end
             light_correct: is_light_correct,
         };
 
@@ -501,6 +539,12 @@ struct ChunkNbt {
     fluid_ticks: Vec<ScheduledTick<&'static Fluid>>,
     #[serde(rename = "block_entities", default)]
     block_entities: Vec<NbtCompound>,
+    // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+    #[serde(rename = "ember_custom_blocks", default)]
+    ember_custom_blocks: Vec<EmberCustomBlockEntry>,
+    #[serde(rename = "ember_furniture", default)]
+    ember_furniture: Vec<EmberFurnitureEntry>,
+    // EMBER end
     #[serde(rename = "isLightOn", default)]
     light_correct: bool,
 }
@@ -525,6 +569,12 @@ struct ChunkNbtRef<'a> {
     fluid_ticks: &'a [ScheduledTick<&'static Fluid>],
     #[serde(rename = "block_entities")]
     block_entities: &'a [NbtCompound],
+    // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+    #[serde(rename = "ember_custom_blocks")]
+    ember_custom_blocks: &'a [EmberCustomBlockEntry],
+    #[serde(rename = "ember_furniture")]
+    ember_furniture: &'a [EmberFurnitureEntry],
+    // EMBER end
     #[serde(rename = "isLightOn", default)]
     light_correct: bool,
 }
@@ -536,3 +586,85 @@ struct EntityNbt {
     position: [i32; 2],
     entities: Vec<NbtCompound>,
 }
+
+// EMBER start - chunk-embedded storage for ember custom blocks/furniture
+#[cfg(test)]
+mod ember_chunk_data_tests {
+    use pumpkin_config::ember_world::GenerateMode;
+    use uuid::Uuid;
+
+    use super::{BlockPos, ChunkData, EmberFurnitureEntry, Vector2};
+    use crate::chunk::gen_fill::synthesize_chunk;
+
+    fn empty_chunk_at(pos: Vector2<i32>) -> ChunkData {
+        synthesize_chunk(pos, 0, 16, GenerateMode::Void)
+    }
+
+    /// Reproduces the exact shape of the old, now-deleted mysql round-trip
+    /// tests (`server::custom_block`/`server::furniture`'s `mod
+    /// mysql_tests`) - the coverage point moved from "does mysql
+    /// insert/select round-trip" to "does the chunk's own serialize/
+    /// deserialize cycle round-trip", since that's where this data lives
+    /// now regardless of which backend (file or mysql) the chunk itself
+    /// uses.
+    #[test]
+    fn ember_custom_blocks_and_furniture_survive_a_chunk_round_trip() {
+        let pos = Vector2::new(3, -5);
+        let chunk = empty_chunk_at(pos);
+
+        let block_pos = BlockPos::new(3 * 16 + 1, 5, -5 * 16 + 2);
+        chunk
+            .ember_custom_blocks
+            .lock()
+            .unwrap()
+            .insert(block_pos, "test_custom_block".to_string());
+
+        let instance_id = Uuid::new_v4();
+        chunk
+            .ember_furniture
+            .lock()
+            .unwrap()
+            .push(EmberFurnitureEntry {
+                instance_id,
+                furniture_id: "test_chair".to_string(),
+                x: 48.5,
+                y: 64.0,
+                z: -78.5,
+                yaw: 90.0,
+            });
+
+        let bytes = chunk.internal_to_bytes().expect("serialize should succeed");
+        let reloaded =
+            ChunkData::internal_from_bytes(&bytes, pos).expect("deserialize should succeed");
+
+        let blocks = reloaded.ember_custom_blocks.lock().unwrap();
+        assert_eq!(
+            blocks.get(&block_pos),
+            Some(&"test_custom_block".to_string())
+        );
+        drop(blocks);
+
+        let furniture = reloaded.ember_furniture.lock().unwrap();
+        assert_eq!(furniture.len(), 1);
+        assert_eq!(furniture[0].instance_id, instance_id);
+        assert_eq!(furniture[0].furniture_id, "test_chair");
+        assert!((furniture[0].x - 48.5).abs() < f64::EPSILON);
+        assert!((furniture[0].y - 64.0).abs() < f64::EPSILON);
+        assert!((furniture[0].z - (-78.5)).abs() < f64::EPSILON);
+        assert!((furniture[0].yaw - 90.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_chunk_with_no_ember_data_round_trips_to_empty_collections() {
+        let pos = Vector2::new(0, 0);
+        let chunk = empty_chunk_at(pos);
+
+        let bytes = chunk.internal_to_bytes().expect("serialize should succeed");
+        let reloaded =
+            ChunkData::internal_from_bytes(&bytes, pos).expect("deserialize should succeed");
+
+        assert!(reloaded.ember_custom_blocks.lock().unwrap().is_empty());
+        assert!(reloaded.ember_furniture.lock().unwrap().is_empty());
+    }
+}
+// EMBER end

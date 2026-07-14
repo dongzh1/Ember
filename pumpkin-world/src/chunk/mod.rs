@@ -88,12 +88,56 @@ pub struct ChunkData {
     pub block_ticks: ChunkTickScheduler<&'static Block>,
     pub fluid_ticks: ChunkTickScheduler<&'static Fluid>,
     pub pending_block_entities: std::sync::Mutex<FxHashMap<BlockPos, NbtCompound>>,
+    // EMBER start - chunk-embedded storage for ember custom blocks/furniture
+    pub ember_custom_blocks: std::sync::Mutex<FxHashMap<BlockPos, String>>,
+    pub ember_furniture: std::sync::Mutex<Vec<EmberFurnitureEntry>>,
+    // EMBER end
     pub light_engine: std::sync::Mutex<ChunkLight>,
     pub light_populated: AtomicBool,
     pub status: ChunkStatus,
     pub blending_data: Option<crate::generation::blender::blending_data::BlendingData>,
     pub dirty: AtomicBool,
 }
+
+// EMBER start - chunk-embedded storage for ember custom blocks/furniture
+/// One placed ember custom block, keyed by position on the wire.
+///
+/// Re-keyed into `ChunkData::ember_custom_blocks`'s `FxHashMap` on load -
+/// see `format::internal_from_bytes`. A named struct, not a tuple:
+/// `pumpkin_nbt` serializes tuples as NBT lists, which require every
+/// element to share one tag - mixing three `i32`s with a `String` in one
+/// tuple would fail with "List values must all be of the same type!" the
+/// first time this list is non-empty.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct EmberCustomBlockEntry {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub block_id: String,
+}
+
+/// One placed ember furniture instance.
+///
+/// Lives in a flat per-chunk `Vec` (not a `BlockPos`-keyed map like
+/// `EmberCustomBlockEntry`) because furniture sits at arbitrary
+/// floating-point coordinates and isn't guaranteed unique per block
+/// position.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct EmberFurnitureEntry {
+    /// `pumpkin_nbt` is not human-readable, so a bare `Uuid` field would
+    /// serialize fine but fail to deserialize (`Uuid`'s non-human-readable
+    /// path expects `visit_bytes`, but `pumpkin_nbt` always calls
+    /// `visit_seq` for its NBT-list-shaped byte arrays). `serde::simple`
+    /// sidesteps this by always going through a plain string.
+    #[serde(with = "uuid::serde::simple")]
+    pub instance_id: uuid::Uuid,
+    pub furniture_id: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+}
+// EMBER end
 
 pub struct ChunkEntityData {
     /// Chunk X

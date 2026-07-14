@@ -2446,6 +2446,7 @@ impl JavaClient {
                 world
                     .furniture_manager
                     .place(
+                        &world,
                         &server.custom_item_manager,
                         &furniture,
                         spawn_pos,
@@ -2473,10 +2474,7 @@ impl JavaClient {
                         BlockFlags::NOTIFY_ALL,
                     )
                     .await;
-                world
-                    .custom_block_manager
-                    .place(target_pos, &custom_block.id)
-                    .await;
+                world.set_ember_custom_block(target_pos, &custom_block.id);
                 if player.gamemode.load() != GameMode::Creative {
                     item.lock().await.decrement(1);
                 }
