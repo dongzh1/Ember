@@ -35,6 +35,12 @@ pub struct LoginConfig {
     /// has no such limit - there's no password to guess yet).
     #[serde(default = "default_max_login_attempts")]
     pub max_login_attempts: u32,
+    /// How often (in ticks) the register/login dialog is silently re-shown
+    /// to a still-pending player, in case they closed it - the server has
+    /// no way to detect Escape/close-button dismissal, see
+    /// `LoginManager::tick`.
+    #[serde(default = "default_reprompt_ticks")]
+    pub reprompt_ticks: u32,
 }
 
 impl Default for LoginConfig {
@@ -45,6 +51,7 @@ impl Default for LoginConfig {
             session_hours: default_session_hours(),
             min_password_length: default_min_password_length(),
             max_login_attempts: default_max_login_attempts(),
+            reprompt_ticks: default_reprompt_ticks(),
         }
     }
 }
@@ -59,6 +66,10 @@ const fn default_min_password_length() -> u32 {
 
 const fn default_max_login_attempts() -> u32 {
     5
+}
+
+const fn default_reprompt_ticks() -> u32 {
+    1200 // ~60s at the default 20 TPS
 }
 
 impl LoadConfiguration for LoginConfig {

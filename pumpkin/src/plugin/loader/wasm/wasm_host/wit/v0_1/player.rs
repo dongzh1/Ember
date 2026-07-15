@@ -1649,20 +1649,33 @@ impl pumpkin::plugin::player::HostJavaPlayer for PluginHostState {
             })
             .collect();
 
+        // EMBER: `ProtocolDialogInput` variants each gained a required `key`
+        // field (real protocol field, needed for `minecraft:dynamic/custom`
+        // submissions to associate a value with the input that produced
+        // it - see `pumpkin-protocol`'s `DialogInput` doc comment). Plugins
+        // don't get a way to set this themselves (the WIT interface isn't
+        // changed), so it's synthesized from each input's position in the
+        // list - fine here since the WASM plugin API has no way to *read*
+        // a dialog submission's values back yet either, so nothing
+        // currently depends on these keys being anything specific.
         let inputs: Vec<_> = dialog
             .inputs
             .iter()
-            .map(|i| match i {
+            .enumerate()
+            .map(|(idx, i)| match i {
                 DialogInput::Bool(b) => ProtocolDialogInput::Boolean {
+                    key: format!("input_{idx}"),
                     label: text_component_from_resource(self, &b.label),
                     default_value: b.default_value,
                 },
                 DialogInput::Text(t) => ProtocolDialogInput::Text {
+                    key: format!("input_{idx}"),
                     label: text_component_from_resource(self, &t.label),
-                    placeholder: text_component_from_resource(self, &t.placeholder),
-                    default_value: t.default_value.clone(),
+                    initial: t.default_value.clone(),
+                    max_length: None,
                 },
                 DialogInput::NumberRange(n) => ProtocolDialogInput::NumberRange {
+                    key: format!("input_{idx}"),
                     label: text_component_from_resource(self, &n.label),
                     min: n.min_value,
                     max: n.max_value,
@@ -1671,6 +1684,7 @@ impl pumpkin::plugin::player::HostJavaPlayer for PluginHostState {
                     label_format: n.label_format.clone(),
                 },
                 DialogInput::SingleOption(s) => ProtocolDialogInput::SingleOption {
+                    key: format!("input_{idx}"),
                     label: text_component_from_resource(self, &s.label),
                     options: s
                         .options

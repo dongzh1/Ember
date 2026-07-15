@@ -1,14 +1,21 @@
 // EMBER start - offline-mode login verification
 //! A lightweight login wall for `online_mode = false` servers.
 //!
-//! Loosely modeled on plugins like `LimboAuth`, deliberately simpler:
-//! password entry happens over chat (see `LoginManager`'s doc comment for
-//! why), not a native dialog text field. Accounts live in `MySQL` (single
-//! source of truth, no in-process cache beyond the in-flight `pending`
-//! sessions below), so multiple servers can share one login database.
+//! Loosely modeled on plugins like `LimboAuth`. Password entry happens
+//! through a real dialog form (two text inputs for register, one for
+//! login) using `minecraft:dynamic/custom` - the real protocol's mechanism
+//! for collecting dialog input values, see `DialogAction::DynamicCustom`'s
+//! doc comment in `pumpkin-protocol`. Chat is no longer part of this flow
+//! (it used to be, back when `DialogInput` had no `key` field and
+//! `SCustomClickAction` only carried an opaque static payload - see
+//! `EMBER.md`'s changelog for that earlier limitation). Accounts live in
+//! `MySQL` (single source of truth, no in-process cache beyond the
+//! in-flight `pending` sessions below), so multiple servers can share one
+//! login database.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use argon2::Argon2;
@@ -16,7 +23,10 @@ use argon2::password_hash::{
     PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
 };
 use pumpkin_config::{LoadConfiguration, LoginConfig};
-use pumpkin_protocol::java::client::dialog::{ActionButton, Dialog, DialogAction};
+use pumpkin_nbt::compound::NbtCompound;
+use pumpkin_protocol::java::client::dialog::{
+    ActionButton, Dialog, DialogAction, DialogBody, DialogInput,
+};
 use pumpkin_util::GameMode;
 use pumpkin_util::math::vector2::Vector2;
 use pumpkin_util::math::vector3::Vector3;
@@ -28,12 +38,14 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::entity::player::Player;
+use crate::server::Server;
 
-/// Custom-click action id for the login-prompt dialog's button.
+/// Custom-click action ids for the register/login dialogs' submit buttons.
 ///
-/// Handled natively in `net/java/mod.rs` right where
-/// `CustomClickActionEvent` is fired - never reaches the plugin event bus.
-pub const DIALOG_ACTION_ID: &str = "ember:auth/continue";
+/// Handled natively in `net/java/mod.rs` right where `SCustomClickAction`
+/// is decoded - never reaches the plugin event bus.
+pub const REGISTER_SUBMIT_ACTION_ID: &str = "ember:auth/register_submit";
+pub const LOGIN_SUBMIT_ACTION_ID: &str = "ember:auth/login_submit";
 
 const CREATE_TABLE: &str = concat!(
     "CREATE TABLE IF NOT EXISTS ember_login_accounts (",
@@ -121,19 +133,19 @@ async fn real_world_default_spawn(world: &Arc<crate::world::World>) -> (Vector3<
     (position, info.spawn_yaw, info.spawn_pitch)
 }
 
-/// What a chat message from a pending player accomplished.
-pub enum ChatAuthOutcome {
-    /// Registration's first password was too short; try the first password
-    /// again (nothing recorded yet).
+/// What a dialog submission from a pending player accomplished.
+pub enum AuthOutcome {
+    /// Registration's password was too short.
     PasswordTooShort { min_length: u32 },
-    /// Registration's first password was accepted; ask them to retype it.
-    AwaitingConfirmation,
-    /// Registration's second password didn't match the first; they must
-    /// start over from the first password.
+    /// Registration's password and confirmation didn't match.
     ConfirmationMismatch,
     /// Password wrong; `attempts_left` is `0` when this was their last try
     /// (the caller should kick).
     WrongPassword { attempts_left: u32 },
+    /// The submitted dialog payload didn't decode, or was missing the
+    /// expected `password`/`confirm_password` key(s) - a malformed/modified
+    /// client, not something a normal player action produces.
+    MalformedSubmission,
     /// Registered or logged in. The caller should restore
     /// `previous_gamemode` and teleport them back to `real_world`.
     ///
@@ -159,10 +171,10 @@ pub enum ChatAuthOutcome {
 }
 
 enum PendingMode {
-    /// No account exists yet; `first_hash` holds the hash of their first
-    /// typed password once they've entered it once, awaiting a repeat to
-    /// confirm before it's actually written to the database.
-    Register { first_hash: Option<String> },
+    /// No account exists yet - both password and confirmation now arrive
+    /// together in one dialog submission, so there's no partial state left
+    /// to track between them.
+    Register,
     /// An account exists; counts wrong attempts toward `max_login_attempts`.
     Login { attempts: u32 },
 }
@@ -172,6 +184,10 @@ struct PendingAuth {
     previous_gamemode: GameMode,
     real_world: Arc<crate::world::World>,
     mode: PendingMode,
+    /// Server tick this player's dialog was last sent (initial show, an
+    /// error re-show, or a periodic `tick()` re-show) - see
+    /// `LoginManager::tick`.
+    last_shown_tick: i32,
 }
 
 pub struct LoginManager {
@@ -181,6 +197,7 @@ pub struct LoginManager {
     session_seconds: i64,
     min_password_length: u32,
     max_login_attempts: u32,
+    reprompt_ticks: i32,
     pending: RwLock<HashMap<Uuid, PendingAuth>>,
 }
 
@@ -205,6 +222,7 @@ impl LoginManager {
                 .unwrap_or(i64::MAX),
             min_password_length: config.min_password_length,
             max_login_attempts: config.max_login_attempts,
+            reprompt_ticks: i32::try_from(config.reprompt_ticks).unwrap_or(i32::MAX),
             pending: RwLock::new(HashMap::new()),
         };
 
@@ -291,12 +309,17 @@ impl LoginManager {
 
     /// Starts (or restarts) a pending session, determining register-vs-login
     /// by whether an account already exists. Returns `true` for register.
+    /// `current_tick` seeds `last_shown_tick` - the caller shows the actual
+    /// first dialog moments later (once the player has finished spawning),
+    /// but that's within the same join sequence, well inside the
+    /// coarse-grained `reprompt_ticks` window either way.
     pub async fn begin(
         &self,
         uuid: Uuid,
         username: &str,
         previous_gamemode: GameMode,
         real_world: Arc<crate::world::World>,
+        current_tick: i32,
     ) -> Result<bool, LoginError> {
         let pool = self.ensure_pool().await?;
         let exists = sqlx::query(SELECT_ACCOUNT)
@@ -309,7 +332,7 @@ impl LoginManager {
         let mode = if exists {
             PendingMode::Login { attempts: 0 }
         } else {
-            PendingMode::Register { first_hash: None }
+            PendingMode::Register
         };
         self.pending.write().await.insert(
             uuid,
@@ -318,6 +341,7 @@ impl LoginManager {
                 previous_gamemode,
                 real_world,
                 mode,
+                last_shown_tick: current_tick,
             },
         );
         Ok(!exists)
@@ -332,18 +356,19 @@ impl LoginManager {
     pub async fn is_registering(&self, uuid: Uuid) -> bool {
         matches!(
             self.pending.read().await.get(&uuid).map(|a| &a.mode),
-            Some(PendingMode::Register { .. })
+            Some(PendingMode::Register)
         )
     }
 
-    /// Processes one chat message from a pending player as their password
-    /// (or password confirmation) input.
-    pub async fn handle_chat(
+    /// Processes one register/login dialog submission - the decoded NBT
+    /// compound of the dialog's input values, keyed by each input's own
+    /// `key` (see `DialogAction::DynamicCustom`).
+    pub async fn handle_dialog_submit(
         &self,
         uuid: Uuid,
         ip: &str,
-        message: &str,
-    ) -> Result<ChatAuthOutcome, LoginError> {
+        values: &NbtCompound,
+    ) -> Result<AuthOutcome, LoginError> {
         let pool = self.ensure_pool().await?;
         let mut pending = self.pending.write().await;
         let Some(auth) = pending.get_mut(&uuid) else {
@@ -351,44 +376,47 @@ impl LoginManager {
         };
 
         match &mut auth.mode {
-            PendingMode::Register { first_hash } => {
-                let Some(expected) = first_hash.take() else {
-                    // First password of the pair: only this one is length-checked -
-                    // the confirmation just has to hash-match it, whatever its own length.
-                    if message.len() < self.min_password_length as usize {
-                        return Ok(ChatAuthOutcome::PasswordTooShort {
-                            min_length: self.min_password_length,
-                        });
-                    }
-                    *first_hash = Some(hash_password(message));
-                    return Ok(ChatAuthOutcome::AwaitingConfirmation);
+            PendingMode::Register => {
+                let (Some(password), Some(confirm)) = (
+                    values.get_string("password"),
+                    values.get_string("confirm_password"),
+                ) else {
+                    return Ok(AuthOutcome::MalformedSubmission);
                 };
-                if verify_password(message, &expected) {
-                    let previous_gamemode = auth.previous_gamemode;
-                    let real_world = auth.real_world.clone();
-                    let username = auth.username.clone();
-                    drop(pending);
-                    sqlx::query(INSERT_ACCOUNT)
-                        .bind(uuid.to_string())
-                        .bind(username)
-                        .bind(expected)
-                        .bind(ip)
-                        .bind(now_secs())
-                        .execute(pool.as_ref())
-                        .await
-                        .map_err(db_err)?;
-                    self.pending.write().await.remove(&uuid);
-                    let spawn_override = Some(real_world_default_spawn(&real_world).await);
-                    Ok(ChatAuthOutcome::Success {
-                        previous_gamemode,
-                        real_world,
-                        spawn_override,
-                    })
-                } else {
-                    Ok(ChatAuthOutcome::ConfirmationMismatch)
+                if password.len() < self.min_password_length as usize {
+                    return Ok(AuthOutcome::PasswordTooShort {
+                        min_length: self.min_password_length,
+                    });
                 }
+                if password != confirm {
+                    return Ok(AuthOutcome::ConfirmationMismatch);
+                }
+                let previous_gamemode = auth.previous_gamemode;
+                let real_world = auth.real_world.clone();
+                let username = auth.username.clone();
+                let hash = hash_password(password);
+                drop(pending);
+                sqlx::query(INSERT_ACCOUNT)
+                    .bind(uuid.to_string())
+                    .bind(username)
+                    .bind(hash)
+                    .bind(ip)
+                    .bind(now_secs())
+                    .execute(pool.as_ref())
+                    .await
+                    .map_err(db_err)?;
+                self.pending.write().await.remove(&uuid);
+                let spawn_override = Some(real_world_default_spawn(&real_world).await);
+                Ok(AuthOutcome::Success {
+                    previous_gamemode,
+                    real_world,
+                    spawn_override,
+                })
             }
             PendingMode::Login { attempts } => {
+                let Some(password) = values.get_string("password") else {
+                    return Ok(AuthOutcome::MalformedSubmission);
+                };
                 let row = sqlx::query(SELECT_ACCOUNT)
                     .bind(uuid.to_string())
                     .fetch_optional(pool.as_ref())
@@ -398,7 +426,7 @@ impl LoginManager {
                     Some(row) => Some(row.try_get("password_hash").map_err(db_err)?),
                     None => None,
                 };
-                let matches = stored_hash.is_some_and(|h| verify_password(message, &h));
+                let matches = stored_hash.is_some_and(|h| verify_password(password, &h));
                 if matches {
                     let previous_gamemode = auth.previous_gamemode;
                     let real_world = auth.real_world.clone();
@@ -411,7 +439,7 @@ impl LoginManager {
                         .await
                         .map_err(db_err)?;
                     self.pending.write().await.remove(&uuid);
-                    Ok(ChatAuthOutcome::Success {
+                    Ok(AuthOutcome::Success {
                         previous_gamemode,
                         real_world,
                         spawn_override: None,
@@ -419,7 +447,7 @@ impl LoginManager {
                 } else {
                     *attempts += 1;
                     let attempts_left = self.max_login_attempts.saturating_sub(*attempts);
-                    Ok(ChatAuthOutcome::WrongPassword { attempts_left })
+                    Ok(AuthOutcome::WrongPassword { attempts_left })
                 }
             }
         }
@@ -442,6 +470,128 @@ impl LoginManager {
             .map_err(db_err)?;
         Ok(result.rows_affected() > 0)
     }
+
+    /// Shows the register/login form dialog and stamps `last_shown_tick`.
+    /// `error`, when `Some`, is appended as an extra message line - used to
+    /// give feedback on a re-show after a failed submission (a dialog can't
+    /// be edited in place; showing feedback means sending a new one).
+    pub async fn show_prompt(
+        &self,
+        player: &Arc<Player>,
+        registering: bool,
+        error: Option<TextComponent>,
+        current_tick: i32,
+    ) {
+        let name = &player.gameprofile.name;
+        let mut body = Vec::new();
+        let (title, greeting, inputs, action_id, button_text) = if registering {
+            (
+                format!("欢迎，{name}"),
+                format!(
+                    "{name} 您好，这是你第一次加入本服。请设置一个密码来保护你的账户，\
+                     两次输入的密码一致后即可完成注册并开始游戏。"
+                ),
+                vec![
+                    DialogInput::Text {
+                        key: "password".to_string(),
+                        label: TextComponent::text("密码"),
+                        initial: String::new(),
+                        max_length: Some(64),
+                    },
+                    DialogInput::Text {
+                        key: "confirm_password".to_string(),
+                        label: TextComponent::text("确认密码"),
+                        initial: String::new(),
+                        max_length: Some(64),
+                    },
+                ],
+                REGISTER_SUBMIT_ACTION_ID,
+                "完成注册",
+            )
+        } else {
+            (
+                format!("欢迎回来，{name}"),
+                format!("{name} 您好，请输入密码登录你的账户。"),
+                vec![DialogInput::Text {
+                    key: "password".to_string(),
+                    label: TextComponent::text("密码"),
+                    initial: String::new(),
+                    max_length: Some(64),
+                }],
+                LOGIN_SUBMIT_ACTION_ID,
+                "登录",
+            )
+        };
+        body.push(DialogBody::PlainMessage {
+            contents: TextComponent::text(greeting),
+        });
+        if let Some(error) = error {
+            body.push(DialogBody::PlainMessage { contents: error });
+        }
+
+        player
+            .show_dialog(&Dialog {
+                r#type: "minecraft:confirmation".to_string(),
+                title: TextComponent::text(title),
+                body,
+                inputs,
+                buttons: vec![ActionButton {
+                    text: TextComponent::text(button_text),
+                    tooltip: None,
+                    width: None,
+                    action: DialogAction::DynamicCustom {
+                        id: action_id.to_string(),
+                        additions: None,
+                    },
+                }],
+                links: vec![],
+                exit_action: None,
+                after_action: None,
+                can_close_with_escape: false,
+                external_title: None,
+            })
+            .await;
+
+        if let Some(auth) = self.pending.write().await.get_mut(&player.gameprofile.id) {
+            auth.last_shown_tick = current_tick;
+        }
+    }
+
+    /// Periodically re-shows the register/login dialog to every still-pending
+    /// player whose dialog hasn't been (re-)sent in the last `reprompt_ticks`
+    /// ticks. Called once per game tick from `Server::tick_worlds`.
+    ///
+    /// This is **not** reactive dismiss-detection - the server has no way to
+    /// know whether a player closed the dialog via Escape or the window's
+    /// own close button (see `EMBER.md`'s changelog entry for this feature
+    /// for why - confirmed against the real protocol, not a gap specific to
+    /// this codebase). The packet gateway already blocks every other action
+    /// for a pending player regardless of whether a dialog is currently
+    /// visible on their screen, so this is purely a "make sure they still
+    /// have a way out" safety net, not a guarantee their submission is
+    /// imminent.
+    pub async fn tick(&self, server: &Arc<Server>) {
+        if !self.enabled {
+            return;
+        }
+        let current_tick = server.tick_count.load(Ordering::Relaxed);
+        let due: Vec<(Uuid, bool)> = self
+            .pending
+            .read()
+            .await
+            .iter()
+            .filter(|(_, auth)| {
+                current_tick.saturating_sub(auth.last_shown_tick) >= self.reprompt_ticks
+            })
+            .map(|(uuid, auth)| (*uuid, matches!(auth.mode, PendingMode::Register)))
+            .collect();
+        for (uuid, registering) in due {
+            if let Some(player) = server.get_player_by_uuid(uuid) {
+                self.show_prompt(&player, registering, None, current_tick)
+                    .await;
+            }
+        }
+    }
 }
 
 fn hash_password(password: &str) -> String {
@@ -461,66 +611,18 @@ fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
-/// Shows the single-button login-prompt dialog, then follows up with the
-/// chat instruction for what to actually type (see the module doc comment
-/// for why the dialog itself never collects the password).
-pub async fn show_login_prompt(player: &Arc<Player>, registering: bool) {
-    let (title, body, prompt) = if registering {
-        (
-            "欢迎首次加入",
-            "这是你第一次加入本服,请设置一个密码。",
-            "请在聊天框输入密码进行注册,随后再输入一次确认。",
-        )
-    } else {
-        (
-            "请登录",
-            "请输入密码登录你的账户。",
-            "请在聊天框输入密码进行登录。",
-        )
-    };
-
-    player
-        .show_dialog(&Dialog {
-            r#type: "minecraft:notice".to_string(),
-            title: TextComponent::text(title),
-            body: vec![
-                pumpkin_protocol::java::client::dialog::DialogBody::PlainMessage {
-                    contents: TextComponent::text(body),
-                },
-            ],
-            inputs: vec![],
-            buttons: vec![ActionButton {
-                text: TextComponent::text("开始"),
-                tooltip: None,
-                width: None,
-                action: DialogAction::Custom {
-                    id: DIALOG_ACTION_ID.to_string(),
-                    payload: None,
-                },
-            }],
-            links: vec![],
-            exit_action: None,
-            after_action: None,
-            can_close_with_escape: false,
-            external_title: None,
-        })
-        .await;
-    player
-        .send_system_message(&TextComponent::text(prompt))
-        .await;
-}
-
 /// Integration tests against a real `MySQL` instance, mirroring
 /// `server::economy`'s own test module - not run by normal `cargo
 /// test`/`nextest`, explicitly with:
 /// `EMBER_AUTH_TEST_MYSQL_URL=mysql://user:pass@host:port/db cargo test -p pumpkin --lib server::auth::tests -- --ignored`
 ///
-/// `begin()`/`handle_chat()`'s full state machine needs a real `Arc<World>`
-/// (for the post-auth teleport-back target), which has no lightweight test
-/// constructor in this codebase - those two are exercised end-to-end via a
-/// live server + real client instead. What's covered here is everything
-/// that doesn't need a `World`: password hashing and the session/IP timing
-/// logic in `needs_auth`, both driven directly against the `accounts` table.
+/// `begin()`/`handle_dialog_submit()`'s full state machine needs a real
+/// `Arc<World>` (for the post-auth teleport-back target), which has no
+/// lightweight test constructor in this codebase - those two are exercised
+/// end-to-end via a live server + real client instead. What's covered here
+/// is everything that doesn't need a `World`: password hashing and the
+/// session/IP timing logic in `needs_auth`, both driven directly against
+/// the `accounts` table.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +656,7 @@ mod tests {
             session_seconds: 24 * 3600,
             min_password_length: 4,
             max_login_attempts: 5,
+            reprompt_ticks: 1200,
             pending: RwLock::new(HashMap::new()),
         };
         let pool = manager

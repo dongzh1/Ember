@@ -507,7 +507,13 @@ impl PumpkinServer {
                                             .login_manager
                                             .is_registering(player.gameprofile.id)
                                             .await;
-                                        crate::server::auth::show_login_prompt(&player, registering).await;
+                                        let current_tick = server_clone
+                                            .tick_count
+                                            .load(std::sync::atomic::Ordering::Relaxed);
+                                        server_clone
+                                            .login_manager
+                                            .show_prompt(&player, registering, None, current_tick)
+                                            .await;
                                     }
                                     // EMBER end
                                     if let ClientPlatform::Java(client) = player.client.as_ref() {

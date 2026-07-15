@@ -1355,9 +1355,16 @@ impl Server {
             };
 
             if let Some(limbo) = limbo_world {
+                let current_tick = self.tick_count.load(std::sync::atomic::Ordering::Relaxed);
                 let _ = self
                     .login_manager
-                    .begin(profile.id, &profile.name, gamemode, world.clone())
+                    .begin(
+                        profile.id,
+                        &profile.name,
+                        gamemode,
+                        world.clone(),
+                        current_tick,
+                    )
                     .await;
                 (limbo, GameMode::Spectator)
             } else {
@@ -1814,6 +1821,7 @@ impl Server {
         self.task_scheduler.tick(self).await;
         self.npc_manager.tick(self).await; // EMBER - packet-only NPC visibility
         self.hud_manager.tick(self).await; // EMBER - per-player boss-bar HUD refresh
+        self.login_manager.tick(self).await; // EMBER - periodic re-show of the pending auth dialog
 
         let mut handles = Vec::new();
         for world in self.worlds.load().iter() {
