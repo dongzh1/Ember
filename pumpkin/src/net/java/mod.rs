@@ -1244,11 +1244,17 @@ impl JavaClient {
             Ok(crate::server::auth::ChatAuthOutcome::Success {
                 previous_gamemode,
                 real_world,
+                spawn_override,
             }) => {
                 player.clear_dialog().await;
                 player.set_gamemode(previous_gamemode).await;
-                let pos = player.position();
-                let (yaw, pitch) = player.rotation();
+                let (pos, yaw, pitch) = if let Some((pos, yaw, pitch)) = spawn_override {
+                    (pos, yaw, pitch)
+                } else {
+                    let pos = player.position();
+                    let (yaw, pitch) = player.rotation();
+                    (pos, yaw, pitch)
+                };
                 player
                     .teleport_world(real_world, pos, Some(yaw), Some(pitch))
                     .await;

@@ -18,6 +18,8 @@ use argon2::password_hash::{
 use pumpkin_config::{LoadConfiguration, LoginConfig};
 use pumpkin_protocol::java::client::dialog::{ActionButton, Dialog, DialogAction};
 use pumpkin_util::GameMode;
+use pumpkin_util::math::vector2::Vector2;
+use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::text::TextComponent;
 use sqlx::Row;
 use sqlx::mysql::MySqlPoolOptions;
@@ -100,6 +102,25 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
+/// Resolves `world`'s own default spawn point (on top of the terrain at its
+/// configured spawn X/Z), the same computation `World::spawn_java_player`
+/// uses for a brand-new player. Duplicated rather than shared, matching
+/// this same snippet's existing duplication between `spawn_java_player` and
+/// `spawn_bedrock_player`.
+async fn real_world_default_spawn(world: &Arc<crate::world::World>) -> (Vector3<f64>, f32, f32) {
+    let info = world.level_info.load();
+    let spawn_position = Vector2::new(info.spawn_x, info.spawn_z);
+    let chunk_pos = Vector2::new(info.spawn_x >> 4, info.spawn_z >> 4);
+    world.level.get_or_fetch_chunk(chunk_pos, |_| ()).await;
+    let pos_y = world.get_top_block(spawn_position) + 1;
+    let position = Vector3::new(
+        f64::from(info.spawn_x) + 0.5,
+        f64::from(pos_y),
+        f64::from(info.spawn_z) + 0.5,
+    );
+    (position, info.spawn_yaw, info.spawn_pitch)
+}
+
 /// What a chat message from a pending player accomplished.
 pub enum ChatAuthOutcome {
     /// Registration's first password was too short; try the first password
@@ -114,12 +135,26 @@ pub enum ChatAuthOutcome {
     /// (the caller should kick).
     WrongPassword { attempts_left: u32 },
     /// Registered or logged in. The caller should restore
-    /// `previous_gamemode` and teleport them back to `real_world` (their own
-    /// current position/rotation are already correct - the packet gateway
-    /// never let a movement packet through while they were pending).
+    /// `previous_gamemode` and teleport them back to `real_world`.
+    ///
+    /// `spawn_override`, when `Some`, is where to actually put them -
+    /// `real_world`'s own default spawn point, resolved against `real_world`
+    /// itself (not the limbo world they were just standing in). Only set
+    /// for a fresh **registration**: a brand-new player has no saved
+    /// position, so `player.position()` at this point is wherever they
+    /// happened to spawn *inside limbo* (a small void map) - reusing that
+    /// as-is in `real_world` risks landing them underground/inside terrain,
+    /// since limbo's coordinates have no relationship to `real_world`'s
+    /// actual generated terrain. `None` for a returning **login**: their
+    /// real saved position was already loaded onto the entity from their
+    /// player-data file before they ever got redirected to limbo (see
+    /// `Server::add_player`/`Player::read_nbt`), and nothing moved them
+    /// while pending (the packet gateway blocked all movement), so
+    /// `player.position()` is already correct as-is.
     Success {
         previous_gamemode: GameMode,
         real_world: Arc<crate::world::World>,
+        spawn_override: Option<(Vector3<f64>, f32, f32)>,
     },
 }
 
@@ -343,9 +378,11 @@ impl LoginManager {
                         .await
                         .map_err(db_err)?;
                     self.pending.write().await.remove(&uuid);
+                    let spawn_override = Some(real_world_default_spawn(&real_world).await);
                     Ok(ChatAuthOutcome::Success {
                         previous_gamemode,
                         real_world,
+                        spawn_override,
                     })
                 } else {
                     Ok(ChatAuthOutcome::ConfirmationMismatch)
@@ -377,6 +414,7 @@ impl LoginManager {
                     Ok(ChatAuthOutcome::Success {
                         previous_gamemode,
                         real_world,
+                        spawn_override: None,
                     })
                 } else {
                     *attempts += 1;
