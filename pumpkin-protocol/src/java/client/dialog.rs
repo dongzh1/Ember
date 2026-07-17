@@ -23,26 +23,117 @@ pub enum DialogNBTSource<'a> {
     Nbt(&'a pumpkin_nbt::compound::NbtCompound),
 }
 
+// EMBER start - per-type dialog schema (was one flat struct with a generic
+// `buttons` list for every `type`; the real protocol gives each dialog type
+// its own distinct required fields - verified against the Minecraft Wiki's
+// Dialog page after a real client rejected `minecraft:confirmation` sent
+// the old way). Only `Confirmation` and `Notice` are exercised by native
+// code today (`server::auth`); `MultiAction`/`DialogList`/`ServerLinks` are
+// modeled for completeness and for the WASM `java-dialogs` binding, but
+// haven't been exercised against a real client - see
+// `wasm_host::wit::v0_1::player`'s translation code for the caveats on
+// mapping the WIT `dialog` record's flat `buttons` list onto these.
 #[derive(Serialize)]
-pub struct Dialog {
-    pub r#type: String,
-    pub title: TextComponent,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub body: Vec<DialogBody>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub inputs: Vec<DialogInput>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub buttons: Vec<ActionButton>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub links: Vec<DialogLink>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exit_action: Option<DialogAction>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_action: Option<String>,
-    pub can_close_with_escape: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub external_title: Option<TextComponent>,
+#[serde(tag = "type")]
+pub enum Dialog {
+    #[serde(rename = "minecraft:confirmation")]
+    Confirmation {
+        title: TextComponent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        external_title: Option<TextComponent>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        body: Vec<DialogBody>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<DialogInput>,
+        can_close_with_escape: bool,
+        pause: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        after_action: Option<String>,
+        yes: ActionButton,
+        no: ActionButton,
+    },
+    #[serde(rename = "minecraft:notice")]
+    Notice {
+        title: TextComponent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        external_title: Option<TextComponent>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        body: Vec<DialogBody>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<DialogInput>,
+        can_close_with_escape: bool,
+        pause: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        after_action: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<ActionButton>,
+    },
+    #[serde(rename = "minecraft:multi_action")]
+    MultiAction {
+        title: TextComponent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        external_title: Option<TextComponent>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        body: Vec<DialogBody>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<DialogInput>,
+        can_close_with_escape: bool,
+        pause: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        after_action: Option<String>,
+        actions: Vec<ActionButton>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        columns: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_action: Option<DialogAction>,
+    },
+    #[serde(rename = "minecraft:dialog_list")]
+    DialogList {
+        title: TextComponent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        external_title: Option<TextComponent>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        body: Vec<DialogBody>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<DialogInput>,
+        can_close_with_escape: bool,
+        pause: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        after_action: Option<String>,
+        /// Registry ids of other dialogs to list - NOT independently
+        /// verified against a real client (unused by any current native
+        /// code, and the WASM `java-dialogs` WIT record has no field to
+        /// supply this at all yet).
+        dialogs: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_action: Option<DialogAction>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        columns: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        button_width: Option<u32>,
+    },
+    #[serde(rename = "minecraft:server_links")]
+    ServerLinks {
+        title: TextComponent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        external_title: Option<TextComponent>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        body: Vec<DialogBody>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<DialogInput>,
+        can_close_with_escape: bool,
+        pause: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        after_action: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_action: Option<DialogAction>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        columns: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        button_width: Option<u32>,
+    },
 }
+// EMBER end
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -104,7 +195,10 @@ pub enum DialogInput {
 
 #[derive(Serialize)]
 pub struct ActionButton {
-    pub text: TextComponent,
+    // EMBER: was `text` - the real field name is `label` (verified against
+    // the Minecraft Wiki's Dialog page; a real client rejected the old name
+    // on every button, not just the ones in the buggy `buttons` list).
+    pub label: TextComponent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tooltip: Option<TextComponent>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -198,32 +292,97 @@ mod tests {
     // actually triggered it (never exercised before then).
     #[test]
     fn dialog_with_text_components_serializes_as_nbt() {
-        let dialog = Dialog {
-            r#type: "minecraft:notice".to_string(),
+        let dialog = Dialog::Notice {
             title: TextComponent::text("请登录"),
+            external_title: None,
             body: vec![DialogBody::PlainMessage {
                 contents: TextComponent::text("请输入密码登录你的账户。"),
             }],
             inputs: vec![],
-            buttons: vec![ActionButton {
-                text: TextComponent::text("开始"),
+            can_close_with_escape: false,
+            pause: true,
+            after_action: None,
+            action: Some(ActionButton {
+                label: TextComponent::text("开始"),
                 tooltip: None,
                 width: None,
                 action: DialogAction::Custom {
                     id: "ember:auth_ack".to_string(),
                     payload: None,
                 },
-            }],
-            links: vec![],
-            exit_action: None,
-            after_action: None,
-            can_close_with_escape: false,
-            external_title: None,
+            }),
         };
 
         let mut bytes = Vec::new();
         pumpkin_nbt::to_bytes(&DialogNBT::from_dialog(&dialog), &mut bytes)
             .expect("a Dialog full of TextComponent fields should serialize as NBT");
+    }
+
+    // EMBER: regression test for the real bug this whole module was
+    // restructured for - `Dialog` used to be one flat struct with a generic
+    // `buttons: Vec<ActionButton>` for every `type`, but a real client
+    // rejected `minecraft:confirmation` sent that way: the real protocol
+    // requires named `yes`/`no` fields (each a full button), not a list.
+    // Pins the `Confirmation` variant's shape so this can't silently regress
+    // back to a flat struct.
+    #[test]
+    fn confirmation_dialog_serializes_with_yes_no_fields() {
+        let dialog = Dialog::Confirmation {
+            title: TextComponent::text("确认"),
+            external_title: None,
+            body: vec![],
+            inputs: vec![],
+            can_close_with_escape: true,
+            pause: true,
+            after_action: None,
+            yes: ActionButton {
+                label: TextComponent::text("是"),
+                tooltip: None,
+                width: None,
+                action: DialogAction::Custom {
+                    id: "ember:test_yes".to_string(),
+                    payload: None,
+                },
+            },
+            no: ActionButton {
+                label: TextComponent::text("否"),
+                tooltip: None,
+                width: None,
+                action: DialogAction::Custom {
+                    id: "ember:test_no".to_string(),
+                    payload: None,
+                },
+            },
+        };
+
+        let mut bytes = Vec::new();
+        pumpkin_nbt::to_bytes(&DialogNBT::from_dialog(&dialog), &mut bytes)
+            .expect("a Confirmation dialog with yes/no buttons should serialize as NBT");
+
+        // Not just "did it serialize" - read the compound back and check the
+        // actual field names a real client would look for, since a wrong
+        // field name (this variant used to be a flat struct with a generic
+        // `buttons` list, and `ActionButton` used to call this field `text`
+        // instead of `label`) serializes without error but a real client
+        // still can't decode it.
+        let compound: pumpkin_nbt::compound::NbtCompound =
+            pumpkin_nbt::from_bytes(std::io::Cursor::new(bytes))
+                .expect("should read back as a compound");
+        assert_eq!(compound.get_string("type"), Some("minecraft:confirmation"));
+        let yes = compound
+            .get_compound("yes")
+            .expect("yes field should be a compound");
+        assert!(
+            yes.get_string("label").is_some() || yes.get_compound("label").is_some(),
+            "yes button should have a label field (not `text`)"
+        );
+        let no = compound
+            .get_compound("no")
+            .expect("no field should be a compound");
+        assert!(
+            no.get_string("label").is_some() || no.get_compound("label").is_some(),
+            "no button should have a label field (not `text`)"
+        );
     }
 
     // EMBER: `inputs` was empty in every dialog Ember ever actually sent
@@ -232,9 +391,9 @@ mod tests {
     // above rather than trusting it compiles-therefore-works.
     #[test]
     fn dialog_with_text_inputs_and_dynamic_custom_serializes_as_nbt() {
-        let dialog = Dialog {
-            r#type: "minecraft:confirmation".to_string(),
+        let dialog = Dialog::Notice {
             title: TextComponent::text("欢迎，测试"),
+            external_title: None,
             body: vec![DialogBody::PlainMessage {
                 contents: TextComponent::text("请设置一个密码来保护你的账户。"),
             }],
@@ -252,20 +411,18 @@ mod tests {
                     max_length: Some(64),
                 },
             ],
-            buttons: vec![ActionButton {
-                text: TextComponent::text("完成注册"),
+            can_close_with_escape: false,
+            pause: true,
+            after_action: None,
+            action: Some(ActionButton {
+                label: TextComponent::text("完成注册"),
                 tooltip: None,
                 width: None,
                 action: DialogAction::DynamicCustom {
                     id: "ember:auth/register_submit".to_string(),
                     additions: None,
                 },
-            }],
-            links: vec![],
-            exit_action: None,
-            after_action: None,
-            can_close_with_escape: false,
-            external_title: None,
+            }),
         };
 
         let mut bytes = Vec::new();

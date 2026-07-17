@@ -161,6 +161,25 @@ fn send_despawn_packets(
 }
 // EMBER end
 
+// EMBER start - localized NPC-management errors
+/// A structured NPC-management error.
+///
+/// Carries only the data the command layer (`command::commands::npc`) needs
+/// to build a localized feedback message - deliberately not a pre-formatted
+/// `String`, so a hardcoded English sentence never has to live where a
+/// translation key should.
+#[derive(Debug, Clone)]
+pub enum NpcError {
+    /// No NPC is registered under this name (case-insensitive lookup).
+    NotFound(String),
+    /// `create` was given a name that's already taken (case-insensitive).
+    AlreadyExists(String),
+    /// `set_skin` was asked to skin an entity type with no skin concept
+    /// (see `supports_skin`).
+    UnsupportedSkin { name: String, entity_type: String },
+}
+// EMBER end
+
 struct RuntimeNpc {
     fake_uuid: Uuid,
     entity_id: i32,
@@ -271,10 +290,10 @@ impl NpcManager {
     }
 
     /// Creates a new NPC. Fails if the name (case-insensitive) is already taken.
-    pub async fn create(&self, entry: NpcEntry) -> Result<(), String> {
+    pub async fn create(&self, entry: NpcEntry) -> Result<(), NpcError> {
         let mut config = self.config.write().await;
         if config.find(&entry.name).is_some() {
-            return Err(format!("An NPC named '{}' already exists.", entry.name));
+            return Err(NpcError::AlreadyExists(entry.name.clone()));
         }
         let mut runtime = self.runtime.write().await;
         runtime.insert(entry.name.clone(), Self::spawn_runtime_state(&entry));
@@ -284,14 +303,14 @@ impl NpcManager {
     }
 
     /// Removes an NPC, despawning it from anyone currently viewing it.
-    pub async fn remove(&self, server: &Arc<Server>, name: &str) -> Result<(), String> {
+    pub async fn remove(&self, server: &Arc<Server>, name: &str) -> Result<(), NpcError> {
         let mut config = self.config.write().await;
         let Some(index) = config
             .npcs
             .iter()
             .position(|n| n.name.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         let removed = config.npcs.remove(index);
         config.save();
@@ -322,14 +341,14 @@ impl NpcManager {
         pos: Vector3<f64>,
         yaw: f32,
         pitch: f32,
-    ) -> Result<(), String> {
+    ) -> Result<(), NpcError> {
         let mut config = self.config.write().await;
         let Some(entry) = config
             .npcs
             .iter_mut()
             .find(|n| n.name.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         entry.world = world;
         entry.x = pos.x;
@@ -353,7 +372,7 @@ impl NpcManager {
         server: &Arc<Server>,
         name: &str,
         source: &Player,
-    ) -> Result<(), String> {
+    ) -> Result<(), NpcError> {
         let textures = source
             .gameprofile
             .properties
@@ -368,13 +387,13 @@ impl NpcManager {
             .iter_mut()
             .find(|n| n.name.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         if !supports_skin(resolve_entity_type(entry)) {
-            return Err(format!(
-                "NPC '{name}' is a '{}' — that entity type doesn't support skins.",
-                entry.entity_type
-            ));
+            return Err(NpcError::UnsupportedSkin {
+                name: name.to_string(),
+                entity_type: entry.entity_type.clone(),
+            });
         }
         entry.skin = textures;
         let entry = entry.clone();
@@ -385,14 +404,14 @@ impl NpcManager {
         Ok(())
     }
 
-    pub async fn set_action(&self, name: &str, command: Option<String>) -> Result<(), String> {
+    pub async fn set_action(&self, name: &str, command: Option<String>) -> Result<(), NpcError> {
         let mut config = self.config.write().await;
         let Some(entry) = config
             .npcs
             .iter_mut()
             .find(|n| n.name.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         entry.click_command = command;
         config.save();
@@ -407,14 +426,14 @@ impl NpcManager {
         &self,
         name: &str,
         enabled: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), NpcError> {
         let mut config = self.config.write().await;
         let Some(entry) = config
             .npcs
             .iter_mut()
             .find(|n| n.name.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         entry.look_at_nearest_player = enabled;
         config.save();
@@ -425,14 +444,14 @@ impl NpcManager {
     /// Toggles falling when airborne. Picked up by the next `tick()`, like
     /// `look_at_nearest_player` — no respawn needed, since nothing about the
     /// spawn packet itself changes.
-    pub async fn set_gravity(&self, name: &str, enabled: bool) -> Result<(), String> {
+    pub async fn set_gravity(&self, name: &str, enabled: bool) -> Result<(), NpcError> {
         let mut config = self.config.write().await;
         let Some(entry) = config
             .npcs
             .iter_mut()
             .find(|n| n.name.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         entry.gravity = enabled;
         config.save();
@@ -448,14 +467,14 @@ impl NpcManager {
         server: &Arc<Server>,
         name: &str,
         sneaking: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), NpcError> {
         let mut config = self.config.write().await;
         let Some(entry) = config
             .npcs
             .iter_mut()
             .find(|n| n.name.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         entry.sneaking = sneaking;
         let entry = entry.clone();
@@ -468,10 +487,10 @@ impl NpcManager {
 
     /// Plays the swing-main-arm animation for current viewers. One-shot —
     /// nothing persisted, unlike the other actions here.
-    pub async fn swing_arm(&self, server: &Arc<Server>, name: &str) -> Result<(), String> {
+    pub async fn swing_arm(&self, server: &Arc<Server>, name: &str) -> Result<(), NpcError> {
         let config = self.config.read().await;
         let Some(entry) = config.find(name) else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         let (world_name, canonical_name) = (entry.world.clone(), entry.name.clone());
         drop(config);
@@ -508,10 +527,10 @@ impl NpcManager {
     /// leg in progress (wandering resumes on its own once this arrives).
     /// Runtime-only — a restart loses an in-progress `walk_to`, same as
     /// every other one-shot action here.
-    pub async fn walk_to(&self, name: &str, target: Vector3<f64>) -> Result<(), String> {
+    pub async fn walk_to(&self, name: &str, target: Vector3<f64>) -> Result<(), NpcError> {
         let config = self.config.read().await;
         let Some(entry) = config.find(name) else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         let canonical_name = entry.name.clone();
         drop(config);
@@ -534,14 +553,14 @@ impl NpcManager {
         server: &Arc<Server>,
         name: &str,
         radius: Option<f64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), NpcError> {
         let mut config = self.config.write().await;
         let Some(entry) = config
             .npcs
             .iter_mut()
             .find(|n| n.name.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         entry.wander_radius = radius;
         let entry = entry.clone();
@@ -563,10 +582,10 @@ impl NpcManager {
         name: &str,
         target: Uuid,
         destination: Option<Vector3<f64>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), NpcError> {
         let config = self.config.read().await;
         let Some(entry) = config.find(name) else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         let canonical_name = entry.name.clone();
         drop(config);
@@ -585,10 +604,10 @@ impl NpcManager {
 
     /// Stops escorting. A no-op (not an error) if the NPC wasn't escorting
     /// anyone.
-    pub async fn stop_escort(&self, name: &str) -> Result<(), String> {
+    pub async fn stop_escort(&self, name: &str) -> Result<(), NpcError> {
         let config = self.config.read().await;
         let Some(entry) = config.find(name) else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         let canonical_name = entry.name.clone();
         drop(config);
@@ -609,14 +628,14 @@ impl NpcManager {
         server: &Arc<Server>,
         name: &str,
         player: Uuid,
-    ) -> Result<(), String> {
+    ) -> Result<(), NpcError> {
         let mut config = self.config.write().await;
         let Some(entry) = config
             .npcs
             .iter_mut()
             .find(|n| n.name.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         entry.hidden_from.insert(player);
         let entry = entry.clone();
@@ -633,14 +652,14 @@ impl NpcManager {
         server: &Arc<Server>,
         name: &str,
         player: Uuid,
-    ) -> Result<(), String> {
+    ) -> Result<(), NpcError> {
         let mut config = self.config.write().await;
         let Some(entry) = config
             .npcs
             .iter_mut()
             .find(|n| n.name.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         entry.hidden_from.remove(&player);
         let entry = entry.clone();
@@ -658,14 +677,14 @@ impl NpcManager {
         server: &Arc<Server>,
         name: &str,
         blocks: Option<f64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), NpcError> {
         let mut config = self.config.write().await;
         let Some(entry) = config
             .npcs
             .iter_mut()
             .find(|n| n.name.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("No NPC named '{name}' exists."));
+            return Err(NpcError::NotFound(name.to_string()));
         };
         entry.visible_distance = blocks;
         let entry = entry.clone();

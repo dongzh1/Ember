@@ -1,5 +1,5 @@
 {
-  "commands.pumpkin.version": "Pumpkin %s\n",
+  "commands.pumpkin.version": "Ember %s\n",
   "commands.pumpkin.description": "Permettre à tout le monde d’héberger \ndes serveurs Minecraft rapides et efficaces.\n",
   "commands.pumpkin.minecraft_version": "(Minecraft %s, Protocol %s)\n",
   "commands.pumpkin.github": "[Dépôt Github]",

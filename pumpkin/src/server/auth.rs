@@ -530,25 +530,23 @@ impl LoginManager {
         }
 
         player
-            .show_dialog(&Dialog {
-                r#type: "minecraft:confirmation".to_string(),
+            .show_dialog(&Dialog::Notice {
                 title: TextComponent::text(title),
+                external_title: None,
                 body,
                 inputs,
-                buttons: vec![ActionButton {
-                    text: TextComponent::text(button_text),
+                can_close_with_escape: false,
+                pause: true,
+                after_action: None,
+                action: Some(ActionButton {
+                    label: TextComponent::text(button_text),
                     tooltip: None,
                     width: None,
                     action: DialogAction::DynamicCustom {
                         id: action_id.to_string(),
                         additions: None,
                     },
-                }],
-                links: vec![],
-                exit_action: None,
-                after_action: None,
-                can_close_with_escape: false,
-                external_title: None,
+                }),
             })
             .await;
 

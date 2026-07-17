@@ -105,3 +105,7 @@ pub use test_instance_block_action::*;
 
 mod set_test_block;
 pub use set_test_block::*;
+
+// EMBER: play-state resource pack response - see the type's own doc comment.
+mod resource_pack_response;
+pub use resource_pack_response::*;

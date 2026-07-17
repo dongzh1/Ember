@@ -69,7 +69,7 @@ async fn main() {
         "{}",
         TextComponent::text(format!(
             "Starting {} {} Minecraft (Protocol {})",
-            TextComponent::text("Pumpkin")
+            TextComponent::text("Ember")
                 .color_named(NamedColor::Gold)
                 .to_pretty_console(),
             TextComponent::text(CARGO_PKG_VERSION.to_string())
@@ -163,22 +163,22 @@ async fn main() {
 fn print_support_links_and_warning() {
     warn!(
         "{}",
-        TextComponent::text("Pumpkin is currently under heavy development!")
+        TextComponent::text("Ember is currently under heavy development!")
             .color_named(NamedColor::DarkRed)
             .to_pretty_console(),
     );
     info!(
         "Report issues on {}",
-        TextComponent::text("https://github.com/Pumpkin-MC/Pumpkin/issues")
+        TextComponent::text("https://github.com/dongzh1/Ember/issues")
             .color_named(NamedColor::DarkAqua)
             .to_pretty_console()
     );
     info!(
         "Join our {} for community support: {}",
-        TextComponent::text("Discord")
+        TextComponent::text("QQ Group")
             .color_named(NamedColor::DarkBlue)
             .to_pretty_console(),
-        TextComponent::text("https://discord.gg/wT8XjrjKkf")
+        TextComponent::text("https://qm.qq.com/q/hmHPe9Diog (1060828130)")
             .color_named(NamedColor::Aqua)
             .to_pretty_console()
     );

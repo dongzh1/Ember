@@ -23,8 +23,11 @@ async fn feedback(context: &CommandContext<'_>, msg: TextComponent) {
     context.source.send_feedback(msg, false).await;
 }
 
-fn err_text(msg: impl Into<String>) -> TextComponent {
-    TextComponent::text(msg.into()).color_named(NamedColor::Red)
+/// Wraps an already-built (and already localized) message in Ember's plain
+/// error color - errors stay clearly red/plain rather than picking up the
+/// ember gradient, for legibility.
+fn err_text(component: TextComponent) -> TextComponent {
+    component.color_named(NamedColor::Red)
 }
 
 struct ShopListExecutor;
@@ -32,13 +35,23 @@ impl CommandExecutor for ShopListExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
             let names = context.server().shop_manager.shop_names();
+            let locale = context.source.output.get_locale();
             if names.is_empty() {
-                feedback(context, TextComponent::text("No shops are configured.")).await;
+                feedback(
+                    context,
+                    TextComponent::custom("ember", "commands.shop.list_empty", locale, vec![]),
+                )
+                .await;
                 return Ok(0);
             }
             feedback(
                 context,
-                TextComponent::text(format!("Shops: {}", names.join(", "))),
+                TextComponent::custom(
+                    "ember",
+                    "commands.shop.list",
+                    locale,
+                    vec![TextComponent::text(names.join(", "))],
+                ),
             )
             .await;
             #[expect(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -54,8 +67,18 @@ impl CommandExecutor for ShopOpenExecutor {
             let sender = context.source.player_or_err()?;
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let server = context.server();
+            let locale = context.source.output.get_locale();
             let Some(shop) = server.shop_manager.find_shop(&name) else {
-                feedback(context, err_text(format!("No shop named '{name}'."))).await;
+                feedback(
+                    context,
+                    err_text(TextComponent::custom(
+                        "ember",
+                        "commands.shop.not_found",
+                        locale,
+                        vec![TextComponent::text(name)],
+                    )),
+                )
+                .await;
                 return Ok(0);
             };
             let Some(sender) = server.get_player_by_uuid(sender.gameprofile.id) else {

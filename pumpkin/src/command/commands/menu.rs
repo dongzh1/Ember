@@ -18,8 +18,11 @@ const DESCRIPTION: &str = "Opens a floating menu (or closes it if already open).
 const PERMISSION: &str = "ember:command.menu";
 const ARG_NAME: &str = "name";
 
-fn err_text(msg: impl Into<String>) -> TextComponent {
-    TextComponent::text(msg.into()).color_named(NamedColor::Red)
+/// Wraps an already-built (and already localized) message in Ember's plain
+/// error color - errors stay clearly red/plain rather than picking up the
+/// ember gradient, for legibility.
+fn err_text(component: TextComponent) -> TextComponent {
+    component.color_named(NamedColor::Red)
 }
 
 struct MenuOpenExecutor {
@@ -44,7 +47,18 @@ impl CommandExecutor for MenuOpenExecutor {
             match server.menu_manager.open(&player_arc, name).await {
                 Ok(()) => Ok(1),
                 Err(e) => {
-                    context.source.send_feedback(err_text(e), false).await;
+                    // `e` is whatever reason `MenuManager::open` produced
+                    // (already plain English text from that module) - kept
+                    // verbatim as the substitution rather than re-deriving
+                    // it here, so no dynamic detail gets lost.
+                    let locale = context.source.output.get_locale();
+                    let message = err_text(TextComponent::custom(
+                        "ember",
+                        "commands.menu.open_failed",
+                        locale,
+                        vec![TextComponent::text(e)],
+                    ));
+                    context.source.send_feedback(message, false).await;
                     Ok(0)
                 }
             }

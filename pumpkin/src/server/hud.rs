@@ -68,6 +68,22 @@ impl HudManager {
         *self.config.write().await = HudConfig::load(&self.exec_dir);
     }
 
+    /// Drops a disconnected player's `active` bossbar-uuid record.
+    ///
+    /// `active` outlives any single connection (it's server-lifetime state
+    /// on this manager, not per-`Player`), so without this a rejoining
+    /// player's very next HUD refresh would see a stale entry, believe
+    /// their (brand new, empty) client already has that bossbar, and send
+    /// an *update* instead of the *add* the client actually needs -
+    /// `ClientboundBossEventPacket`'s update-name/update-health operations
+    /// crash a real client with a `NullPointerException` when the bossbar
+    /// they name isn't in its local map (confirmed against a real client's
+    /// log). No packet needs to go out here - the connection is already
+    /// gone, there's nothing left to tell it to remove.
+    pub async fn player_disconnected(&self, uuid: Uuid) {
+        self.active.write().await.remove(&uuid);
+    }
+
     async fn is_enabled_for(&self, uuid: Uuid, config: &HudConfig) -> bool {
         self.player_state
             .read()

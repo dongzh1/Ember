@@ -1965,7 +1965,7 @@ impl World {
                 yaw,
                 level_settings,
                 level_id: String::new(),
-                level_name: "Pumpkin world".to_string(),
+                level_name: "Ember world".to_string(),
                 premium_world_template_id: String::new(),
                 is_trial: false,
                 rewind_history_size: VarInt(0),
@@ -1976,7 +1976,7 @@ impl World {
                 // TODO Make this unique
                 multiplayer_correlation_id: Uuid::default().to_string(),
                 enable_itemstack_net_manager: true,
-                server_version: "Pumpkin Rust Server".to_string(),
+                server_version: "Ember Rust Server".to_string(),
                 compound_id: 10,
                 compound_len: VarUInt(0),
                 compound_end: 0,

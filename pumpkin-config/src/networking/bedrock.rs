@@ -65,7 +65,7 @@ impl Default for BedrockConfig {
             view_distance: NonZeroU8::new(16).unwrap(),
             simulation_distance: NonZeroU8::new(10).unwrap(),
             compression: CompressionConfig::default(),
-            motd: "A blazingly fast Pumpkin server!".to_string(),
+            motd: "A blazingly fast Ember server!".to_string(),
             authentication: BedrockAuthenticationConfig::default(),
         }
     }

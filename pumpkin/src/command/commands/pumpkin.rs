@@ -9,9 +9,9 @@ use std::borrow::Cow;
 use crate::command::CommandResult;
 use crate::command::{CommandExecutor, CommandSender, args::ConsumedArgs, tree::CommandTree};
 
-const NAMES: [&str; 2] = ["pumpkin", "version"];
+const NAMES: [&str; 2] = ["ember", "version"];
 
-const DESCRIPTION: &str = "Display information about Pumpkin.";
+const DESCRIPTION: &str = "Display information about Ember.";
 
 struct Executor;
 
@@ -26,12 +26,11 @@ struct Contributor {
 
 fn fetch_all_contributors() -> Vec<Contributor> {
     let mut all_contributors = Vec::new();
-    let mut next_url = Some(
-        "https://api.github.com/repos/Pumpkin-MC/Pumpkin/contributors?per_page=100".to_string(),
-    );
+    let mut next_url =
+        Some("https://api.github.com/repos/dongzh1/Ember/contributors?per_page=100".to_string());
 
     while let Some(url) = next_url {
-        let response = ureq::get(&url).header("User-Agent", "Pumpkin-MC").call();
+        let response = ureq::get(&url).header("User-Agent", "Ember").call();
 
         match response {
             Ok(mut res) => {
@@ -182,11 +181,10 @@ impl CommandExecutor for Executor {
                         )))
                         .color_named(NamedColor::Gold),
                     )
-                    // https://pumpkinmc.org/
                     .add_child(
                         TextComponent::custom("pumpkin", "commands.pumpkin.github", locale, vec![])
                             .click_event(ClickEvent::OpenUrl {
-                                url: Cow::from("https://github.com/Pumpkin-MC/Pumpkin"),
+                                url: Cow::from("https://github.com/dongzh1/Ember"),
                             })
                             .hover_event(HoverEvent::show_text(TextComponent::custom(
                                 "pumpkin",
@@ -201,38 +199,16 @@ impl CommandExecutor for Executor {
                     // Spacing
                     .add_child(TextComponent::text("  "))
                     .add_child(
-                        TextComponent::text("[Donate]")
+                        TextComponent::text("[QQ Group]")
                             .click_event(ClickEvent::OpenUrl {
-                                url: Cow::from("https://pumpkinmc.org/donate/"),
+                                url: Cow::from("https://qm.qq.com/q/hmHPe9Diog"),
                             })
                             .hover_event(HoverEvent::show_text(TextComponent::text(
-                                "Click to open Donate",
+                                "Click to join the community QQ group (1060828130)",
                             )))
-                            .rainbow()
+                            .color_named(NamedColor::Aqua)
                             .bold()
                             .underlined(),
-                    )
-                    // Spacing
-                    .add_child(TextComponent::text("  "))
-                    .add_child(
-                        TextComponent::custom(
-                            "pumpkin",
-                            "commands.pumpkin.website",
-                            locale,
-                            vec![],
-                        )
-                        .click_event(ClickEvent::OpenUrl {
-                            url: Cow::from("https://pumpkinmc.org/"),
-                        })
-                        .hover_event(HoverEvent::show_text(TextComponent::custom(
-                            "pumpkin",
-                            "commands.pumpkin.website.hover",
-                            locale,
-                            vec![],
-                        )))
-                        .color_named(NamedColor::Blue)
-                        .bold()
-                        .underlined(),
                     ),
                 )
                 .await;

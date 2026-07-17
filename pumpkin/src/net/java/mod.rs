@@ -1204,6 +1204,14 @@ impl JavaClient {
                 self.handle_seen_advancement(player, SSeenAdvancement::read(payload, &version)?)
                     .await;
             }
+            id if id == pumpkin_protocol::java::server::play::SPlayResourcePack::to_id(version) => {
+                self.handle_resource_pack_response_play(
+                    server,
+                    &pumpkin_protocol::java::server::play::SPlayResourcePack::read(
+                        payload, &version,
+                    )?,
+                );
+            }
             _ => {
                 warn!("Failed to handle player packet id {}", packet.id);
             }

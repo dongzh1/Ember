@@ -1,5 +1,5 @@
 {
-  "commands.pumpkin.version": "Pumpkin %s\n",
+  "commands.pumpkin.version": "Ember %s\n",
   "commands.pumpkin.description": "모든 사람이 빠르고 효율적인 마인크래프트 서버를 호스팅할 수 있도록 지원합니다.\n",
   "commands.pumpkin.minecraft_version": "(마인크래프트 %s, 프로토콜 %s)\n",
   "commands.pumpkin.github": "[깃허브 저장소]",

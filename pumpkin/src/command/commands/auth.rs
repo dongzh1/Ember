@@ -31,36 +31,46 @@ impl CommandExecutor for AuthResetExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
             let profiles = GameProfileArgumentType::get(context, ARG_TARGET).await?;
-            let Some(target) = profiles.into_iter().next() else {
+            if profiles.is_empty() {
                 feedback(context, err_text("No matching player.")).await;
                 return Ok(0);
-            };
-            match context.server().login_manager.reset(target.id).await {
-                Ok(true) => {
-                    feedback(
-                        context,
-                        TextComponent::text(format!(
-                            "{}'s login account was reset; they'll register fresh next join.",
-                            target.name
-                        ))
-                        .color_named(NamedColor::Green),
-                    )
-                    .await;
-                    Ok(1)
-                }
-                Ok(false) => {
-                    feedback(
-                        context,
-                        err_text(format!("{} has no login account.", target.name)),
-                    )
-                    .await;
-                    Ok(0)
-                }
-                Err(e) => {
-                    feedback(context, err_text(format!("Login database error: {e}"))).await;
-                    Ok(0)
+            }
+
+            // A selector like `@a` can resolve to more than one profile - reset every
+            // match instead of silently acting on only the first, same as other
+            // selector-driven commands in this codebase.
+            let mut reset_count = 0;
+            for target in &profiles {
+                match context.server().login_manager.reset(target.id).await {
+                    Ok(true) => {
+                        reset_count += 1;
+                        feedback(
+                            context,
+                            TextComponent::text(format!(
+                                "{}'s login account was reset; they'll register fresh next join.",
+                                target.name
+                            ))
+                            .color_named(NamedColor::Green),
+                        )
+                        .await;
+                    }
+                    Ok(false) => {
+                        feedback(
+                            context,
+                            err_text(format!("{} has no login account.", target.name)),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        feedback(
+                            context,
+                            err_text(format!("{}: login database error: {e}", target.name)),
+                        )
+                        .await;
+                    }
                 }
             }
+            Ok(reset_count)
         })
     }
 }

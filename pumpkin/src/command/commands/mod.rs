@@ -127,7 +127,7 @@ pub async fn default_dispatcher(
     register_permissions(registry);
 
     // Zero
-    dispatcher.register(pumpkin::init_command_tree(), "pumpkin:command.pumpkin");
+    dispatcher.register(pumpkin::init_command_tree(), "ember:command.ember");
     dispatcher.register(me::init_command_tree(), "minecraft:command.me");
     dispatcher.register(msg::init_command_tree(), "minecraft:command.msg");
     // Two
@@ -292,8 +292,8 @@ fn register_level_0_permissions(registry: &mut PermissionRegistry) {
     // Register permissions for builtin commands that are allowed for everyone
     registry
         .register_permission(Permission::new(
-            "pumpkin:command.pumpkin",
-            "Shows information about the Pumpkin server",
+            "ember:command.ember",
+            "Shows information about the Ember server",
             PermissionDefault::Allow,
         ))
         .expect("Permission already registered");

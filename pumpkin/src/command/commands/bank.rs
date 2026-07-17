@@ -7,6 +7,7 @@
 
 use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry};
 use pumpkin_util::text::{TextComponent, color::NamedColor};
+use pumpkin_util::translation::{Locale, get_translation_text};
 
 use crate::command::argument_builder::{ArgumentBuilder, argument, command, literal};
 use crate::command::argument_types::core::integer::IntegerArgumentType;
@@ -29,12 +30,46 @@ async fn feedback(context: &CommandContext<'_>, msg: TextComponent) {
     context.source.send_feedback(msg, false).await;
 }
 
-fn err_text(msg: impl Into<String>) -> TextComponent {
-    TextComponent::text(msg.into()).color_named(NamedColor::Red)
+/// Wraps an already-built (and already localized) message in Ember's plain
+/// error color - errors stay clearly red/plain rather than picking up the
+/// ember gradient, for legibility.
+fn err_text(component: TextComponent) -> TextComponent {
+    component.color_named(NamedColor::Red)
 }
 
-fn shop_err_text(e: &ShopError) -> TextComponent {
-    err_text(e.to_string())
+/// Translates a `ShopError` into player-facing text. `ShopError` is shared
+/// across the whole shop system (`market`/`lottery`/`basic_shop` too), so only
+/// the variants with structured data get bespoke translated wording here;
+/// `Other` already carries a final, fully-formed message from wherever it
+/// was constructed (`BankManager`'s own already-localized cap-exceeded
+/// message, or a rare fallback derived from an underlying `EconomyError`)
+/// and is shown verbatim rather than wrapped in another translation layer.
+fn shop_err_text(e: &ShopError, currency: &str, locale: Locale) -> TextComponent {
+    match e {
+        ShopError::Disabled => err_text(TextComponent::custom(
+            "ember",
+            "commands.bank.disabled",
+            locale,
+            vec![],
+        )),
+        ShopError::Database(msg) => err_text(TextComponent::custom(
+            "ember",
+            "commands.bank.database_error",
+            locale,
+            vec![TextComponent::text(msg.clone())],
+        )),
+        ShopError::InsufficientFunds { have, need } => err_text(TextComponent::custom(
+            "ember",
+            "commands.bank.insufficient_funds",
+            locale,
+            vec![
+                TextComponent::text(currency.to_string()),
+                TextComponent::text(have.to_string()),
+                TextComponent::text(need.to_string()),
+            ],
+        )),
+        ShopError::Other(msg) => err_text(TextComponent::text(msg.clone())),
+    }
 }
 
 fn optional_currency<'a>(
@@ -98,6 +133,7 @@ impl CommandExecutor for BankBalanceExecutor {
         Box::pin(async move {
             let player = context.source.player_or_err()?;
             let server = context.server();
+            let locale = context.source.output.get_locale();
             let currency = optional_currency(context, self.has_currency)?;
             let currency = resolve_currency(server, currency);
             let tier = resolve_tier(player.gameprofile.id, server).await;
@@ -108,21 +144,33 @@ impl CommandExecutor for BankBalanceExecutor {
                 .await
             {
                 Ok(account) => {
+                    // A balance/status display, like `/balance` - plain data
+                    // rather than a headline moment, so it keeps the
+                    // existing plain green instead of the ember gradient.
+                    // The "%" is baked into the pre-formatted rate argument
+                    // (not the translation template) since the translation
+                    // system treats every literal `%` in a template as the
+                    // start of a placeholder.
                     feedback(
                         context,
-                        TextComponent::text(format!(
-                            "Bank balance: {} {currency} (cap {}, {}%/day interest)",
-                            account.balance,
-                            tier.max_balance,
-                            tier.daily_rate * 100.0
-                        ))
+                        TextComponent::custom(
+                            "ember",
+                            "commands.bank.balance",
+                            locale,
+                            vec![
+                                TextComponent::text(account.balance.to_string()),
+                                TextComponent::text(currency.clone()),
+                                TextComponent::text(tier.max_balance.to_string()),
+                                TextComponent::text(format!("{}%", tier.daily_rate * 100.0)),
+                            ],
+                        )
                         .color_named(NamedColor::Green),
                     )
                     .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, shop_err_text(&e)).await;
+                    feedback(context, shop_err_text(&e, &currency, locale)).await;
                     Ok(0)
                 }
             }
@@ -138,13 +186,23 @@ impl CommandExecutor for BankDepositExecutor {
         Box::pin(async move {
             let player = context.source.player_or_err()?;
             let server = context.server();
+            let locale = context.source.output.get_locale();
             let amount = IntegerArgumentType::get(context, ARG_AMOUNT)?;
             let currency = optional_currency(context, self.has_currency)?;
             let currency = resolve_currency(server, currency);
             let tier = resolve_tier(player.gameprofile.id, server).await;
 
             if amount <= 0 {
-                feedback(context, err_text("Amount must be positive.")).await;
+                feedback(
+                    context,
+                    err_text(TextComponent::custom(
+                        "ember",
+                        "commands.bank.amount_must_be_positive",
+                        locale,
+                        vec![],
+                    )),
+                )
+                .await;
                 return Ok(0);
             }
 
@@ -156,22 +214,31 @@ impl CommandExecutor for BankDepositExecutor {
                     i64::from(amount),
                     &tier,
                     &server.economy_manager,
+                    locale,
                 )
                 .await
             {
                 Ok(new_balance) => {
-                    feedback(
-                        context,
-                        TextComponent::text(format!(
-                            "Deposited {amount} {currency}. New bank balance: {new_balance}."
-                        ))
-                        .color_named(NamedColor::Green),
-                    )
-                    .await;
+                    // Direct success confirmation - gets the branded ember
+                    // gradient, applied to the already-resolved string (not
+                    // the lazy `Custom` component) since
+                    // `text_ember`/`ember_gradient` flattens its input via
+                    // `get_text(Locale::EnUs)` internally, which would
+                    // silently discard localization.
+                    let text = get_translation_text(
+                        "ember:commands.bank.deposited",
+                        locale,
+                        vec![
+                            TextComponent::text(amount.to_string()).0,
+                            TextComponent::text(currency.clone()).0,
+                            TextComponent::text(new_balance.to_string()).0,
+                        ],
+                    );
+                    feedback(context, TextComponent::text_ember(text)).await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, shop_err_text(&e)).await;
+                    feedback(context, shop_err_text(&e, &currency, locale)).await;
                     Ok(0)
                 }
             }
@@ -187,13 +254,23 @@ impl CommandExecutor for BankWithdrawExecutor {
         Box::pin(async move {
             let player = context.source.player_or_err()?;
             let server = context.server();
+            let locale = context.source.output.get_locale();
             let amount = IntegerArgumentType::get(context, ARG_AMOUNT)?;
             let currency = optional_currency(context, self.has_currency)?;
             let currency = resolve_currency(server, currency);
             let tier = resolve_tier(player.gameprofile.id, server).await;
 
             if amount <= 0 {
-                feedback(context, err_text("Amount must be positive.")).await;
+                feedback(
+                    context,
+                    err_text(TextComponent::custom(
+                        "ember",
+                        "commands.bank.amount_must_be_positive",
+                        locale,
+                        vec![],
+                    )),
+                )
+                .await;
                 return Ok(0);
             }
 
@@ -205,22 +282,28 @@ impl CommandExecutor for BankWithdrawExecutor {
                     i64::from(amount),
                     &tier,
                     &server.economy_manager,
+                    locale,
                 )
                 .await
             {
                 Ok(new_balance) => {
-                    feedback(
-                        context,
-                        TextComponent::text(format!(
-                            "Withdrew {amount} {currency}. New bank balance: {new_balance}."
-                        ))
-                        .color_named(NamedColor::Green),
-                    )
-                    .await;
+                    // Direct success confirmation - gets the branded ember
+                    // gradient (see `BankDepositExecutor` for why the
+                    // resolved string, not the lazy `Custom` component).
+                    let text = get_translation_text(
+                        "ember:commands.bank.withdrew",
+                        locale,
+                        vec![
+                            TextComponent::text(amount.to_string()).0,
+                            TextComponent::text(currency.clone()).0,
+                            TextComponent::text(new_balance.to_string()).0,
+                        ],
+                    );
+                    feedback(context, TextComponent::text_ember(text)).await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, shop_err_text(&e)).await;
+                    feedback(context, shop_err_text(&e, &currency, locale)).await;
                     Ok(0)
                 }
             }
@@ -236,6 +319,7 @@ impl CommandExecutor for BankLogExecutor {
         Box::pin(async move {
             let player = context.source.player_or_err()?;
             let server = context.server();
+            let locale = context.source.output.get_locale();
             let currency = optional_currency(context, self.has_currency)?;
             let currency = resolve_currency(server, currency);
 
@@ -245,26 +329,48 @@ impl CommandExecutor for BankLogExecutor {
                 .await
             {
                 Ok(transactions) if transactions.is_empty() => {
-                    feedback(context, TextComponent::text("No transactions yet.")).await;
+                    feedback(
+                        context,
+                        TextComponent::custom("ember", "commands.bank.log.empty", locale, vec![]),
+                    )
+                    .await;
                     Ok(0)
                 }
                 Ok(transactions) => {
-                    let mut lines = vec!["Recent bank transactions:".to_string()];
+                    // A transaction log listing - plain data rows, like
+                    // `/balance`'s currency list, so no ember gradient (and
+                    // no explicit color at all, matching the previous
+                    // behavior).
+                    let mut lines = vec![get_translation_text(
+                        "ember:commands.bank.log.header",
+                        locale,
+                        vec![],
+                    )];
                     for t in transactions {
-                        let label = if t.is_interest {
-                            "interest".to_string()
+                        let label_key = if t.is_interest {
+                            "ember:commands.bank.log.interest"
                         } else if t.amount >= 0 {
-                            "deposit".to_string()
+                            "ember:commands.bank.log.deposit"
                         } else {
-                            "withdraw".to_string()
+                            "ember:commands.bank.log.withdraw"
                         };
-                        lines.push(format!("  {label}: {:+} {currency}", t.amount));
+                        let label = get_translation_text(label_key, locale, vec![]);
+                        let line = get_translation_text(
+                            "ember:commands.bank.log.line",
+                            locale,
+                            vec![
+                                TextComponent::text(label).0,
+                                TextComponent::text(format!("{:+}", t.amount)).0,
+                                TextComponent::text(currency.clone()).0,
+                            ],
+                        );
+                        lines.push(format!("  {line}"));
                     }
                     feedback(context, TextComponent::text(lines.join("\n"))).await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, shop_err_text(&e)).await;
+                    feedback(context, shop_err_text(&e, &currency, locale)).await;
                     Ok(0)
                 }
             }

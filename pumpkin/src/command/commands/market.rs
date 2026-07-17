@@ -9,6 +9,7 @@ use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
 use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry};
 use pumpkin_util::text::{TextComponent, color::NamedColor};
+use pumpkin_util::translation::get_translation_text;
 
 use crate::command::argument_builder::{ArgumentBuilder, argument, command, literal};
 use crate::command::argument_types::core::integer::IntegerArgumentType;
@@ -32,12 +33,20 @@ async fn feedback(context: &CommandContext<'_>, msg: TextComponent) {
     context.source.send_feedback(msg, false).await;
 }
 
-fn err_text(msg: impl Into<String>) -> TextComponent {
-    TextComponent::text(msg.into()).color_named(NamedColor::Red)
+/// Wraps an already-built (and already localized) message in Ember's plain
+/// error color - errors stay clearly red/plain rather than picking up the
+/// ember gradient, for legibility.
+fn err_text(component: TextComponent) -> TextComponent {
+    component.color_named(NamedColor::Red)
 }
 
+/// `ShopError`'s `Display` text (see `server::shop::ShopError`) is plain,
+/// un-localized English baked in at construction time deep in the manager
+/// layer - out of this pass's scope since fixing it properly means
+/// restructuring that enum (in `server/shop/mod.rs`, not one of the files
+/// this pass covers) rather than just swapping a string literal.
 fn shop_err_text(e: &ShopError) -> TextComponent {
-    err_text(e.to_string())
+    err_text(TextComponent::text(e.to_string()))
 }
 
 fn optional_currency<'a>(
@@ -136,16 +145,35 @@ impl CommandExecutor for MarketSellExecutor {
             let price = IntegerArgumentType::get(context, ARG_PRICE)?;
             let currency = optional_currency(context, self.has_currency)?;
             let currency = resolve_currency(server, currency);
+            let locale = context.source.output.get_locale();
 
             if price < 0 {
-                feedback(context, err_text("Price can't be negative.")).await;
+                feedback(
+                    context,
+                    err_text(TextComponent::custom(
+                        "ember",
+                        "commands.market.negative_price",
+                        locale,
+                        vec![],
+                    )),
+                )
+                .await;
                 return Ok(0);
             }
 
             let held = player.inventory.held_item();
             let mut stack = held.lock().await.clone();
             if stack.is_empty() {
-                feedback(context, err_text("You aren't holding anything.")).await;
+                feedback(
+                    context,
+                    err_text(TextComponent::custom(
+                        "ember",
+                        "commands.market.empty_hand",
+                        locale,
+                        vec![],
+                    )),
+                )
+                .await;
                 return Ok(0);
             }
             let item_key = stack.item.registry_key.to_string();
@@ -181,14 +209,18 @@ impl CommandExecutor for MarketSellExecutor {
                 Ok(id) => {
                     stack.decrement(stack.item_count);
                     *held.lock().await = stack;
-                    feedback(
-                        context,
-                        TextComponent::text(format!(
-                            "Listed {amount}x {item_key} for {price} {currency} (listing #{id})."
-                        ))
-                        .color_named(NamedColor::Green),
-                    )
-                    .await;
+                    let text = get_translation_text(
+                        "ember:commands.market.sell_success",
+                        locale,
+                        vec![
+                            TextComponent::text(amount.to_string()).0,
+                            TextComponent::text(item_key).0,
+                            TextComponent::text(price.to_string()).0,
+                            TextComponent::text(currency).0,
+                            TextComponent::text(id.to_string()).0,
+                        ],
+                    );
+                    feedback(context, TextComponent::text_ember(text)).await;
                     Ok(1)
                 }
                 Err(e) => {
@@ -204,20 +236,44 @@ struct MarketListExecutor;
 impl CommandExecutor for MarketListExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             match context.server().market_manager.active_listings().await {
                 Ok(listings) if listings.is_empty() => {
-                    feedback(context, TextComponent::text("No active listings.")).await;
+                    feedback(
+                        context,
+                        TextComponent::custom(
+                            "ember",
+                            "commands.market.list_empty",
+                            locale,
+                            vec![],
+                        ),
+                    )
+                    .await;
                     Ok(0)
                 }
                 Ok(listings) => {
-                    let mut lines = vec!["Active listings:".to_string()];
+                    let mut message = TextComponent::custom(
+                        "ember",
+                        "commands.market.list_header",
+                        locale,
+                        vec![],
+                    );
                     for l in &listings {
-                        lines.push(format!(
-                            "  #{}: {}x {} - {} {} (seller: {})",
-                            l.id, l.amount, l.item, l.price, l.currency, l.seller_name
+                        message = message.new_line().add_child(TextComponent::custom(
+                            "ember",
+                            "commands.market.list_row",
+                            locale,
+                            vec![
+                                TextComponent::text(l.id.to_string()),
+                                TextComponent::text(l.amount.to_string()),
+                                TextComponent::text(l.item.clone()),
+                                TextComponent::text(l.price.to_string()),
+                                TextComponent::text(l.currency.clone()),
+                                TextComponent::text(l.seller_name.clone()),
+                            ],
                         ));
                     }
-                    feedback(context, TextComponent::text(lines.join("\n"))).await;
+                    feedback(context, message).await;
                     #[expect(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                     Ok(listings.len() as i32)
                 }
@@ -255,6 +311,7 @@ impl CommandExecutor for MarketBuyExecutor {
             let player = context.source.player_or_err()?;
             let server = context.server();
             let id = i64::from(IntegerArgumentType::get(context, ARG_ID)?);
+            let locale = context.source.output.get_locale();
 
             match server
                 .market_manager
@@ -263,12 +320,12 @@ impl CommandExecutor for MarketBuyExecutor {
             {
                 Ok((item_key, amount)) => {
                     give_item(player, &item_key, amount).await;
-                    feedback(
-                        context,
-                        TextComponent::text(format!("Bought listing #{id}."))
-                            .color_named(NamedColor::Green),
-                    )
-                    .await;
+                    let text = get_translation_text(
+                        "ember:commands.market.buy_success",
+                        locale,
+                        vec![TextComponent::text(id.to_string()).0],
+                    );
+                    feedback(context, TextComponent::text_ember(text)).await;
                     Ok(1)
                 }
                 Err(e) => {
@@ -287,6 +344,7 @@ impl CommandExecutor for MarketCancelExecutor {
             let player = context.source.player_or_err()?;
             let server = context.server();
             let id = i64::from(IntegerArgumentType::get(context, ARG_ID)?);
+            let locale = context.source.output.get_locale();
 
             match server
                 .market_manager
@@ -295,12 +353,12 @@ impl CommandExecutor for MarketCancelExecutor {
             {
                 Ok((item_key, amount)) => {
                     give_item(player, &item_key, amount).await;
-                    feedback(
-                        context,
-                        TextComponent::text(format!("Cancelled listing #{id}."))
-                            .color_named(NamedColor::Green),
-                    )
-                    .await;
+                    let text = get_translation_text(
+                        "ember:commands.market.cancel_success",
+                        locale,
+                        vec![TextComponent::text(id.to_string()).0],
+                    );
+                    feedback(context, TextComponent::text_ember(text)).await;
                     Ok(1)
                 }
                 Err(e) => {

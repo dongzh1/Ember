@@ -855,6 +855,39 @@ impl TextComponent {
         })
     }
 
+    // EMBER start - server-brand gradient ("余烬"/embers: dying-coal red ->
+    // hot-glow orange -> bright-ember gold), used consistently across
+    // Ember's own player-facing system messages instead of ad-hoc colors.
+    /// Applies Ember's signature "ember glow" gradient (dark red -> orange
+    /// -> gold) to the text.
+    ///
+    /// # Returns
+    /// The component with the Ember gradient applied.
+    #[must_use]
+    pub fn ember_gradient(self) -> Self {
+        const EMBER_COLORS: [color::RGBColor; 3] = [
+            color::RGBColor::new(139, 26, 13),
+            color::RGBColor::new(255, 111, 26),
+            color::RGBColor::new(255, 199, 84),
+        ];
+        self.gradient(&EMBER_COLORS)
+    }
+
+    /// Creates a new text component with Ember's signature "ember glow"
+    /// gradient (dark red -> orange -> gold) already applied - the
+    /// shorthand for [`Self::text`] followed by [`Self::ember_gradient`].
+    ///
+    /// # Arguments
+    /// - `plain` – The plain text content.
+    ///
+    /// # Returns
+    /// A gradient-colored `TextComponent`.
+    #[must_use]
+    pub fn text_ember<P: Into<Cow<'static, str>>>(plain: P) -> Self {
+        Self::text(plain).ember_gradient()
+    }
+    // EMBER end
+
     /// Applies a rainbow effect to the text.
     ///
     /// Each character gets a different hue, creating a smooth rainbow transition.

@@ -216,10 +216,13 @@ enabled = true
 url = "mysql://user:pass@localhost:3306/ember"
 ```
 
-New joiners drop into a holding world and are prompted to set a password (existing accounts are
-prompted to log in instead — Ember tells the two apart automatically). Password entry happens
-over chat, not a form field. A successful login from the same IP is remembered for 24h (configurable),
-so it isn't repeated every join. `/auth reset <player>` recovers a forgotten password. Java only.
+New joiners drop into a holding world and are prompted, through a dialog with real input fields,
+to set a password (existing accounts are prompted to log in instead — Ember tells the two apart
+automatically); registering fills in a password + confirm-password field, logging in just one.
+If the dialog gets closed, the protocol gives the server no way to detect it, so it's force-shown
+again on an interval until the player gets through — not reactive, just a safety net. A successful
+login from the same IP is remembered for 24h (configurable), so it isn't repeated every join.
+`/auth reset <player>` recovers a forgotten password. Java only.
 
 ### Player navigation
 
@@ -572,8 +575,10 @@ enabled = true
 url = "mysql://user:pass@localhost:3306/ember"
 ```
 
-新玩家进服会先落入一个隔离的虚空世界，提示设置密码（已有账户则提示登录，服务端自动判断
-两者，不用玩家自己选）。密码通过聊天框输入，不是表单填写。同一 IP 24 小时内验证过可跳过
+新玩家进服会先落入一个隔离的虚空世界，弹出带真实输入框的对话框提示设置密码（已有账户则
+提示登录，服务端自动判断两者，不用玩家自己选）：注册要填密码+确认密码两个输入框，登录
+只需一个密码框。玩家把对话框关掉的话协议本身就没法让服务端感知到，所以会隔一段时间强制
+重新弹出，直到验证通过为止——不是实时检测关闭，只是兜底。同一 IP 24 小时内验证过可跳过
 （时长可配置）。忘记密码用 `/auth reset <玩家>` 找管理员重置。仅支持 Java 版。
 
 ### 玩家导航指令

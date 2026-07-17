@@ -6,7 +6,7 @@ use wasmtime::component::Resource;
 use crate::plugin::api::gui::PluginScreenHandler;
 use crate::plugin::loader::wasm::wasm_host::wit::v0_1::pumpkin::plugin::forms::Form;
 use crate::plugin::loader::wasm::wasm_host::wit::v0_1::pumpkin::plugin::java_dialogs::{
-    Action, AfterAction, Dialog, DialogBody, DialogInput, LinkLabel, LinkType,
+    Action, AfterAction, Dialog, DialogBody, DialogInput, DialogType,
 };
 use crate::{
     entity::{EntityBase, player::TitleMode},
@@ -35,7 +35,7 @@ use pumpkin_protocol::Property;
 use pumpkin_protocol::bedrock::client::modal_form_request::CModalFormRequest;
 use pumpkin_protocol::java::client::dialog::{
     ActionButton as ProtocolActionButton, Dialog as ProtocolDialog, DialogAction,
-    DialogBody as ProtocolDialogBody, DialogInput as ProtocolDialogInput, DialogLink, DialogNBT,
+    DialogBody as ProtocolDialogBody, DialogInput as ProtocolDialogInput, DialogNBT,
 };
 use pumpkin_util::permission::PermissionLvl;
 use pumpkin_util::translation::Locale;
@@ -1696,11 +1696,30 @@ impl pumpkin::plugin::player::HostJavaPlayer for PluginHostState {
             })
             .collect();
 
-        let buttons: Vec<_> = dialog
+        // EMBER: `Dialog` used to be one flat struct with a generic
+        // `buttons`/`links` pair for every `type`, but the real protocol
+        // gives each `type` its own distinct required fields (see
+        // `pumpkin_protocol::java::client::dialog::Dialog`'s doc comment -
+        // a real client rejected the old shape). The WIT `dialog` record
+        // still only exposes a flat `buttons` list (a limitation inherited
+        // from the vendored upstream `java-dialogs.wit`, not something
+        // Ember can change without forking that file), so this maps it
+        // onto whichever shape the requested `type` needs; `links` has no
+        // equivalent in the real schema at all (a `minecraft:server_links`
+        // dialog's links come from the server's own configured
+        // `server_links`, not from per-dialog data) and is dropped.
+        // Untested against a real client for anything but `Notice` (no
+        // current plugin sends `Confirmation`/`MultiAction`/`DialogList`/
+        // `ServerLinks`).
+        // Collected eagerly into an owned `Vec` (rather than left as a lazy
+        // iterator) so the `self` borrow inside the closure doesn't get
+        // captured across this function's later `.await` points, which
+        // would make the whole future non-`Send`.
+        let mut buttons = dialog
             .buttons
             .iter()
             .map(|b| ProtocolActionButton {
-                text: text_component_from_resource(self, &b.text),
+                label: text_component_from_resource(self, &b.text),
                 tooltip: b
                     .tooltip
                     .as_ref()
@@ -1714,61 +1733,102 @@ impl pumpkin::plugin::player::HostJavaPlayer for PluginHostState {
                     },
                 },
             })
-            .collect();
+            .collect::<Vec<_>>()
+            .into_iter();
 
-        let links: Vec<_> = dialog
-            .links
-            .iter()
-            .map(|l| {
-                let label = match &l.label {
-                    LinkLabel::BuiltIn(t) => {
-                        let link_type = match t {
-                            LinkType::BugReport => pumpkin_protocol::LinkType::BugReport,
-                            LinkType::CommunityGuidelines => {
-                                pumpkin_protocol::LinkType::CommunityGuidelines
-                            }
-                            LinkType::Support => pumpkin_protocol::LinkType::Support,
-                            LinkType::Status => pumpkin_protocol::LinkType::Status,
-                            LinkType::Feedback => pumpkin_protocol::LinkType::Feedback,
-                            LinkType::Community => pumpkin_protocol::LinkType::Community,
-                            LinkType::Website => pumpkin_protocol::LinkType::Website,
-                            LinkType::Forums => pumpkin_protocol::LinkType::Forums,
-                            LinkType::News => pumpkin_protocol::LinkType::News,
-                            LinkType::Announcements => pumpkin_protocol::LinkType::Announcements,
-                        };
-                        pumpkin_protocol::Label::BuiltIn(link_type)
-                    }
-                    LinkLabel::Custom(c) => pumpkin_protocol::Label::TextComponent(Box::new(
-                        text_component_from_resource(self, c),
-                    )),
-                };
-                DialogLink {
-                    label,
-                    url: l.url.clone(),
-                }
-            })
-            .collect();
+        let after_action = dialog.after_action.map(|a| match a {
+            AfterAction::Peek => "peek".to_string(),
+            AfterAction::Pop => "pop".to_string(),
+        });
+        let can_close_with_escape = dialog.can_close_with_escape;
+        let external_title = dialog
+            .external_title
+            .as_ref()
+            .map(|t| text_component_from_resource(self, t));
 
-        let protocol_dialog = ProtocolDialog {
-            r#type: match dialog.type_ {
-                crate::plugin::loader::wasm::wasm_host::wit::v0_1::pumpkin::plugin::java_dialogs::DialogType::Notice => "minecraft:notice".to_string(),
-                crate::plugin::loader::wasm::wasm_host::wit::v0_1::pumpkin::plugin::java_dialogs::DialogType::Confirmation => "minecraft:confirmation".to_string(),
-                crate::plugin::loader::wasm::wasm_host::wit::v0_1::pumpkin::plugin::java_dialogs::DialogType::MultiAction => "minecraft:multi_action".to_string(),
-                crate::plugin::loader::wasm::wasm_host::wit::v0_1::pumpkin::plugin::java_dialogs::DialogType::DialogList => "minecraft:dialog_list".to_string(),
-                crate::plugin::loader::wasm::wasm_host::wit::v0_1::pumpkin::plugin::java_dialogs::DialogType::ServerLinks => "minecraft:server_links".to_string(),
+        let fallback_button = |label: &str, id: &str| ProtocolActionButton {
+            label: pumpkin_util::text::TextComponent::text(label.to_string()),
+            tooltip: None,
+            width: None,
+            action: DialogAction::Custom {
+                id: id.to_string(),
+                payload: None,
             },
-            title,
-            body,
-            inputs,
-            buttons,
-            links,
-            exit_action: None, // TODO
-            after_action: dialog.after_action.map(|a| match a {
-                AfterAction::Peek => "peek".to_string(),
-                AfterAction::Pop => "pop".to_string(),
-            }),
-            can_close_with_escape: dialog.can_close_with_escape,
-            external_title: dialog.external_title.as_ref().map(|t| text_component_from_resource(self, t)),
+        };
+
+        let protocol_dialog = match dialog.type_ {
+            DialogType::Notice => ProtocolDialog::Notice {
+                title,
+                external_title,
+                body,
+                inputs,
+                can_close_with_escape,
+                pause: true,
+                after_action,
+                action: buttons.next(),
+            },
+            DialogType::Confirmation => {
+                // The WIT interface has no way for a plugin to mark which
+                // button means "yes" vs "no" - first supplied button wins
+                // "yes", second wins "no"; a placeholder is synthesized for
+                // whichever is missing so the packet stays well-formed.
+                let yes = buttons
+                    .next()
+                    .unwrap_or_else(|| fallback_button("OK", "ember:dialog_confirm"));
+                let no = buttons
+                    .next()
+                    .unwrap_or_else(|| fallback_button("Cancel", "ember:dialog_cancel"));
+                ProtocolDialog::Confirmation {
+                    title,
+                    external_title,
+                    body,
+                    inputs,
+                    can_close_with_escape,
+                    pause: true,
+                    after_action,
+                    yes,
+                    no,
+                }
+            }
+            DialogType::MultiAction => ProtocolDialog::MultiAction {
+                title,
+                external_title,
+                body,
+                inputs,
+                can_close_with_escape,
+                pause: true,
+                after_action,
+                actions: buttons.collect(),
+                columns: None,
+                exit_action: None,
+            },
+            DialogType::DialogList => ProtocolDialog::DialogList {
+                title,
+                external_title,
+                body,
+                inputs,
+                can_close_with_escape,
+                pause: true,
+                after_action,
+                // The WIT record has no field to name other dialogs to
+                // list at all yet.
+                dialogs: vec![],
+                exit_action: None,
+                columns: None,
+                button_width: None,
+            },
+            DialogType::ServerLinks => ProtocolDialog::ServerLinks {
+                title,
+                external_title,
+                body,
+                inputs,
+                can_close_with_escape,
+                pause: true,
+                after_action,
+                exit_action: None,
+                columns: None,
+                button_width: None,
+            },
         };
 
         if let crate::net::ClientPlatform::Java(client) = player.client.as_ref() {

@@ -6,6 +6,7 @@
 use pumpkin_util::PermissionLvl;
 use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry};
 use pumpkin_util::text::{TextComponent, color::NamedColor};
+use pumpkin_util::translation::get_translation_text;
 
 use crate::command::argument_builder::{ArgumentBuilder, command, literal};
 use crate::command::context::command_context::CommandContext;
@@ -15,10 +16,6 @@ use crate::command::node::{CommandExecutor, CommandExecutorResult};
 const DESCRIPTION: &str = "Toggle or reload the boss-bar HUD.";
 const PERMISSION_TOGGLE: &str = "ember:command.hud.toggle";
 const PERMISSION_RELOAD: &str = "ember:command.hud.reload";
-
-fn ok_text(msg: impl Into<String>) -> TextComponent {
-    TextComponent::text(msg.into()).color_named(NamedColor::Green)
-}
 
 struct HudToggleExecutor;
 impl CommandExecutor for HudToggleExecutor {
@@ -44,15 +41,33 @@ impl CommandExecutor for HudToggleExecutor {
                 .set_enabled(&player_arc, now_enabled)
                 .await;
 
+            let locale = context.source.output.get_locale();
+            // The server-wide-disabled caveat is an informational aside, not
+            // a celebratory confirmation, so it keeps a plain color (as
+            // before) instead of picking up the ember gradient. The
+            // enabled/disabled confirmations, in contrast, are direct
+            // success feedback for the command the player just ran, so they
+            // get the branded gradient treatment - applied to the already
+            // *resolved* string (not the lazy `Custom` component) since
+            // `ember_gradient` flattens its input via `get_text(Locale::EnUs)`
+            // internally, which would silently discard localization.
             let message = if !took_effect {
-                "HUD preference saved, but the HUD feature is currently disabled server-wide \
-                 (hud.toml's `enabled` is false) - it'll show once an admin turns that on."
+                TextComponent::custom("ember", "commands.hud.master_switch_off", locale, vec![])
+                    .color_named(NamedColor::Green)
             } else if now_enabled {
-                "HUD enabled."
+                TextComponent::text_ember(get_translation_text(
+                    "ember:commands.hud.enabled",
+                    locale,
+                    vec![],
+                ))
             } else {
-                "HUD disabled."
+                TextComponent::text_ember(get_translation_text(
+                    "ember:commands.hud.disabled",
+                    locale,
+                    vec![],
+                ))
             };
-            context.source.send_feedback(ok_text(message), false).await;
+            context.source.send_feedback(message, false).await;
             Ok(1)
         })
     }
@@ -63,10 +78,13 @@ impl CommandExecutor for HudReloadExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
             context.server().hud_manager.reload().await;
-            context
-                .source
-                .send_feedback(ok_text("HUD config reloaded."), false)
-                .await;
+            let locale = context.source.output.get_locale();
+            let message = TextComponent::text_ember(get_translation_text(
+                "ember:commands.hud.reloaded",
+                locale,
+                vec![],
+            ));
+            context.source.send_feedback(message, false).await;
             Ok(1)
         })
     }

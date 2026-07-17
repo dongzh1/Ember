@@ -35,6 +35,8 @@ use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry
 use pumpkin_util::text::click::ClickEvent;
 use pumpkin_util::text::hover::HoverEvent;
 use pumpkin_util::text::{TextComponent, color::NamedColor};
+use pumpkin_util::translation::{Locale, get_translation_text};
+use std::borrow::Cow;
 
 use crate::command::argument_builder::{ArgumentBuilder, argument, command, literal};
 use crate::command::argument_types::core::integer::IntegerArgumentType;
@@ -48,7 +50,7 @@ use crate::command::suggestion::provider::{SuggestionProvider, SuggestionProvide
 use crate::command::suggestion::suggestions::SuggestionsBuilder;
 use crate::data::npc::NpcEntry;
 use crate::entity::EntityBase;
-use crate::server::npc::{resolve_entity_type, supports_skin};
+use crate::server::npc::{NpcError, resolve_entity_type, supports_skin};
 
 const DESCRIPTION: &str = "Manage packet-only NPCs: create, remove, list, move, re-skin.";
 const PERMISSION: &str = "ember:command.npc";
@@ -67,13 +69,81 @@ async fn feedback(context: &CommandContext<'_>, msg: TextComponent) {
     context.source.send_feedback(msg, false).await;
 }
 
-fn err_text(msg: impl Into<String>) -> TextComponent {
-    TextComponent::text(msg.into()).color_named(NamedColor::Red)
+// EMBER start - localized, ember-branded feedback text
+/// Resolves an Ember-namespaced translation key (`ember:commands.npc.<key>`)
+/// to plain text for `locale`, substituting `args` in order.
+///
+/// This is the building block for every label/hover/button caption in this
+/// file, and for the handful of top-level messages that need Ember's
+/// gradient (see [`ok_text`]): [`TextComponent::ember_gradient`] renders its
+/// input through `Locale::EnUs` internally to bake per-character colors,
+/// which would silently discard a `TextComponent::custom`'s real localized
+/// text, so gradiented messages must already be a resolved plain string
+/// *before* the gradient is applied, not a lazy translation component.
+fn tr_text(key: &str, locale: Locale, args: Vec<TextComponent>) -> String {
+    get_translation_text(
+        format!("ember:{key}"),
+        locale,
+        args.into_iter().map(|c| c.0).collect(),
+    )
 }
 
-fn ok_text(msg: impl Into<String>) -> TextComponent {
-    TextComponent::text(msg.into()).color_named(NamedColor::Green)
+/// Builds a still-translatable `TextComponent` for an Ember-namespaced key -
+/// for messages that don't need the gradient treatment (see [`tr_text`]),
+/// matching the `TextComponent::custom` pattern `commands/pumpkin.rs` uses.
+fn tr(key: &'static str, locale: Locale, args: Vec<TextComponent>) -> TextComponent {
+    TextComponent::custom("ember", key, locale, args)
 }
+
+/// Colors an already-built message red for error feedback. Deliberately left
+/// un-gradiented - error text stays unambiguous rather than competing with
+/// the brand gradient.
+fn err_text(msg: TextComponent) -> TextComponent {
+    msg.color_named(NamedColor::Red)
+}
+
+/// Applies Ember's signature "ember glow" gradient to an already-localized
+/// success message. Takes a plain string (see [`tr_text`]) rather than a
+/// `TextComponent` for the reason documented there - every call site here is
+/// a one-shot top-level command confirmation, exactly the "success
+/// confirmation" gradient candidate the styling guidance calls for.
+fn ok_text(msg: impl Into<Cow<'static, str>>) -> TextComponent {
+    TextComponent::text_ember(msg)
+}
+
+/// The translation key for a boolean toggle's current state word
+/// (`commands.npc.state_on`/`state_off`) - shared by the info panel's
+/// [`toggle_line`] and by every toggle command's own confirmation message,
+/// so the on/off wording can't drift between the two.
+const fn state_key(enabled: bool) -> &'static str {
+    if enabled {
+        "commands.npc.state_on"
+    } else {
+        "commands.npc.state_off"
+    }
+}
+
+/// Maps a domain [`NpcError`] to a localized, red feedback message.
+fn npc_error_text(err: NpcError, locale: Locale) -> TextComponent {
+    match err {
+        NpcError::NotFound(name) => err_text(tr(
+            "commands.npc.not_found",
+            locale,
+            vec![TextComponent::text(name)],
+        )),
+        NpcError::AlreadyExists(name) => err_text(tr(
+            "commands.npc.already_exists",
+            locale,
+            vec![TextComponent::text(name)],
+        )),
+        NpcError::UnsupportedSkin { name, entity_type } => err_text(tr(
+            "commands.npc.unsupported_skin",
+            locale,
+            vec![TextComponent::text(name), TextComponent::text(entity_type)],
+        )),
+    }
+}
+// EMBER end
 
 // EMBER start - NPC info (clickable property viewer/editor)
 /// A clickable `[label]` button that runs `command` immediately on click -
@@ -116,27 +186,44 @@ fn info_line(label: &str, value: impl Into<String>) -> TextComponent {
 
 /// A `label: 开/关 [switch]` line for a per-NPC boolean toggle, where
 /// `subcommand` is the `/npc <subcommand> <name> on|off` command that flips
-/// it (`lookat`/`sneak`/`gravity` today).
-fn toggle_line(label: &str, npc_name: &str, subcommand: &str, enabled: bool) -> TextComponent {
-    let (state_text, state_color) = if enabled {
-        ("开", NamedColor::Green)
+/// it (`lookat`/`sneak`/`gravity` today). `label` is already resolved to
+/// `locale`'s text by the caller (see `build_info_message`).
+fn toggle_line(
+    label: &str,
+    npc_name: &str,
+    subcommand: &str,
+    enabled: bool,
+    locale: Locale,
+) -> TextComponent {
+    let state_color = if enabled {
+        NamedColor::Green
     } else {
-        ("关", NamedColor::Red)
+        NamedColor::Red
     };
-    let (next_label, next_state) = if enabled {
-        ("关闭", "off")
+    let (next_key, next_state) = if enabled {
+        ("commands.npc.toggle_disable", "off")
     } else {
-        ("开启", "on")
+        ("commands.npc.toggle_enable", "on")
     };
+    let state_text = tr_text(state_key(enabled), locale, vec![]);
+    let next_label = tr_text(next_key, locale, vec![]);
+    let hover = tr_text(
+        "commands.npc.toggle_hover",
+        locale,
+        vec![
+            TextComponent::text(next_label.clone()),
+            TextComponent::text(label.to_string()),
+        ],
+    );
     TextComponent::text(format!("{label}: "))
         .color_named(NamedColor::Gray)
         .add_child(TextComponent::text(state_text).color_named(state_color))
         .add_child(TextComponent::text(" "))
         .add_child(run_button(
-            next_label,
+            &next_label,
             NamedColor::Yellow,
             format!("/npc {subcommand} {npc_name} {next_state}"),
-            &format!("点击{next_label} {label}"),
+            &hover,
         ))
         .add_child(TextComponent::text("\n"))
 }
@@ -145,14 +232,17 @@ fn toggle_line(label: &str, npc_name: &str, subcommand: &str, enabled: bool) -> 
 /// An NPC's name doubles as its fake tab-list username (see
 /// `server::npc::NpcManager::send_spawn`), so it's held to the same charset
 /// Minecraft enforces for real usernames.
-fn validate_npc_name(name: &str) -> Result<(), String> {
+/// Returns a translation key (not a pre-formatted message - see [`tr`]) so
+/// the two validation failures stay localized like every other message in
+/// this file, instead of the hardcoded-English gap a review caught here.
+fn validate_npc_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() || name.len() > 16 {
-        return Err("NPC names must be 1-16 characters.".to_string());
+        return Err("commands.npc.name_invalid_length");
     }
     if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         Ok(())
     } else {
-        Err("NPC names may only contain letters, digits and underscores.".to_string())
+        Err("commands.npc.name_invalid_chars")
     }
 }
 
@@ -162,10 +252,15 @@ struct NpcCreateExecutor {
 impl CommandExecutor for NpcCreateExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let sender = context.source.player_or_err()?;
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
-            if let Err(e) = validate_npc_name(&name) {
-                feedback(context, err_text(e)).await;
+            if let Err(key) = validate_npc_name(&name) {
+                feedback(
+                    context,
+                    err_text(TextComponent::text(tr_text(key, locale, vec![]))),
+                )
+                .await;
                 return Ok(0);
             }
 
@@ -194,7 +289,7 @@ impl CommandExecutor for NpcCreateExecutor {
 
             let server = context.server();
             if let Err(e) = server.npc_manager.create(entry).await {
-                feedback(context, err_text(e)).await;
+                feedback(context, npc_error_text(e, locale)).await;
                 return Ok(0);
             }
 
@@ -208,11 +303,19 @@ impl CommandExecutor for NpcCreateExecutor {
                 server.npc_manager.set_skin(server, &name, sender).await
             };
             if let Err(e) = skin_result {
-                feedback(context, err_text(e)).await;
+                feedback(context, npc_error_text(e, locale)).await;
                 return Ok(0);
             }
 
-            feedback(context, ok_text(format!("NPC '{name}' created."))).await;
+            feedback(
+                context,
+                ok_text(tr_text(
+                    "commands.npc.created",
+                    locale,
+                    vec![TextComponent::text(name)],
+                )),
+            )
+            .await;
             Ok(1)
         })
     }
@@ -226,12 +329,18 @@ struct NpcCreateAsExecutor {
     has_extra: bool,
 }
 impl CommandExecutor for NpcCreateAsExecutor {
+    #[expect(clippy::too_many_lines)]
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let sender = context.source.player_or_err()?;
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
-            if let Err(e) = validate_npc_name(&name) {
-                feedback(context, err_text(e)).await;
+            if let Err(key) = validate_npc_name(&name) {
+                feedback(
+                    context,
+                    err_text(TextComponent::text(tr_text(key, locale, vec![]))),
+                )
+                .await;
                 return Ok(0);
             }
 
@@ -239,7 +348,11 @@ impl CommandExecutor for NpcCreateAsExecutor {
             let Some(entity_type) = EntityType::from_name(&type_name.to_lowercase()) else {
                 feedback(
                     context,
-                    err_text(format!("Unknown entity type '{type_name}'.")),
+                    err_text(tr(
+                        "commands.npc.unknown_entity_type",
+                        locale,
+                        vec![TextComponent::text(type_name)],
+                    )),
                 )
                 .await;
                 return Ok(0);
@@ -255,7 +368,11 @@ impl CommandExecutor for NpcCreateAsExecutor {
                     let Some(source) = context.server().get_player_by_name(&extra) else {
                         feedback(
                             context,
-                            err_text(format!("Player '{extra}' is not online.")),
+                            err_text(tr(
+                                "commands.npc.player_not_online",
+                                locale,
+                                vec![TextComponent::text(extra)],
+                            )),
                         )
                         .await;
                         return Ok(0);
@@ -269,21 +386,39 @@ impl CommandExecutor for NpcCreateAsExecutor {
                         .cloned();
                 } else if entity_type == &EntityType::FALLING_BLOCK {
                     if Block::from_name(&extra.to_lowercase()).is_none() {
-                        feedback(context, err_text(format!("Unknown block '{extra}'."))).await;
+                        feedback(
+                            context,
+                            err_text(tr(
+                                "commands.npc.unknown_block",
+                                locale,
+                                vec![TextComponent::text(extra)],
+                            )),
+                        )
+                        .await;
                         return Ok(0);
                     }
                     block = Some(extra);
                 } else if entity_type == &EntityType::ITEM {
                     if Item::from_registry_key(&extra.to_lowercase()).is_none() {
-                        feedback(context, err_text(format!("Unknown item '{extra}'."))).await;
+                        feedback(
+                            context,
+                            err_text(tr(
+                                "commands.npc.unknown_item",
+                                locale,
+                                vec![TextComponent::text(extra)],
+                            )),
+                        )
+                        .await;
                         return Ok(0);
                     }
                     item = Some(extra);
                 } else {
                     feedback(
                         context,
-                        err_text(format!(
-                            "Entity type '{type_name}' doesn't take an extra argument."
+                        err_text(tr(
+                            "commands.npc.entity_type_no_extra",
+                            locale,
+                            vec![TextComponent::text(type_name)],
                         )),
                     )
                     .await;
@@ -315,15 +450,19 @@ impl CommandExecutor for NpcCreateAsExecutor {
             };
 
             if let Err(e) = context.server().npc_manager.create(entry).await {
-                feedback(context, err_text(e)).await;
+                feedback(context, npc_error_text(e, locale)).await;
                 return Ok(0);
             }
 
             feedback(
                 context,
-                ok_text(format!(
-                    "NPC '{name}' created as '{}'.",
-                    entity_type.resource_name
+                ok_text(tr_text(
+                    "commands.npc.created_as",
+                    locale,
+                    vec![
+                        TextComponent::text(name),
+                        TextComponent::text(entity_type.resource_name),
+                    ],
                 )),
             )
             .await;
@@ -336,15 +475,24 @@ struct NpcRemoveExecutor;
 impl CommandExecutor for NpcRemoveExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let server = context.server();
             match server.npc_manager.remove(server, &name).await {
                 Ok(()) => {
-                    feedback(context, ok_text(format!("NPC '{name}' removed."))).await;
+                    feedback(
+                        context,
+                        ok_text(tr_text(
+                            "commands.npc.removed",
+                            locale,
+                            vec![TextComponent::text(name)],
+                        )),
+                    )
+                    .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -356,13 +504,27 @@ struct NpcListExecutor;
 impl CommandExecutor for NpcListExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let npcs = context.server().npc_manager.list().await;
             if npcs.is_empty() {
-                feedback(context, TextComponent::text("No NPCs exist.")).await;
+                feedback(
+                    context,
+                    TextComponent::text(tr_text("commands.npc.list_empty", locale, vec![])),
+                )
+                .await;
                 return Ok(0);
             }
-            let mut message = TextComponent::text(format!("NPCs ({}):\n", npcs.len()))
-                .color_named(NamedColor::Gray);
+            let header = tr_text(
+                "commands.npc.list_header",
+                locale,
+                vec![TextComponent::text(npcs.len().to_string())],
+            );
+            let mut message = TextComponent::text_ember(header);
+            // Neither string depends on `npc`, so both are resolved once
+            // here rather than re-querying the translation table on every
+            // iteration (a review caught the per-row version of this).
+            let details_button = tr_text("commands.npc.details_button", locale, vec![]);
+            let details_hover = tr_text("commands.npc.details_hover", locale, vec![]);
             for npc in &npcs {
                 message = message
                     .add_child(
@@ -373,10 +535,10 @@ impl CommandExecutor for NpcListExecutor {
                         .color_named(NamedColor::White),
                     )
                     .add_child(run_button(
-                        "详情",
+                        &details_button,
                         NamedColor::Aqua,
                         format!("/npc info {}", npc.name),
-                        "查看/修改这个NPC的属性",
+                        &details_hover,
                     ))
                     .add_child(TextComponent::text("\n"));
             }
@@ -388,170 +550,237 @@ impl CommandExecutor for NpcListExecutor {
 }
 
 // EMBER start - NPC info (clickable property viewer/editor)
-fn info_header_and_position(entry: &NpcEntry) -> TextComponent {
+/// Builds the panel's own title/header line - a gradient candidate (unlike
+/// the plain property rows below it), since it's the "branded" part of the
+/// panel rather than a data row.
+fn info_header_and_position(entry: &NpcEntry, locale: Locale) -> TextComponent {
     let name = entry.name.as_str();
-    TextComponent::text(format!("=== NPC '{name}' ===\n"))
-        .color_named(NamedColor::Gold)
-        .add_child(info_line("类型", entry.entity_type.clone()))
+    let header = tr_text(
+        "commands.npc.info_header",
+        locale,
+        vec![TextComponent::text(name.to_string())],
+    );
+    TextComponent::text_ember(header)
+        .add_child(info_line(
+            &tr_text("commands.npc.type_label", locale, vec![]),
+            entry.entity_type.clone(),
+        ))
         .add_child(
-            TextComponent::text("位置: ")
-                .color_named(NamedColor::Gray)
-                .add_child(
-                    TextComponent::text(format!(
-                        "{} ({:.1}, {:.1}, {:.1}) yaw={:.0} ",
-                        entry.world, entry.x, entry.y, entry.z, entry.yaw
-                    ))
-                    .color_named(NamedColor::White),
-                )
-                .add_child(suggest_button(
-                    "移到我的位置",
-                    format!("/npc move {name}"),
-                    "先站到目标位置,再点击执行",
+            TextComponent::text(format!(
+                "{}: ",
+                tr_text("commands.npc.position_label", locale, vec![])
+            ))
+            .color_named(NamedColor::Gray)
+            .add_child(
+                TextComponent::text(format!(
+                    "{} ({:.1}, {:.1}, {:.1}) yaw={:.0} ",
+                    entry.world, entry.x, entry.y, entry.z, entry.yaw
                 ))
-                .add_child(TextComponent::text("\n")),
+                .color_named(NamedColor::White),
+            )
+            .add_child(suggest_button(
+                &tr_text("commands.npc.move_here_button", locale, vec![]),
+                format!("/npc move {name}"),
+                &tr_text("commands.npc.move_here_hover", locale, vec![]),
+            ))
+            .add_child(TextComponent::text("\n")),
         )
 }
 
-fn info_skin_line(entry: &NpcEntry) -> Option<TextComponent> {
+fn info_skin_line(entry: &NpcEntry, locale: Locale) -> Option<TextComponent> {
     if !supports_skin(resolve_entity_type(entry)) {
         return None;
     }
     let name = entry.name.as_str();
-    let skin_desc = entry
-        .skin
-        .as_ref()
-        .map_or_else(|| "默认".to_string(), |_| "已自定义".to_string());
+    let skin_desc_key = if entry.skin.is_some() {
+        "commands.npc.skin_custom"
+    } else {
+        "commands.npc.skin_default"
+    };
+    let skin_desc = tr_text(skin_desc_key, locale, vec![]);
     Some(
-        TextComponent::text("皮肤: ")
-            .color_named(NamedColor::Gray)
-            .add_child(TextComponent::text(skin_desc).color_named(NamedColor::White))
-            .add_child(TextComponent::text(" "))
-            .add_child(suggest_button(
-                "改",
-                format!("/npc skin {name} "),
-                "输入一个在线玩家名,复制其皮肤",
-            ))
-            .add_child(TextComponent::text("\n")),
+        TextComponent::text(format!(
+            "{}: ",
+            tr_text("commands.npc.skin_label", locale, vec![])
+        ))
+        .color_named(NamedColor::Gray)
+        .add_child(TextComponent::text(skin_desc).color_named(NamedColor::White))
+        .add_child(TextComponent::text(" "))
+        .add_child(suggest_button(
+            &tr_text("commands.npc.change_button", locale, vec![]),
+            format!("/npc skin {name} "),
+            &tr_text("commands.npc.skin_change_hover", locale, vec![]),
+        ))
+        .add_child(TextComponent::text("\n")),
     )
 }
 
-fn info_action_line(entry: &NpcEntry) -> TextComponent {
+fn info_action_line(entry: &NpcEntry, locale: Locale) -> TextComponent {
     let name = entry.name.as_str();
     let action_desc = entry
         .click_command
         .clone()
-        .unwrap_or_else(|| "无(纯装饰)".to_string());
-    TextComponent::text("点击指令: ")
-        .color_named(NamedColor::Gray)
-        .add_child(TextComponent::text(action_desc).color_named(NamedColor::White))
-        .add_child(TextComponent::text(" "))
-        .add_child(suggest_button(
-            "改",
-            format!("/npc setaction {name} "),
-            "输入玩家点击这个NPC时执行的控制台命令,%player%会替换成点击者",
-        ))
-        .add_child(run_button(
-            "清除",
-            NamedColor::Red,
-            format!("/npc clearaction {name}"),
-            "清除点击指令,NPC变回纯装饰",
-        ))
-        .add_child(TextComponent::text("\n"))
+        .unwrap_or_else(|| tr_text("commands.npc.action_none", locale, vec![]));
+    // EMBER: the hover text below quotes the NPC system's own `%player%`
+    // click-command placeholder literally (see `net::java::play`'s
+    // `command.replace("%player%", ...)`), so it's resolved with zero
+    // substitution args - `get_translation_text`/`tr_text` skip
+    // placeholder-scanning entirely when `args` is empty, which is exactly
+    // what keeps that literal `%` safe here (see `tr_text`'s doc comment).
+    TextComponent::text(format!(
+        "{}: ",
+        tr_text("commands.npc.action_label", locale, vec![])
+    ))
+    .color_named(NamedColor::Gray)
+    .add_child(TextComponent::text(action_desc).color_named(NamedColor::White))
+    .add_child(TextComponent::text(" "))
+    .add_child(suggest_button(
+        &tr_text("commands.npc.change_button", locale, vec![]),
+        format!("/npc setaction {name} "),
+        &tr_text("commands.npc.action_change_hover", locale, vec![]),
+    ))
+    .add_child(run_button(
+        &tr_text("commands.npc.clear_button", locale, vec![]),
+        NamedColor::Red,
+        format!("/npc clearaction {name}"),
+        &tr_text("commands.npc.clear_hover", locale, vec![]),
+    ))
+    .add_child(TextComponent::text("\n"))
 }
 
-fn info_wander_line(entry: &NpcEntry) -> TextComponent {
+fn info_wander_line(entry: &NpcEntry, locale: Locale) -> TextComponent {
     let name = entry.name.as_str();
-    let wander_desc = entry
-        .wander_radius
-        .map_or_else(|| "未启用".to_string(), |r| format!("{r:.0} 格"));
-    TextComponent::text("漫游半径: ")
-        .color_named(NamedColor::Gray)
-        .add_child(TextComponent::text(wander_desc).color_named(NamedColor::White))
-        .add_child(TextComponent::text(" "))
-        .add_child(suggest_button(
-            "改",
-            format!("/npc wander {name} on "),
-            "输入漫游半径(格数)",
-        ))
-        .add_child(run_button(
-            "关闭",
-            NamedColor::Yellow,
-            format!("/npc wander {name} off"),
-            "停止漫游,原地停下",
-        ))
-        .add_child(TextComponent::text("\n"))
+    let wander_desc = entry.wander_radius.map_or_else(
+        || tr_text("commands.npc.wander_disabled_desc", locale, vec![]),
+        |r| {
+            tr_text(
+                "commands.npc.blocks_suffix",
+                locale,
+                vec![TextComponent::text(format!("{r:.0}"))],
+            )
+        },
+    );
+    TextComponent::text(format!(
+        "{}: ",
+        tr_text("commands.npc.wander_label", locale, vec![])
+    ))
+    .color_named(NamedColor::Gray)
+    .add_child(TextComponent::text(wander_desc).color_named(NamedColor::White))
+    .add_child(TextComponent::text(" "))
+    .add_child(suggest_button(
+        &tr_text("commands.npc.change_button", locale, vec![]),
+        format!("/npc wander {name} on "),
+        &tr_text("commands.npc.wander_change_hover", locale, vec![]),
+    ))
+    .add_child(run_button(
+        &tr_text("commands.npc.toggle_disable", locale, vec![]),
+        NamedColor::Yellow,
+        format!("/npc wander {name} off"),
+        &tr_text("commands.npc.wander_off_hover", locale, vec![]),
+    ))
+    .add_child(TextComponent::text("\n"))
 }
 
-fn info_distance_line(entry: &NpcEntry) -> TextComponent {
+fn info_distance_line(entry: &NpcEntry, locale: Locale) -> TextComponent {
     let name = entry.name.as_str();
     let distance_desc = entry.visible_distance.map_or_else(
-        || "默认(跟随观察者客户端视距)".to_string(),
-        |d| format!("{d:.0} 格"),
+        || tr_text("commands.npc.distance_default_desc", locale, vec![]),
+        |d| {
+            tr_text(
+                "commands.npc.blocks_suffix",
+                locale,
+                vec![TextComponent::text(format!("{d:.0}"))],
+            )
+        },
     );
-    TextComponent::text("可见距离: ")
-        .color_named(NamedColor::Gray)
-        .add_child(TextComponent::text(distance_desc).color_named(NamedColor::White))
-        .add_child(TextComponent::text(" "))
-        .add_child(suggest_button(
-            "改",
-            format!("/npc distance {name} "),
-            "输入可见距离(格数)",
-        ))
-        .add_child(TextComponent::text("\n"))
+    TextComponent::text(format!(
+        "{}: ",
+        tr_text("commands.npc.distance_label", locale, vec![])
+    ))
+    .color_named(NamedColor::Gray)
+    .add_child(TextComponent::text(distance_desc).color_named(NamedColor::White))
+    .add_child(TextComponent::text(" "))
+    .add_child(suggest_button(
+        &tr_text("commands.npc.change_button", locale, vec![]),
+        format!("/npc distance {name} "),
+        &tr_text("commands.npc.distance_change_hover", locale, vec![]),
+    ))
+    .add_child(TextComponent::text("\n"))
 }
 
-fn info_footer_line(entry: &NpcEntry) -> TextComponent {
+fn info_footer_line(entry: &NpcEntry, locale: Locale) -> TextComponent {
     let name = entry.name.as_str();
-    TextComponent::text("其他: ")
-        .color_named(NamedColor::Gray)
-        .add_child(run_button(
-            "挥手",
-            NamedColor::Yellow,
-            format!("/npc swing {name}"),
-            "播放一次挥手动画",
-        ))
-        .add_child(TextComponent::text(" "))
-        .add_child(suggest_button(
-            "移除NPC",
-            format!("/npc remove {name}"),
-            "彻底删除这个NPC,不可撤销 - 点击后请再确认一次按回车",
-        ))
+    TextComponent::text(format!(
+        "{}: ",
+        tr_text("commands.npc.other_label", locale, vec![])
+    ))
+    .color_named(NamedColor::Gray)
+    .add_child(run_button(
+        &tr_text("commands.npc.swing_button", locale, vec![]),
+        NamedColor::Yellow,
+        format!("/npc swing {name}"),
+        &tr_text("commands.npc.swing_hover", locale, vec![]),
+    ))
+    .add_child(TextComponent::text(" "))
+    .add_child(suggest_button(
+        &tr_text("commands.npc.remove_button", locale, vec![]),
+        format!("/npc remove {name}"),
+        &tr_text("commands.npc.remove_hover", locale, vec![]),
+    ))
 }
 
 /// Builds the full `/npc info` message. Split out from the executor itself
 /// purely to keep it under clippy's line-count lint - same reasoning
 /// `server::npc::NpcManager::send_spawn`/`send_spawn_metadata` already
 /// split on.
-fn build_info_message(entry: &NpcEntry) -> TextComponent {
-    let mut message = info_header_and_position(entry);
-    if let Some(skin_line) = info_skin_line(entry) {
+fn build_info_message(entry: &NpcEntry, locale: Locale) -> TextComponent {
+    let mut message = info_header_and_position(entry, locale);
+    if let Some(skin_line) = info_skin_line(entry, locale) {
         message = message.add_child(skin_line);
     }
     message = message
         .add_child(toggle_line(
-            "看向玩家",
+            &tr_text("commands.npc.lookat_row_label", locale, vec![]),
             &entry.name,
             "lookat",
             entry.look_at_nearest_player,
+            locale,
         ))
-        .add_child(toggle_line("潜行", &entry.name, "sneak", entry.sneaking))
-        .add_child(toggle_line("重力", &entry.name, "gravity", entry.gravity))
-        .add_child(info_action_line(entry))
-        .add_child(info_wander_line(entry))
-        .add_child(info_distance_line(entry));
+        .add_child(toggle_line(
+            &tr_text("commands.npc.sneak_row_label", locale, vec![]),
+            &entry.name,
+            "sneak",
+            entry.sneaking,
+            locale,
+        ))
+        .add_child(toggle_line(
+            &tr_text("commands.npc.gravity_row_label", locale, vec![]),
+            &entry.name,
+            "gravity",
+            entry.gravity,
+            locale,
+        ))
+        .add_child(info_action_line(entry, locale))
+        .add_child(info_wander_line(entry, locale))
+        .add_child(info_distance_line(entry, locale));
     if !entry.hidden_from.is_empty() {
         message = message.add_child(info_line(
-            "对指定玩家隐藏",
-            format!("{} 人", entry.hidden_from.len()),
+            &tr_text("commands.npc.hidden_from_players_label", locale, vec![]),
+            tr_text(
+                "commands.npc.people_suffix",
+                locale,
+                vec![TextComponent::text(entry.hidden_from.len().to_string())],
+            ),
         ));
     }
-    message.add_child(info_footer_line(entry))
+    message.add_child(info_footer_line(entry, locale))
 }
 
 struct NpcInfoExecutor;
 impl CommandExecutor for NpcInfoExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let requested_name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let npcs = context.server().npc_manager.list().await;
             let Some(entry) = npcs
@@ -560,13 +789,13 @@ impl CommandExecutor for NpcInfoExecutor {
             else {
                 feedback(
                     context,
-                    err_text(format!("No NPC named '{requested_name}' exists.")),
+                    npc_error_text(NpcError::NotFound(requested_name), locale),
                 )
                 .await;
                 return Ok(0);
             };
 
-            feedback(context, build_info_message(entry)).await;
+            feedback(context, build_info_message(entry, locale)).await;
             Ok(1)
         })
     }
@@ -577,6 +806,7 @@ struct NpcMoveExecutor;
 impl CommandExecutor for NpcMoveExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let sender = context.source.player_or_err()?;
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let entity = sender.get_entity();
@@ -591,11 +821,19 @@ impl CommandExecutor for NpcMoveExecutor {
                 .await;
             match result {
                 Ok(()) => {
-                    feedback(context, ok_text(format!("NPC '{name}' moved."))).await;
+                    feedback(
+                        context,
+                        ok_text(tr_text(
+                            "commands.npc.moved",
+                            locale,
+                            vec![TextComponent::text(name)],
+                        )),
+                    )
+                    .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -608,17 +846,26 @@ struct NpcMoveToExecutor;
 impl CommandExecutor for NpcMoveToExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let sender = context.source.player_or_err()?;
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let target = sender.get_entity().pos.load();
 
             match context.server().npc_manager.walk_to(&name, target).await {
                 Ok(()) => {
-                    feedback(context, ok_text(format!("NPC '{name}' is walking over."))).await;
+                    feedback(
+                        context,
+                        ok_text(tr_text(
+                            "commands.npc.walking_over",
+                            locale,
+                            vec![TextComponent::text(name)],
+                        )),
+                    )
+                    .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -632,6 +879,7 @@ struct NpcWanderExecutor {
 impl CommandExecutor for NpcWanderExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let radius = if self.enabled {
                 Some(f64::from(IntegerArgumentType::get(context, ARG_RADIUS)?))
@@ -646,14 +894,29 @@ impl CommandExecutor for NpcWanderExecutor {
             match result {
                 Ok(()) => {
                     let message = radius.map_or_else(
-                        || format!("NPC '{name}' stopped wandering."),
-                        |radius| format!("NPC '{name}' wandering within {radius} blocks of home."),
+                        || {
+                            tr_text(
+                                "commands.npc.wander_stopped",
+                                locale,
+                                vec![TextComponent::text(name.clone())],
+                            )
+                        },
+                        |radius| {
+                            tr_text(
+                                "commands.npc.wander_started",
+                                locale,
+                                vec![
+                                    TextComponent::text(name.clone()),
+                                    TextComponent::text(radius.to_string()),
+                                ],
+                            )
+                        },
                     );
                     feedback(context, ok_text(message)).await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -667,10 +930,19 @@ struct NpcHideExecutor;
 impl CommandExecutor for NpcHideExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let profiles = GameProfileArgumentType::get(context, ARG_TARGET).await?;
             let Some(target) = profiles.into_iter().next() else {
-                feedback(context, err_text("No matching player.")).await;
+                feedback(
+                    context,
+                    err_text(TextComponent::text(tr_text(
+                        "commands.npc.no_matching_player",
+                        locale,
+                        vec![],
+                    ))),
+                )
+                .await;
                 return Ok(0);
             };
             let server = context.server();
@@ -678,13 +950,17 @@ impl CommandExecutor for NpcHideExecutor {
                 Ok(()) => {
                     feedback(
                         context,
-                        ok_text(format!("NPC '{name}' is now hidden from {}.", target.name)),
+                        ok_text(tr_text(
+                            "commands.npc.hidden_from",
+                            locale,
+                            vec![TextComponent::text(name), TextComponent::text(target.name)],
+                        )),
                     )
                     .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -696,10 +972,19 @@ struct NpcShowExecutor;
 impl CommandExecutor for NpcShowExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let profiles = GameProfileArgumentType::get(context, ARG_TARGET).await?;
             let Some(target) = profiles.into_iter().next() else {
-                feedback(context, err_text("No matching player.")).await;
+                feedback(
+                    context,
+                    err_text(TextComponent::text(tr_text(
+                        "commands.npc.no_matching_player",
+                        locale,
+                        vec![],
+                    ))),
+                )
+                .await;
                 return Ok(0);
             };
             let server = context.server();
@@ -707,13 +992,17 @@ impl CommandExecutor for NpcShowExecutor {
                 Ok(()) => {
                     feedback(
                         context,
-                        ok_text(format!("NPC '{name}' is visible to {} again.", target.name)),
+                        ok_text(tr_text(
+                            "commands.npc.shown_to",
+                            locale,
+                            vec![TextComponent::text(name), TextComponent::text(target.name)],
+                        )),
                     )
                     .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -727,6 +1016,7 @@ struct NpcDistanceExecutor {
 impl CommandExecutor for NpcDistanceExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let blocks = if self.has_distance {
                 Some(f64::from(IntegerArgumentType::get(context, ARG_DISTANCE)?))
@@ -741,14 +1031,29 @@ impl CommandExecutor for NpcDistanceExecutor {
             match result {
                 Ok(()) => {
                     let message = blocks.map_or_else(
-                        || format!("NPC '{name}' uses each viewer's normal view distance again."),
-                        |blocks| format!("NPC '{name}' visible distance set to {blocks} blocks."),
+                        || {
+                            tr_text(
+                                "commands.npc.distance_reset",
+                                locale,
+                                vec![TextComponent::text(name.clone())],
+                            )
+                        },
+                        |blocks| {
+                            tr_text(
+                                "commands.npc.distance_set",
+                                locale,
+                                vec![
+                                    TextComponent::text(name.clone()),
+                                    TextComponent::text(blocks.to_string()),
+                                ],
+                            )
+                        },
                     );
                     feedback(context, ok_text(message)).await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -764,6 +1069,7 @@ struct NpcEscortExecutor {
 impl CommandExecutor for NpcEscortExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let target = EntityArgumentType::get_player(context, ARG_ESCORT_PLAYER).await?;
             let destination = if self.lead_to_sender {
@@ -780,16 +1086,24 @@ impl CommandExecutor for NpcEscortExecutor {
                 .await;
             match result {
                 Ok(()) => {
-                    let message = if self.lead_to_sender {
-                        format!("NPC '{name}' is leading {} here.", target.gameprofile.name)
+                    let key = if self.lead_to_sender {
+                        "commands.npc.escort_leading"
                     } else {
-                        format!("NPC '{name}' is now following {}.", target.gameprofile.name)
+                        "commands.npc.escort_following"
                     };
+                    let message = tr_text(
+                        key,
+                        locale,
+                        vec![
+                            TextComponent::text(name),
+                            TextComponent::text(target.gameprofile.name.clone()),
+                        ],
+                    );
                     feedback(context, ok_text(message)).await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -801,14 +1115,23 @@ struct NpcEscortStopExecutor;
 impl CommandExecutor for NpcEscortStopExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             match context.server().npc_manager.stop_escort(&name).await {
                 Ok(()) => {
-                    feedback(context, ok_text(format!("NPC '{name}' stopped escorting."))).await;
+                    feedback(
+                        context,
+                        ok_text(tr_text(
+                            "commands.npc.escort_stopped",
+                            locale,
+                            vec![TextComponent::text(name)],
+                        )),
+                    )
+                    .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -821,6 +1144,7 @@ struct NpcSkinExecutor;
 impl CommandExecutor for NpcSkinExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let skin_source = EntityArgumentType::get_player(context, ARG_SKIN_PLAYER).await?;
             let server = context.server();
@@ -830,11 +1154,19 @@ impl CommandExecutor for NpcSkinExecutor {
                 .await
             {
                 Ok(()) => {
-                    feedback(context, ok_text(format!("NPC '{name}' re-skinned."))).await;
+                    feedback(
+                        context,
+                        ok_text(tr_text(
+                            "commands.npc.reskinned",
+                            locale,
+                            vec![TextComponent::text(name)],
+                        )),
+                    )
+                    .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -846,6 +1178,7 @@ struct NpcSetActionExecutor;
 impl CommandExecutor for NpcSetActionExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let command = StringArgumentType::get(context, ARG_COMMAND)?.to_string();
             let result = context
@@ -855,11 +1188,19 @@ impl CommandExecutor for NpcSetActionExecutor {
                 .await;
             match result {
                 Ok(()) => {
-                    feedback(context, ok_text(format!("NPC '{name}' click action set."))).await;
+                    feedback(
+                        context,
+                        ok_text(tr_text(
+                            "commands.npc.action_set",
+                            locale,
+                            vec![TextComponent::text(name)],
+                        )),
+                    )
+                    .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -871,19 +1212,24 @@ struct NpcClearActionExecutor;
 impl CommandExecutor for NpcClearActionExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let result = context.server().npc_manager.set_action(&name, None).await;
             match result {
                 Ok(()) => {
                     feedback(
                         context,
-                        ok_text(format!("NPC '{name}' click action cleared.")),
+                        ok_text(tr_text(
+                            "commands.npc.action_cleared",
+                            locale,
+                            vec![TextComponent::text(name)],
+                        )),
                     )
                     .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -898,6 +1244,7 @@ struct NpcLookAtExecutor {
 impl CommandExecutor for NpcLookAtExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let result = context
                 .server()
@@ -906,16 +1253,26 @@ impl CommandExecutor for NpcLookAtExecutor {
                 .await;
             match result {
                 Ok(()) => {
-                    let state = if self.enabled { "on" } else { "off" };
                     feedback(
                         context,
-                        ok_text(format!("NPC '{name}' look-at-nearest-player {state}.")),
+                        ok_text(tr_text(
+                            "commands.npc.lookat_set",
+                            locale,
+                            vec![
+                                TextComponent::text(name),
+                                TextComponent::text(tr_text(
+                                    state_key(self.enabled),
+                                    locale,
+                                    vec![],
+                                )),
+                            ],
+                        )),
                     )
                     .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -930,6 +1287,7 @@ struct NpcGravityExecutor {
 impl CommandExecutor for NpcGravityExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let result = context
                 .server()
@@ -938,12 +1296,26 @@ impl CommandExecutor for NpcGravityExecutor {
                 .await;
             match result {
                 Ok(()) => {
-                    let state = if self.enabled { "on" } else { "off" };
-                    feedback(context, ok_text(format!("NPC '{name}' gravity {state}."))).await;
+                    feedback(
+                        context,
+                        ok_text(tr_text(
+                            "commands.npc.gravity_set",
+                            locale,
+                            vec![
+                                TextComponent::text(name),
+                                TextComponent::text(tr_text(
+                                    state_key(self.enabled),
+                                    locale,
+                                    vec![],
+                                )),
+                            ],
+                        )),
+                    )
+                    .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -958,6 +1330,7 @@ struct NpcSneakExecutor {
 impl CommandExecutor for NpcSneakExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let server = context.server();
             let result = server
@@ -966,12 +1339,26 @@ impl CommandExecutor for NpcSneakExecutor {
                 .await;
             match result {
                 Ok(()) => {
-                    let state = if self.sneaking { "on" } else { "off" };
-                    feedback(context, ok_text(format!("NPC '{name}' sneaking {state}."))).await;
+                    feedback(
+                        context,
+                        ok_text(tr_text(
+                            "commands.npc.sneaking_set",
+                            locale,
+                            vec![
+                                TextComponent::text(name),
+                                TextComponent::text(tr_text(
+                                    state_key(self.sneaking),
+                                    locale,
+                                    vec![],
+                                )),
+                            ],
+                        )),
+                    )
+                    .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }
@@ -983,15 +1370,24 @@ struct NpcSwingExecutor;
 impl CommandExecutor for NpcSwingExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let server = context.server();
             match server.npc_manager.swing_arm(server, &name).await {
                 Ok(()) => {
-                    feedback(context, ok_text(format!("NPC '{name}' swung its arm."))).await;
+                    feedback(
+                        context,
+                        ok_text(tr_text(
+                            "commands.npc.swung",
+                            locale,
+                            vec![TextComponent::text(name)],
+                        )),
+                    )
+                    .await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, err_text(e)).await;
+                    feedback(context, npc_error_text(e, locale)).await;
                     Ok(0)
                 }
             }

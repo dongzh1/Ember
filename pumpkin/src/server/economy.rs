@@ -8,7 +8,6 @@
 //! rather than a read-then-write round trip, so concurrent withdrawals on
 //! the same account can never over-draw it.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use pumpkin_config::{EconomyConfig, LoadConfiguration};
@@ -73,7 +72,12 @@ pub struct EconomyManager {
     enabled: bool,
     url: String,
     pool: Arc<tokio::sync::OnceCell<Arc<sqlx::MySqlPool>>>,
-    currencies: HashSet<String>,
+    /// Configured currency ids, in the order declared in `economy.toml` -
+    /// deliberately a `Vec` rather than a `HashSet` so anything that
+    /// iterates this (e.g. `/balance`'s currency listing) shows a stable,
+    /// admin-controlled order instead of one that depends on the process's
+    /// randomized hash seed and can change across every restart.
+    currencies: Vec<String>,
     default_currency: String,
     starting_balance: i64,
 }
@@ -96,9 +100,12 @@ impl EconomyManager {
 
     /// Builds a manager from an explicit config, bypassing the disk load -
     /// only `new()` and tests (which need a config pointed at a test
-    /// database) should call this directly.
+    /// database) should call this directly. `pub(crate)` rather than
+    /// private so `server::shop::bank`'s own tests can build a matching
+    /// `EconomyManager` against the same test database `BankManager`'s
+    /// deposit/withdraw calls into.
     #[must_use]
-    fn from_config(config: &EconomyConfig) -> Self {
+    pub(crate) fn from_config(config: &EconomyConfig) -> Self {
         let manager = Self {
             enabled: config.enabled,
             url: config.url.clone(),
@@ -150,7 +157,7 @@ impl EconomyManager {
 
     fn check_currency<'a>(&'a self, currency: Option<&'a str>) -> Result<&'a str, EconomyError> {
         let currency = currency.unwrap_or(&self.default_currency);
-        if self.currencies.contains(currency) {
+        if self.currencies.iter().any(|c| c == currency) {
             Ok(currency)
         } else {
             Err(EconomyError::UnknownCurrency(currency.to_string()))
@@ -163,7 +170,7 @@ impl EconomyManager {
         &self.default_currency
     }
 
-    /// All configured currency ids.
+    /// All configured currency ids, in the order declared in `economy.toml`.
     pub fn currencies(&self) -> impl Iterator<Item = &str> {
         self.currencies.iter().map(String::as_str)
     }

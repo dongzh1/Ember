@@ -13,6 +13,7 @@ use uuid::Uuid;
 use pumpkin_util::PermissionLvl;
 use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry};
 use pumpkin_util::text::{TextComponent, color::NamedColor};
+use pumpkin_util::translation::{Locale, get_translation_text};
 
 use crate::command::argument_builder::{ArgumentBuilder, argument, command, literal};
 use crate::command::argument_types::core::integer::IntegerArgumentType;
@@ -43,37 +44,82 @@ async fn feedback(context: &CommandContext<'_>, msg: TextComponent) {
     context.source.send_feedback(msg, false).await;
 }
 
-fn err_text(msg: impl Into<String>) -> TextComponent {
-    TextComponent::text(msg.into()).color_named(NamedColor::Red)
+/// Wraps an already-built (and already localized) message in Ember's plain
+/// error color - errors stay clearly red/plain rather than picking up the
+/// ember gradient, for legibility.
+fn err_text(component: TextComponent) -> TextComponent {
+    component.color_named(NamedColor::Red)
 }
 
-fn economy_err_text(who: &str, e: EconomyError) -> TextComponent {
+fn economy_err_text(who: &str, e: EconomyError, locale: Locale) -> TextComponent {
     match e {
-        EconomyError::Disabled => err_text("The economy system is not enabled on this server."),
-        EconomyError::UnknownCurrency(c) => err_text(format!("Unknown currency '{c}'.")),
-        EconomyError::InsufficientFunds { have, need } => err_text(format!(
-            "{who} doesn't have enough money (has {have}, needs {need})."
+        EconomyError::Disabled => err_text(TextComponent::custom(
+            "ember",
+            "commands.economy.disabled",
+            locale,
+            vec![],
         )),
-        EconomyError::Database(e) => err_text(format!("Economy database error: {e}")),
+        EconomyError::UnknownCurrency(c) => err_text(TextComponent::custom(
+            "ember",
+            "commands.economy.unknown_currency",
+            locale,
+            vec![TextComponent::text(c)],
+        )),
+        EconomyError::InsufficientFunds { have, need } => err_text(TextComponent::custom(
+            "ember",
+            "commands.economy.insufficient_funds",
+            locale,
+            vec![
+                TextComponent::text(who.to_string()),
+                TextComponent::text(have.to_string()),
+                TextComponent::text(need.to_string()),
+            ],
+        )),
+        EconomyError::Database(e) => err_text(TextComponent::custom(
+            "ember",
+            "commands.economy.database_error",
+            locale,
+            vec![TextComponent::text(e)],
+        )),
     }
 }
 
 async fn show_balances(context: &CommandContext<'_>, target_name: &str, target_uuid: Uuid) {
     let economy = &context.server().economy_manager;
+    let locale = context.source.output.get_locale();
     let mut lines = Vec::new();
     for currency in economy.currencies() {
         match economy.get_balance(target_uuid, Some(currency)).await {
-            Ok(balance) => lines.push(format!("{currency}: {balance}")),
+            Ok(balance) => lines.push(get_translation_text(
+                "ember:commands.economy.balance_line",
+                locale,
+                vec![
+                    TextComponent::text(currency.to_string()).0,
+                    TextComponent::text(balance.to_string()).0,
+                ],
+            )),
             Err(e) => {
-                feedback(context, economy_err_text(target_name, e)).await;
+                feedback(context, economy_err_text(target_name, e, locale)).await;
                 return;
             }
         }
     }
+    // A data listing (currency: balance pairs per line), not a headline
+    // moment - kept in the existing plain green rather than the ember
+    // gradient, matching how plain data rows are treated throughout this
+    // pass.
     feedback(
         context,
-        TextComponent::text(format!("{target_name}'s balance - {}", lines.join(", ")))
-            .color_named(NamedColor::Green),
+        TextComponent::custom(
+            "ember",
+            "commands.economy.balance",
+            locale,
+            vec![
+                TextComponent::text(target_name.to_string()),
+                TextComponent::text(lines.join(", ")),
+            ],
+        )
+        .color_named(NamedColor::Green),
     )
     .await;
 }
@@ -126,7 +172,17 @@ impl CommandExecutor for BalanceOtherExecutor {
         Box::pin(async move {
             let profiles = GameProfileArgumentType::get(context, ARG_TARGET).await?;
             let Some(profile) = profiles.into_iter().next() else {
-                feedback(context, err_text("No matching player.")).await;
+                let locale = context.source.output.get_locale();
+                feedback(
+                    context,
+                    err_text(TextComponent::custom(
+                        "ember",
+                        "commands.economy.no_such_player",
+                        locale,
+                        vec![],
+                    )),
+                )
+                .await;
                 return Ok(0);
             };
             show_balances(context, &profile.name.clone(), profile.id).await;
@@ -144,17 +200,36 @@ impl CommandExecutor for PayExecutor {
             let payer = context.source.player_or_err()?;
             let payer_uuid = payer.gameprofile.id;
             let payer_name = payer.gameprofile.name.clone();
+            let locale = context.source.output.get_locale();
 
             let profiles = GameProfileArgumentType::get(context, ARG_TARGET).await?;
             let amount = IntegerArgumentType::get(context, ARG_AMOUNT)?;
             let currency = optional_currency(context, self.has_currency)?;
 
             let Some(target) = profiles.into_iter().next() else {
-                feedback(context, err_text("No matching player.")).await;
+                feedback(
+                    context,
+                    err_text(TextComponent::custom(
+                        "ember",
+                        "commands.economy.no_such_player",
+                        locale,
+                        vec![],
+                    )),
+                )
+                .await;
                 return Ok(0);
             };
             if target.id == payer_uuid {
-                feedback(context, err_text("You can't pay yourself.")).await;
+                feedback(
+                    context,
+                    err_text(TextComponent::custom(
+                        "ember",
+                        "commands.economy.cant_pay_self",
+                        locale,
+                        vec![],
+                    )),
+                )
+                .await;
                 return Ok(0);
             }
 
@@ -165,16 +240,25 @@ impl CommandExecutor for PayExecutor {
                 .await;
             match result {
                 Ok(()) => {
-                    feedback(
-                        context,
-                        TextComponent::text(format!("Paid {amount} to {}.", target.name))
-                            .color_named(NamedColor::Green),
-                    )
-                    .await;
+                    // A direct success confirmation for the command the
+                    // player just ran - gets the branded ember gradient,
+                    // applied to the already-resolved string (not the lazy
+                    // `Custom` component) since `text_ember`/`ember_gradient`
+                    // flattens its input via `get_text(Locale::EnUs)`
+                    // internally, which would silently discard localization.
+                    let text = get_translation_text(
+                        "ember:commands.economy.pay_success",
+                        locale,
+                        vec![
+                            TextComponent::text(amount.to_string()).0,
+                            TextComponent::text(target.name.clone()).0,
+                        ],
+                    );
+                    feedback(context, TextComponent::text_ember(text)).await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, economy_err_text(&payer_name, e)).await;
+                    feedback(context, economy_err_text(&payer_name, e, locale)).await;
                     Ok(0)
                 }
             }
@@ -197,9 +281,19 @@ struct EcoExecutor {
 impl CommandExecutor for EcoExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let profiles = GameProfileArgumentType::get(context, ARG_TARGET).await?;
             let Some(target) = profiles.into_iter().next() else {
-                feedback(context, err_text("No matching player.")).await;
+                feedback(
+                    context,
+                    err_text(TextComponent::custom(
+                        "ember",
+                        "commands.economy.no_such_player",
+                        locale,
+                        vec![],
+                    )),
+                )
+                .await;
                 return Ok(0);
             };
             let currency = optional_currency(context, self.has_currency)?;
@@ -231,16 +325,19 @@ impl CommandExecutor for EcoExecutor {
 
             match result {
                 Ok(()) => {
-                    feedback(
-                        context,
-                        TextComponent::text(format!("Updated {}'s balance.", target.name))
-                            .color_named(NamedColor::Green),
-                    )
-                    .await;
+                    // Direct success confirmation - gets the branded ember
+                    // gradient (see `PayExecutor` for why the resolved
+                    // string, not the lazy `Custom` component).
+                    let text = get_translation_text(
+                        "ember:commands.economy.eco_updated",
+                        locale,
+                        vec![TextComponent::text(target.name.clone()).0],
+                    );
+                    feedback(context, TextComponent::text_ember(text)).await;
                     Ok(1)
                 }
                 Err(e) => {
-                    feedback(context, economy_err_text(&target.name, e)).await;
+                    feedback(context, economy_err_text(&target.name, e, locale)).await;
                     Ok(0)
                 }
             }

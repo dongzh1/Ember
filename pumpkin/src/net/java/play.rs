@@ -63,17 +63,19 @@ use pumpkin_protocol::java::client::play::{
     CSystemChatMessage, CUpdateEntityPos, CUpdateEntityPosRot, CUpdateEntityRot, InitChat,
     PlayerAction,
 };
+use pumpkin_protocol::java::server::config::ResourcePackResponseResult;
 use pumpkin_protocol::java::server::play::{
     Action, ActionType, CommandBlockMode, FLAG_ON_GROUND, SAttack, SBundleItemSelected,
     SChangeGameMode, SChatCommand, SChatMessage, SChunkBatch, SClientCommand,
     SClientInformationPlay, SCloseContainer, SCommandSuggestion, SConfirmTeleport,
     SCookieResponse as SPCookieResponse, SInteract, SJigsawGenerate, SKeepAlive, SMoveVehicle,
     SPaddleBoat, SPickItemFromBlock, SPickItemFromEntity, SPlaceRecipe, SPlayPingRequest,
-    SPlayerAbilities, SPlayerAction, SPlayerCommand, SPlayerInput, SPlayerPosition,
-    SPlayerPositionRotation, SPlayerRotation, SPlayerSession, SRecipeBookChangeSettings,
-    SRecipeBookSeenRecipe, SSeenAdvancement, SSelectTrade, SSetCommandBlock, SSetCreativeSlot,
-    SSetHeldItem, SSetJigsawBlock, SSetPlayerGround, SSetTestBlock, SSwingArm, STeleportToEntity,
-    STestInstanceBlockAction, SUpdateSign, SUseItem, SUseItemOn, Status,
+    SPlayResourcePack, SPlayerAbilities, SPlayerAction, SPlayerCommand, SPlayerInput,
+    SPlayerPosition, SPlayerPositionRotation, SPlayerRotation, SPlayerSession,
+    SRecipeBookChangeSettings, SRecipeBookSeenRecipe, SSeenAdvancement, SSelectTrade,
+    SSetCommandBlock, SSetCreativeSlot, SSetHeldItem, SSetJigsawBlock, SSetPlayerGround,
+    SSetTestBlock, SSwingArm, STeleportToEntity, STestInstanceBlockAction, SUpdateSign, SUseItem,
+    SUseItemOn, Status,
 };
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::math::{polynomial_rolling_hash, position::BlockPos, wrap_degrees};
@@ -3058,6 +3060,86 @@ impl JavaClient {
             merchant
                 .set_selected_offer(packet.selected_slot.0 as usize)
                 .await;
+        }
+    }
+
+    // EMBER: play-state counterpart of `JavaClient::handle_resource_pack_response`
+    // (config state, `net/java/config.rs`) - see `SPlayResourcePack`'s doc
+    // comment for why this previously fell through to a generic "unhandled
+    // packet id" warning instead of having its own handler. No
+    // `send_known_packs`-style follow-up here (that's a configuration-state
+    // handshake step with no play-state equivalent) - just tracks the
+    // outcome the same way the config-state handler does.
+    pub fn handle_resource_pack_response_play(
+        &self,
+        server: &Arc<Server>,
+        packet: &SPlayResourcePack,
+    ) {
+        if let Some(resource_config) = server.resolve_java_resource_pack(self.version.load()) {
+            let expected_uuid =
+                uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_DNS, resource_config.url.as_bytes());
+            if packet.uuid != expected_uuid {
+                warn!(
+                    "Client {} returned a play-state response for a resource pack we did not set!",
+                    self.id
+                );
+                return;
+            }
+            match packet.response_result() {
+                ResourcePackResponseResult::DownloadSuccess => {
+                    trace!(
+                        "Client {} successfully downloaded the resource pack (play state)",
+                        self.id
+                    );
+                }
+                ResourcePackResponseResult::DownloadFail => {
+                    warn!(
+                        "Client {} failed to download the resource pack (play state)",
+                        self.id
+                    );
+                }
+                ResourcePackResponseResult::Downloaded => {
+                    trace!(
+                        "Client {} already has the resource pack (play state)",
+                        self.id
+                    );
+                }
+                ResourcePackResponseResult::Accepted => {
+                    trace!("Client {} accepted the resource pack (play state)", self.id);
+                }
+                ResourcePackResponseResult::Declined => {
+                    trace!("Client {} declined the resource pack (play state)", self.id);
+                }
+                ResourcePackResponseResult::InvalidUrl => {
+                    warn!(
+                        "Client {} reported that the resource pack URL is invalid (play state)!",
+                        self.id
+                    );
+                }
+                ResourcePackResponseResult::ReloadFailed => {
+                    trace!(
+                        "Client {} failed to reload the resource pack (play state)",
+                        self.id
+                    );
+                }
+                ResourcePackResponseResult::Discarded => {
+                    trace!(
+                        "Client {} discarded the resource pack (play state)",
+                        self.id
+                    );
+                }
+                ResourcePackResponseResult::Unknown(result) => {
+                    warn!(
+                        "Client {} responded with a bad result (play state): {}!",
+                        self.id, result
+                    );
+                }
+            }
+        } else {
+            warn!(
+                "Client {} returned a play-state response for a resource pack that was not enabled!",
+                self.id
+            );
         }
     }
 

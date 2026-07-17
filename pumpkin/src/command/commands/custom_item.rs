@@ -7,6 +7,7 @@
 use pumpkin_util::PermissionLvl;
 use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry};
 use pumpkin_util::text::{TextComponent, color::NamedColor};
+use pumpkin_util::translation::get_translation_text;
 
 use crate::command::argument_builder::{ArgumentBuilder, argument, command, literal};
 use crate::command::argument_types::core::integer::IntegerArgumentType;
@@ -24,10 +25,6 @@ const ARG_TARGET: &str = "target";
 const ARG_ID: &str = "id";
 const ARG_COUNT: &str = "count";
 
-fn err_text(msg: impl Into<String>) -> TextComponent {
-    TextComponent::text(msg.into()).color_named(NamedColor::Red)
-}
-
 struct CustomItemGiveExecutor {
     has_count: bool,
 }
@@ -42,13 +39,20 @@ impl CommandExecutor for CustomItemGiveExecutor {
             } else {
                 1
             };
+            let locale = context.source.output.get_locale();
 
             let server = context.server();
             let Some(mut stack) = server.custom_item_manager.build_stack(id, 1).await else {
                 context
                     .source
                     .send_feedback(
-                        err_text(format!("No custom item named '{id}' exists.")),
+                        TextComponent::custom(
+                            "ember",
+                            "commands.custom_item.not_found",
+                            locale,
+                            vec![TextComponent::text(id.to_string())],
+                        )
+                        .color_named(NamedColor::Red),
                         false,
                     )
                     .await;
@@ -72,16 +76,18 @@ impl CommandExecutor for CustomItemGiveExecutor {
                 remaining -= take;
             }
 
+            let given_text = get_translation_text(
+                "ember:commands.custom_item.given",
+                locale,
+                vec![
+                    TextComponent::text(count.to_string()).0,
+                    TextComponent::text(id.to_string()).0,
+                    TextComponent::text(target.gameprofile.name.clone()).0,
+                ],
+            );
             context
                 .source
-                .send_feedback(
-                    TextComponent::text(format!(
-                        "Gave {count}x '{id}' to {}.",
-                        target.gameprofile.name
-                    ))
-                    .color_named(NamedColor::Green),
-                    false,
-                )
+                .send_feedback(TextComponent::text_ember(given_text), false)
                 .await;
             Ok(1)
         })
@@ -94,12 +100,16 @@ impl CommandExecutor for CustomItemListExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
             let ids = context.server().custom_item_manager.list_ids().await;
+            let locale = context.source.output.get_locale();
             if ids.is_empty() {
                 context
                     .source
                     .send_feedback(
-                        TextComponent::text(
-                            "No custom items are configured (resourcepack/items.toml).",
+                        TextComponent::custom(
+                            "ember",
+                            "commands.custom_item.list_empty",
+                            locale,
+                            vec![],
                         ),
                         false,
                     )
@@ -109,7 +119,12 @@ impl CommandExecutor for CustomItemListExecutor {
             context
                 .source
                 .send_feedback(
-                    TextComponent::text(format!("Custom items: {}", ids.join(", "))),
+                    TextComponent::custom(
+                        "ember",
+                        "commands.custom_item.list",
+                        locale,
+                        vec![TextComponent::text(ids.join(", "))],
+                    ),
                     false,
                 )
                 .await;

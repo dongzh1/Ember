@@ -3,11 +3,13 @@
 //! log.
 
 use pumpkin_config::{BankSettings, BankTier};
+use pumpkin_util::text::TextComponent;
+use pumpkin_util::translation::{Locale, get_translation_text};
 use sqlx::Row;
 use uuid::Uuid;
 
 use super::{ShopError, ShopPool, db_err};
-use crate::server::economy::EconomyManager;
+use crate::server::economy::{EconomyError, EconomyManager};
 
 const CREATE_ACCOUNTS_TABLE: &str = concat!(
     "CREATE TABLE IF NOT EXISTS ember_bank_accounts (",
@@ -55,6 +57,42 @@ fn now_unix() -> i64 {
         .map_or(0, |d| d.as_secs()) as i64
 }
 
+/// Mirrors `commands::economy`'s translated wording (reusing the identical
+/// `ember:commands.economy.*`/`ember:commands.bank.*` keys) for the rare
+/// case where an underlying `EconomyManager` call fails for a reason other
+/// than insufficient funds while moving money into/out of a bank account -
+/// keeps the message properly localized instead of leaking `EconomyError`'s
+/// internal English `Display` text to the player. `InsufficientFunds` can't
+/// actually reach here today (both call sites below intercept it before
+/// falling back to this), but is still handled for exhaustiveness and to
+/// stay correct if that ever changes.
+fn translate_economy_error(e: EconomyError, currency: &str, locale: Locale) -> String {
+    match e {
+        EconomyError::Disabled => {
+            get_translation_text("ember:commands.economy.disabled", locale, vec![])
+        }
+        EconomyError::UnknownCurrency(c) => get_translation_text(
+            "ember:commands.economy.unknown_currency",
+            locale,
+            vec![TextComponent::text(c).0],
+        ),
+        EconomyError::InsufficientFunds { have, need } => get_translation_text(
+            "ember:commands.bank.insufficient_funds",
+            locale,
+            vec![
+                TextComponent::text(currency.to_string()).0,
+                TextComponent::text(have.to_string()).0,
+                TextComponent::text(need.to_string()).0,
+            ],
+        ),
+        EconomyError::Database(e) => get_translation_text(
+            "ember:commands.economy.database_error",
+            locale,
+            vec![TextComponent::text(e).0],
+        ),
+    }
+}
+
 pub struct BankAccount {
     pub balance: i64,
     pub tier: BankTier,
@@ -69,12 +107,28 @@ pub struct Transaction {
 pub struct BankManager {
     pool: ShopPool,
     settings: BankSettings,
+    /// Serializes the settle-then-mutate sequence for bank accounts.
+    /// `settle_and_get`/`deposit`/`withdraw` are each a read-then-write
+    /// against `MySQL` with no DB-side atomic guard (unlike
+    /// `EconomyManager::withdraw`'s conditional `UPDATE`), and every chat
+    /// command runs as its own unserialized tokio task
+    /// (`net/java/play.rs`'s `handle_chat_command`) - without this, two
+    /// concurrent commands against the same account could both read the
+    /// same stale balance before either writes, duplicating or losing
+    /// money. One coarse lock (rather than per-account striping) is used
+    /// since bank commands are infrequent, human-paced operations where
+    /// full serialization has no perceptible cost.
+    lock: tokio::sync::Mutex<()>,
 }
 
 impl BankManager {
     #[must_use]
-    pub const fn new(settings: BankSettings, pool: ShopPool) -> Self {
-        Self { pool, settings }
+    pub fn new(settings: BankSettings, pool: ShopPool) -> Self {
+        Self {
+            pool,
+            settings,
+            lock: tokio::sync::Mutex::new(()),
+        }
     }
 
     async fn ensure_tables(&self) -> Result<std::sync::Arc<sqlx::MySqlPool>, ShopError> {
@@ -119,6 +173,21 @@ impl BankManager {
     /// deposit/withdraw/GUI-open so the balance a player sees/acts on is
     /// always current.
     pub async fn settle_and_get(
+        &self,
+        player: Uuid,
+        currency: &str,
+        tier: &BankTier,
+    ) -> Result<BankAccount, ShopError> {
+        let _guard = self.lock.lock().await;
+        self.settle_and_get_locked(player, currency, tier).await
+    }
+
+    /// Same settlement logic as [`Self::settle_and_get`], but assumes the
+    /// caller already holds `self.lock` - used by `deposit`/`withdraw` so
+    /// their settle-then-mutate sequence is one atomic critical section
+    /// instead of two (re-locking here would deadlock against a
+    /// non-reentrant `tokio::sync::Mutex`).
+    async fn settle_and_get_locked(
         &self,
         player: Uuid,
         currency: &str,
@@ -194,12 +263,15 @@ impl BankManager {
         amount: i64,
         tier: &BankTier,
         economy: &EconomyManager,
+        locale: Locale,
     ) -> Result<i64, ShopError> {
-        let account = self.settle_and_get(player, currency, tier).await?;
+        let _guard = self.lock.lock().await;
+        let account = self.settle_and_get_locked(player, currency, tier).await?;
         if account.balance + amount > tier.max_balance {
-            return Err(ShopError::Other(format!(
-                "deposit would exceed this account's cap of {}",
-                tier.max_balance
+            return Err(ShopError::Other(get_translation_text(
+                "ember:commands.bank.deposit_cap_exceeded",
+                locale,
+                vec![TextComponent::text(tier.max_balance.to_string()).0],
             )));
         }
 
@@ -210,19 +282,25 @@ impl BankManager {
                 crate::server::economy::EconomyError::InsufficientFunds { have, need } => {
                     ShopError::InsufficientFunds { have, need }
                 }
-                other => ShopError::Other(other.to_string()),
+                other => ShopError::Other(translate_economy_error(other, currency, locale)),
             })?;
 
         let pool = self.ensure_tables().await?;
         let new_balance = account.balance + amount;
-        sqlx::query(UPSERT_BALANCE)
+        if let Err(e) = sqlx::query(UPSERT_BALANCE)
             .bind(player.hyphenated().to_string())
             .bind(currency)
             .bind(new_balance)
             .bind(now_unix())
             .execute(pool.as_ref())
             .await
-            .map_err(db_err)?;
+        {
+            // Compensate: the wallet was already debited above but the bank
+            // side never credited - give the money back rather than
+            // destroying it.
+            let _ = economy.deposit(player, Some(currency), amount).await;
+            return Err(db_err(e));
+        }
         sqlx::query(INSERT_TRANSACTION)
             .bind(player.hyphenated().to_string())
             .bind(currency)
@@ -246,8 +324,10 @@ impl BankManager {
         amount: i64,
         tier: &BankTier,
         economy: &EconomyManager,
+        locale: Locale,
     ) -> Result<i64, ShopError> {
-        let account = self.settle_and_get(player, currency, tier).await?;
+        let _guard = self.lock.lock().await;
+        let account = self.settle_and_get_locked(player, currency, tier).await?;
         if amount > account.balance {
             return Err(ShopError::InsufficientFunds {
                 have: account.balance,
@@ -275,10 +355,31 @@ impl BankManager {
             .await
             .map_err(db_err)?;
 
-        economy
-            .deposit(player, Some(currency), amount)
-            .await
-            .map_err(|e| ShopError::Other(e.to_string()))?;
+        if let Err(e) = economy.deposit(player, Some(currency), amount).await {
+            // Compensate: the bank side above already committed the debit,
+            // but the wallet was never credited - put the bank balance back
+            // rather than destroying the money, and log a matching
+            // reversal so the transaction log still reconciles with the
+            // true final balance.
+            let _ = sqlx::query(UPSERT_BALANCE)
+                .bind(player.hyphenated().to_string())
+                .bind(currency)
+                .bind(account.balance)
+                .bind(now_unix())
+                .execute(pool.as_ref())
+                .await;
+            let _ = sqlx::query(INSERT_TRANSACTION)
+                .bind(player.hyphenated().to_string())
+                .bind(currency)
+                .bind(amount)
+                .bind(false)
+                .bind(now_unix())
+                .execute(pool.as_ref())
+                .await;
+            return Err(ShopError::Other(translate_economy_error(
+                e, currency, locale,
+            )));
+        }
 
         Ok(new_balance)
     }
@@ -305,6 +406,116 @@ impl BankManager {
                 occurred_at: r.get("occurred_at"),
             })
             .collect())
+    }
+}
+
+/// Integration tests against a real `MySQL` instance. Not run by normal
+/// `cargo test`/`nextest` (matching `server::economy`'s own `#[ignore]`d
+/// `MySQL` tests) - run explicitly with:
+/// `EMBER_BANK_TEST_MYSQL_URL=mysql://user:pass@host:port/db cargo test -p pumpkin --lib server::shop::bank::tests -- --ignored`
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::economy::EconomyManager;
+    use pumpkin_config::{EconomyConfig, ShopSystemConfig};
+
+    fn test_url() -> String {
+        std::env::var("EMBER_BANK_TEST_MYSQL_URL")
+            .unwrap_or_else(|_| "mysql://root:password@127.0.0.1:3306/ember_bank_test".to_string())
+    }
+
+    fn test_tier() -> BankTier {
+        BankTier {
+            permission: None,
+            max_balance: 1_000_000,
+            daily_rate: 0.0,
+            max_interest_per_settlement: 0,
+        }
+    }
+
+    /// Builds a `BankManager` plus the `EconomyManager` it moves wallet
+    /// money through, both pointed at the same freshly-ensured test
+    /// database (creating it on first run) - mirrors
+    /// `server::economy::tests::fresh_manager`.
+    async fn fresh_managers() -> (BankManager, EconomyManager) {
+        let url = test_url();
+        let (base_url, db_name) = url
+            .rsplit_once('/')
+            .expect("test MySQL URL must end in /<database>");
+
+        let admin_pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("{base_url}/"))
+            .await
+            .expect("connect to MySQL server (no database selected) for test setup");
+        sqlx::query(&format!("CREATE DATABASE IF NOT EXISTS {db_name}"))
+            .execute(&admin_pool)
+            .await
+            .expect("create test database");
+        admin_pool.close().await;
+
+        let shop_config = ShopSystemConfig {
+            enabled: true,
+            url: url.clone(),
+            ..ShopSystemConfig::default()
+        };
+        let bank = BankManager::new(shop_config.bank.clone(), ShopPool::new(&shop_config));
+
+        let economy_config = EconomyConfig {
+            enabled: true,
+            url,
+            ..EconomyConfig::default()
+        };
+        let economy = EconomyManager::from_config(&economy_config);
+
+        (bank, economy)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a local MySQL instance; see module docs for how to run"]
+    async fn concurrent_withdrawals_never_duplicate_money() {
+        let (bank, economy) = fresh_managers().await;
+        let player = Uuid::new_v4();
+        let tier = test_tier();
+
+        economy.deposit(player, None, 100).await.unwrap();
+        bank.deposit(player, "coins", 100, &tier, &economy, Locale::EnUs)
+            .await
+            .unwrap();
+
+        // Two concurrent withdrawals of 80 against a bank balance of 100:
+        // exactly one may succeed. Before the `self.lock` fix, both could
+        // read the same stale balance=100, both pass the `80 > 100`
+        // insufficient-funds check, and both credit the wallet - creating
+        // money that was never in the bank ledger to begin with.
+        let (r1, r2) = tokio::join!(
+            bank.withdraw(player, "coins", 80, &tier, &economy, Locale::EnUs),
+            bank.withdraw(player, "coins", 80, &tier, &economy, Locale::EnUs),
+        );
+
+        let successes = usize::from(r1.is_ok()) + usize::from(r2.is_ok());
+        assert_eq!(
+            successes, 1,
+            "exactly one of two concurrent 80-withdrawals from a bank balance of \
+             100 should succeed, got {r1:?} / {r2:?}"
+        );
+
+        let bank_balance = bank
+            .settle_and_get(player, "coins", &tier)
+            .await
+            .unwrap()
+            .balance;
+        let wallet_balance = economy.get_balance(player, None).await.unwrap();
+
+        assert_eq!(
+            bank_balance, 20,
+            "bank ledger must reflect exactly one successful 80-withdrawal from 100"
+        );
+        assert_eq!(
+            wallet_balance, 80,
+            "wallet must be credited exactly once - a value of 160 here would mean \
+             the race duplicated money"
+        );
     }
 }
 // EMBER end

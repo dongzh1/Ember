@@ -326,6 +326,12 @@ pub static TRANSLATIONS: LazyLock<Mutex<[HashMap<String, String>; Locale::COUNT]
             array[Locale::EnUs as usize].insert(format!("minecraft:{key}"), value);
         }
         for (key, value) in pumpkin_en_us {
+            // EMBER: same source file, also registered under the "ember"
+            // namespace so Ember's own messages (`TextComponent::custom`
+            // with namespace `"ember"`) resolve - previously only the
+            // "pumpkin" prefix was registered, so every `ember:...` lookup
+            // silently missed and fell back to printing the raw key.
+            array[Locale::EnUs as usize].insert(format!("ember:{key}"), value.clone());
             array[Locale::EnUs as usize].insert(format!("pumpkin:{key}"), value);
         }
         for (key, value) in pumpkin_brb {
@@ -371,6 +377,9 @@ pub static TRANSLATIONS: LazyLock<Mutex<[HashMap<String, String>; Locale::COUNT]
             array[Locale::SqAl as usize].insert(format!("pumpkin:{key}"), value);
         }
         for (key, value) in pumpkin_zh_cn {
+            // EMBER: see the `pumpkin_en_us` loop above for why "ember" is
+            // also registered here.
+            array[Locale::ZhCn as usize].insert(format!("ember:{key}"), value.clone());
             array[Locale::ZhCn as usize].insert(format!("pumpkin:{key}"), value);
         }
         for (key, value) in pumpkin_zh_hk {

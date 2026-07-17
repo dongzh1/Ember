@@ -108,7 +108,7 @@ impl CrashReport {
 
         error!(
             "{}",
-            TextComponent::text("Pumpkin has encountered a panic!")
+            TextComponent::text("Ember has encountered a panic!")
                 .color(RED)
                 .bold()
                 .to_pretty_console()
@@ -170,7 +170,7 @@ impl CrashReport {
     pub fn generate_file_content(&self) -> String {
         let mut output = String::new();
 
-        writeln_output!(&mut output, "====== Pumpkin Crash Report ======");
+        writeln_output!(&mut output, "====== Ember Crash Report ======");
         writeln_output!(&mut output);
         writeln_output!(&mut output, "Time: {}", self.utc_time);
         writeln_output!(
@@ -194,11 +194,7 @@ impl CrashReport {
 
         writeln_output!(&mut output, "--- Server Details ---");
 
-        writeln_output!(
-            &mut output,
-            "Pumpkin Version: {}",
-            Self::get_pumpkin_version()
-        );
+        writeln_output!(&mut output, "Ember Version: {}", Self::get_ember_version());
         writeln_output!(&mut output, "Minecraft Version: {}", CURRENT_MC_VERSION);
         writeln_output!(
             &mut output,
@@ -282,7 +278,7 @@ impl CrashReport {
     }
 
     #[must_use]
-    pub fn get_pumpkin_version() -> String {
+    pub fn get_ember_version() -> String {
         let profile = if cfg!(debug_assertions) {
             "debug"
         } else {

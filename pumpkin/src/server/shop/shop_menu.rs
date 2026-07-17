@@ -9,6 +9,7 @@
 //! behavior.
 
 use std::any::Any;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use pumpkin_data::item_stack::ItemStack;
@@ -20,6 +21,7 @@ use pumpkin_inventory::screen_handler::{
 use pumpkin_inventory::slot::NormalSlot;
 use pumpkin_protocol::java::server::play::SlotActionType;
 use pumpkin_util::text::TextComponent;
+use pumpkin_util::translation::{Locale, get_translation_text};
 use pumpkin_world::inventory::Inventory;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -36,14 +38,62 @@ const SELL_SLOT: usize = 18;
 const REDEEM_SLOT: usize = 22;
 const TOTAL_SLOTS: usize = 27;
 
-fn price_name(base: &str, price: i64, currency: &str, verb: &str) -> String {
-    format!("{base} - {verb}: {price} {currency}")
+/// Builds one shop item's slot label - the item name plus whichever of
+/// "Buy"/"Sell" prices are configured for it (mirrors the presence checks
+/// `build_inventory` already did), localized to `locale`.
+///
+/// # Note
+/// Fixes a pre-existing display bug in the helper this replaced: the old
+/// `price_name(base, price, currency, verb)` always re-appended
+/// `: {buy_price} {currency}` after `verb` (which already contained
+/// "Buy: X, Sell: Y"), so a fully-priced item showed the buy price twice
+/// (e.g. "Diamond - Buy: 100, Sell: 50: 100 ") with a stray trailing space
+/// from the always-empty `currency` argument. No price/label data is lost
+/// here versus the original intent - just the accidental duplication.
+fn item_label(
+    label: &str,
+    buy_price: i64,
+    sell_price: i64,
+    has_buy: bool,
+    has_sell: bool,
+    currency: &str,
+    locale: Locale,
+) -> String {
+    let mut parts = Vec::new();
+    if has_buy {
+        parts.push(get_translation_text(
+            "ember:commands.shop.item_buy_price",
+            locale,
+            vec![TextComponent::text(buy_price.to_string()).0],
+        ));
+    }
+    if has_sell {
+        parts.push(get_translation_text(
+            "ember:commands.shop.item_sell_price",
+            locale,
+            vec![TextComponent::text(sell_price.to_string()).0],
+        ));
+    }
+    if parts.is_empty() {
+        return label.to_string();
+    }
+    get_translation_text(
+        "ember:commands.shop.item_label",
+        locale,
+        vec![
+            TextComponent::text(label.to_string()).0,
+            TextComponent::text(parts.join(", ")).0,
+            TextComponent::text(currency.to_string()).0,
+        ],
+    )
 }
 
 async fn build_inventory(
     shop: &ShopManager,
     shop_name: &str,
     player: Uuid,
+    economy: &EconomyManager,
+    locale: Locale,
 ) -> Arc<PluginInventory> {
     let inventory = Arc::new(PluginInventory::new(TOTAL_SLOTS));
     let Some(config) = shop.find_shop(shop_name) else {
@@ -57,14 +107,19 @@ async fn build_inventory(
         let (sell_price, buy_price) = shop.prices(shop_name, entry).await.unwrap_or((0, 0));
         let mut stack = ItemStack::new(1, item);
         let label = entry.item.replace('_', " ");
-        let mut lines = Vec::new();
-        if entry.base_buy_price.is_some() {
-            lines.push(format!("Buy: {buy_price}"));
-        }
-        if entry.base_sell_price.is_some() {
-            lines.push(format!("Sell: {sell_price}"));
-        }
-        stack.set_custom_name(price_name(&label, buy_price, "", &lines.join(", ")));
+        let currency = entry
+            .currency
+            .as_deref()
+            .unwrap_or_else(|| economy.default_currency());
+        stack.set_custom_name(item_label(
+            &label,
+            buy_price,
+            sell_price,
+            entry.base_buy_price.is_some(),
+            entry.base_sell_price.is_some(),
+            currency,
+            locale,
+        ));
         inventory.set_stack(i, stack).await;
     }
 
@@ -72,11 +127,14 @@ async fn build_inventory(
         && let Some(item) = pumpkin_data::item::Item::from_registry_key(&redeemable.item)
     {
         let mut stack = ItemStack::new(u8::try_from(redeemable.amount.min(64)).unwrap_or(64), item);
-        stack.set_custom_name(format!(
-            "Redeem {}x {} ({})",
-            redeemable.amount,
-            redeemable.item.replace('_', " "),
-            redeemable.currency
+        stack.set_custom_name(get_translation_text(
+            "ember:commands.shop.redeem_label",
+            locale,
+            vec![
+                TextComponent::text(redeemable.amount.to_string()).0,
+                TextComponent::text(redeemable.item.replace('_', " ")).0,
+                TextComponent::text(redeemable.currency).0,
+            ],
         ));
         inventory.set_stack(REDEEM_SLOT, stack).await;
     }
@@ -91,6 +149,7 @@ pub struct ShopScreenHandler {
     economy: Arc<EconomyManager>,
     shop_name: String,
     player_uuid: Uuid,
+    locale: Locale,
 }
 
 impl ShopScreenHandler {
@@ -100,9 +159,11 @@ impl ShopScreenHandler {
         economy: Arc<EconomyManager>,
         shop_name: String,
         player_uuid: Uuid,
+        locale: Locale,
         player_inventory: &Arc<pumpkin_inventory::player::player_inventory::PlayerInventory>,
     ) -> Self {
-        let inventory = build_inventory(&shop_manager, &shop_name, player_uuid).await;
+        let inventory =
+            build_inventory(&shop_manager, &shop_name, player_uuid, &economy, locale).await;
         let mut behaviour = ScreenHandlerBehaviour::new(sync_id, Some(WindowType::Generic9x3));
         behaviour.container_slots = TOTAL_SLOTS;
 
@@ -113,6 +174,7 @@ impl ShopScreenHandler {
             economy,
             shop_name,
             player_uuid,
+            locale,
         };
 
         for i in 0..TOTAL_SLOTS {
@@ -124,9 +186,25 @@ impl ShopScreenHandler {
         handler
     }
 
-    async fn refresh(&mut self) {
-        let inventory =
-            build_inventory(&self.shop_manager, &self.shop_name, self.player_uuid).await;
+    /// Rebuilds and re-syncs the inventory. Re-derives `self.locale` from
+    /// `player`'s *current* config first - the locale was only ever a
+    /// snapshot taken when the menu was opened, and a player can change
+    /// their client language while it stays open (`handle_client_information`
+    /// applies that live, with no notion of "close any open screen"), so
+    /// reusing the stale snapshot here would leave item labels stuck in the
+    /// old language until the menu is closed and reopened.
+    async fn refresh(&mut self, player: &dyn InventoryPlayer) {
+        if let Some(p) = player.as_any().downcast_ref::<Player>() {
+            self.locale = Locale::from_str(&p.config.load().locale).unwrap_or(Locale::EnUs);
+        }
+        let inventory = build_inventory(
+            &self.shop_manager,
+            &self.shop_name,
+            self.player_uuid,
+            &self.economy,
+            self.locale,
+        )
+        .await;
         for i in 0..ITEM_SLOTS.max(REDEEM_SLOT + 1) {
             let stack = inventory.get_stack(i).await.lock().await.clone();
             self.inventory.set_stack(i, stack).await;
@@ -168,7 +246,7 @@ impl ShopScreenHandler {
                 // yet. Left as a known follow-up.
             }
         }
-        self.refresh().await;
+        self.refresh(player).await;
     }
 
     async fn handle_sell(&mut self, player: &dyn InventoryPlayer) {
@@ -194,7 +272,7 @@ impl ShopScreenHandler {
             stack.decrement(u8::try_from(quantity).unwrap_or(u8::MAX));
             *held.lock().await = stack;
         }
-        self.refresh().await;
+        self.refresh(player).await;
     }
 
     async fn handle_redeem(&mut self, player: &dyn InventoryPlayer) {
@@ -209,7 +287,7 @@ impl ShopScreenHandler {
                 .offer_or_drop_stack(stack, player)
                 .await;
         }
-        self.refresh().await;
+        self.refresh(player).await;
     }
 }
 
@@ -285,12 +363,14 @@ impl ScreenHandlerFactory for ShopMenuFactory {
     ) -> ScreenHandlerFuture<'a, Option<SharedScreenHandler>> {
         Box::pin(async move {
             let player = player.as_any().downcast_ref::<Player>()?;
+            let locale = Locale::from_str(&player.config.load().locale).unwrap_or(Locale::EnUs);
             let handler = ShopScreenHandler::new(
                 sync_id,
                 self.shop_manager.clone(),
                 self.economy.clone(),
                 self.shop_name.clone(),
                 player.gameprofile.id,
+                locale,
                 player_inventory,
             )
             .await;
@@ -299,7 +379,12 @@ impl ScreenHandlerFactory for ShopMenuFactory {
     }
 
     fn get_display_name(&self) -> TextComponent {
-        TextComponent::text(self.title.clone())
+        // The title itself is admin-authored (`shop/shops.toml`), not one of
+        // Ember's own hardcoded strings, so there's no translation key for
+        // it - just the signature ember-glow treatment applied on top of
+        // whatever text the admin chose, matching the "branded GUI titles"
+        // guidance.
+        TextComponent::text(self.title.clone()).ember_gradient()
     }
 }
 // EMBER end

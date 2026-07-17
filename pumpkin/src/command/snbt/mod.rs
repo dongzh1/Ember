@@ -97,7 +97,7 @@ impl SnbtParser<'_, '_> {
                     translation::java::COMMAND_FAILED,
                     translation::java::COMMAND_FAILED
                 );
-                tracing::error!("Failed to parse SNBT, while having zero errors to report (report this to Pumpkin): {}", reader.string());
+                tracing::error!("Failed to parse SNBT, while having zero errors to report (report this to Ember): {}", reader.string());
                 PARSING_FAILED_WITHOUT_ERRORS.create(reader)
             }
         })

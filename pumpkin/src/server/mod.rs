@@ -185,6 +185,23 @@ pub struct Server {
     /// `Level`s would write the same data concurrently.
     pub pending_world_unloads: std::sync::Mutex<std::collections::HashSet<String>>,
     // EMBER end
+    // EMBER start - world creation/clone race guard
+    /// Names of worlds currently being created/cloned, from the moment a
+    /// caller has confirmed the name doesn't exist yet until the new
+    /// `World` is registered in `worlds`. Without this, two concurrent
+    /// calls targeting the same not-yet-existing name (e.g. a player
+    /// double-tapping `/home` on their very first visit — every chat
+    /// command runs as its own unserialized tokio task, see
+    /// `handle_chat_command`) could both pass the dedup check in
+    /// `create_world_with`/`clone_world`, both independently build a
+    /// `Level`/`World` over the same on-disk folder, and both get
+    /// permanently registered (`worlds`'s `ArcSwap::rcu` is a CAS-retry
+    /// loop that never drops a losing update) — two uncoordinated writers
+    /// silently corrupting that world's data. Mirrors
+    /// `pending_world_unloads`, which solves the equivalent problem for
+    /// the unload/reload path. See `Server::claim_world_name`.
+    pending_world_creates: std::sync::Mutex<std::collections::HashSet<String>>,
+    // EMBER end
     // EMBER start - shared chunk-generation thread pool
     /// Rayon pool used for chunk generation, shared by every world (the
     /// startup dimensions and any created later via `create_world_with`) so
@@ -309,6 +326,24 @@ pub struct Server {
     pub level_info: Arc<ArcSwap<LevelData>>,
     world_info_writer: Arc<dyn WorldInfoWriter>,
 }
+
+// EMBER start - world creation/clone race guard
+/// Releases a name claimed via [`Server::claim_world_name`] when dropped -
+/// covers early returns (e.g. an error partway through `clone_world`) and
+/// panics, not just the happy path.
+struct WorldCreateClaim<'a> {
+    pending: &'a std::sync::Mutex<std::collections::HashSet<String>>,
+    name: String,
+}
+
+impl Drop for WorldCreateClaim<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.name);
+        }
+    }
+}
+// EMBER end
 
 impl Server {
     #[expect(clippy::too_many_lines)]
@@ -529,6 +564,9 @@ impl Server {
             worlds: ArcSwap::from_pointee(vec![]),
             // EMBER start - dynamic world unload
             pending_world_unloads: std::sync::Mutex::new(std::collections::HashSet::new()),
+            // EMBER end
+            // EMBER start - world creation/clone race guard
+            pending_world_creates: std::sync::Mutex::new(std::collections::HashSet::new()),
             // EMBER end
             dimensions,
             command_dispatcher,
@@ -773,6 +811,46 @@ impl Server {
         // EMBER end
     }
 
+    // EMBER start - world creation/clone race guard
+    /// Waits until `name` isn't already being created/cloned by another
+    /// in-flight call, then claims it - or, if a world by that name and
+    /// dimension is already loaded, returns it directly instead (the same
+    /// dedup check `create_world_with` used to do inline). Every loop
+    /// iteration re-checks the dedup first, so a caller that was waiting
+    /// behind someone else's claim correctly picks up the world *they*
+    /// just registered instead of building a redundant second one. See
+    /// `pending_world_creates`'s doc comment for why this exists.
+    async fn claim_world_name<'a>(
+        self: &'a Arc<Self>,
+        name: &str,
+        dimension: &Dimension,
+    ) -> Result<WorldCreateClaim<'a>, Arc<World>> {
+        loop {
+            {
+                let worlds = self.worlds.load();
+                if let Some(world) = worlds
+                    .iter()
+                    .find(|w| w.get_world_name() == name && w.dimension == *dimension)
+                {
+                    return Err(world.clone());
+                }
+            }
+            let claimed = self
+                .pending_world_creates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(name.to_string());
+            if claimed {
+                return Ok(WorldCreateClaim {
+                    pending: &self.pending_world_creates,
+                    name: name.to_string(),
+                });
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    // EMBER end
+
     // EMBER start - create_world_with: explicit per-world LevelConfig
     /// Like [`Self::create_world`], but an explicit [`LevelConfig`] replaces
     /// the global configuration for this world — used by ephemeral dungeon
@@ -805,15 +883,10 @@ impl Server {
                 Some((border, cap))
             },
         );
-        {
-            let worlds = self.worlds.load();
-            if let Some(world) = worlds
-                .iter()
-                .find(|w| w.get_world_name() == name && w.dimension == dimension)
-            {
-                return world.clone();
-            }
-        }
+        let _claim = match self.claim_world_name(&name, &dimension).await {
+            Err(existing) => return existing,
+            Ok(claim) => claim,
+        };
 
         // A world of this name may still be flushing after an unload: it has
         // already left `worlds` (so the dedup above misses it) but its old
@@ -1069,14 +1142,16 @@ impl Server {
             .find(|w| w.get_world_name() == src_name)
             .cloned()
             .ok_or_else(|| format!("world '{src_name}' is not loaded"))?;
-        if self
-            .worlds
-            .load()
-            .iter()
-            .any(|w| w.get_world_name() == dst_name)
-        {
-            return Err(format!("world '{dst_name}' is already loaded"));
-        }
+
+        // Claimed for the entire copy+db-clone sequence below, not just the
+        // final `create_world` call - otherwise two concurrent clones to
+        // the same not-yet-existing `dst_name` could both pass this check
+        // and both start `copy_dir_recursive` into the same destination.
+        // See `claim_world_name`'s doc comment.
+        let claim = match self.claim_world_name(dst_name, &src_world.dimension).await {
+            Err(_existing) => return Err(format!("world '{dst_name}' is already loaded")),
+            Ok(claim) => claim,
+        };
         if self.is_world_unloading(dst_name) {
             return Err(format!("world '{dst_name}' is still unloading"));
         }
@@ -1126,6 +1201,11 @@ impl Server {
         }
         cloned?;
 
+        // Release the claim before handing off to `create_world`, which
+        // claims the name itself for the final construction+registration
+        // step - holding both here would make that call wait forever on a
+        // claim only we hold.
+        drop(claim);
         Ok(self
             .create_world(dst_name.to_string(), src_world.dimension.clone())
             .await)
@@ -1448,6 +1528,12 @@ impl Server {
         self.listing.lock().await.remove_player(player);
         // EMBER: drop a stale pending login session if they left mid-auth
         self.login_manager.abandon(player.gameprofile.id).await;
+        // EMBER: drop this player's stale HUD bossbar-uuid record - see
+        // `HudManager::player_disconnected`'s doc comment for why a rejoin
+        // without this crashes a real client.
+        self.hud_manager
+            .player_disconnected(player.gameprofile.id)
+            .await;
     }
 
     pub async fn shutdown(&self) {

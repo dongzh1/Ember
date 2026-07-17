@@ -10,6 +10,7 @@
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry};
 use pumpkin_util::text::{TextComponent, color::NamedColor};
+use pumpkin_util::translation::get_translation_text;
 
 use crate::command::argument_builder::{ArgumentBuilder, command};
 use crate::command::context::command_context::CommandContext;
@@ -35,12 +36,18 @@ struct SpawnExecutor;
 impl CommandExecutor for SpawnExecutor {
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let locale = context.source.output.get_locale();
             let Some(player) = context.source.output.as_player() else {
                 context
                     .source
                     .send_feedback(
-                        TextComponent::text("只有玩家可以使用 /spawn。")
-                            .color_named(NamedColor::Red),
+                        TextComponent::custom(
+                            "ember",
+                            "commands.spawn.players_only",
+                            locale,
+                            vec![],
+                        )
+                        .color_named(NamedColor::Red),
                         false,
                     )
                     .await;
@@ -50,7 +57,13 @@ impl CommandExecutor for SpawnExecutor {
                 context
                     .source
                     .send_feedback(
-                        TextComponent::text("主城世界未加载。").color_named(NamedColor::Red),
+                        TextComponent::custom(
+                            "ember",
+                            "commands.spawn.hub_not_loaded",
+                            locale,
+                            vec![],
+                        )
+                        .color_named(NamedColor::Red),
                         false,
                     )
                     .await;
@@ -59,10 +72,19 @@ impl CommandExecutor for SpawnExecutor {
 
             let spawn = spawn_of(&hub);
             player.teleport(spawn, None, None, hub).await;
+            // Branded success confirmation, same reasoning as /home: the
+            // gradient is applied to a pre-resolved plain string (not a
+            // live `Custom` component), since `ember_gradient` bakes in
+            // per-character colors off the component's resolved text and
+            // would otherwise ignore the player's actual locale.
             context
                 .source
                 .send_feedback(
-                    TextComponent::text("已传送到主城。").color_named(NamedColor::Green),
+                    TextComponent::text_ember(get_translation_text(
+                        "ember:commands.spawn.teleported",
+                        locale,
+                        vec![],
+                    )),
                     false,
                 )
                 .await;
