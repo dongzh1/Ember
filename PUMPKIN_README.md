@@ -13,7 +13,6 @@
 > 下面是上游原文，随每次上游同步自动更新。Ember 自己的说明请看 [README.md](README.md)。
 
 ---
-
 <div align="center">
 
 # Pumpkin
