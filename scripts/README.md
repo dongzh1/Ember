@@ -23,7 +23,7 @@
 | 入口(根目录) | 实际脚本 | 作用 |
 |---|---|---|
 | `ship.bat` | `ship.ps1` | **一条龙**:检查 → 推送 → 同步上游 → 云端构建,顺序执行、失败即止。是编排器,不含新逻辑 |
-| `check.bat` | `check.ps1` | 代码检查:fmt + clippy(常改的三个 crate)。`-Full` 查全 workspace 并跑测试 |
+| `check.bat` | `check.ps1` | 代码检查:fmt + clippy(常改的四个 crate)。`-Full` 查全 workspace 并跑测试 |
 | `build.bat` | `build-windows.ps1` / `build-remote.ps1` | 菜单选择:本地构建 Windows 包 / 云端构建 Linux+Windows 包 |
 | `push.bat` | `push.ps1` | 提交 + 推送到 GitHub(origin/main),推送前自动做格式检查,禁止在 master 提交 |
 | `sync-upstream.bat` | `sync-upstream.ps1` | 拉取上游 Pumpkin → 更新 master 镜像 → 合并进 main → 推送;有冲突时输出冲突报告 |

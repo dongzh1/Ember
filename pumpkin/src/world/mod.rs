@@ -234,6 +234,8 @@ pub struct World {
     // per-world-index reasoning as `portal_poi` above.
     pub furniture_manager: crate::server::furniture::FurnitureManager,
     pub custom_block_manager: crate::server::custom_block::CustomBlockManager,
+    /// Native rigid-body state owned by this Minecraft world.
+    pub physics_manager: crate::server::physics::PhysicsManager,
     // EMBER end
     // EMBER start - tick soft-budget isolation
     /// `true` while a tick task for this world is in flight. Guards against
@@ -324,6 +326,11 @@ impl World {
         // to resolve custom-item visuals and scan existing placements.
         let furniture_manager = crate::server::furniture::FurnitureManager::new();
         let custom_block_manager = crate::server::custom_block::CustomBlockManager::new();
+        let physics_registry = server.upgrade().map_or_else(
+            crate::server::physics::PhysicsRegistry::disabled,
+            |server| server.physics_registry.clone(),
+        );
+        let physics_manager = crate::server::physics::PhysicsManager::new(physics_registry);
         // EMBER end
         Self {
             uuid: Uuid::new_v4(),
@@ -355,6 +362,7 @@ impl World {
             // EMBER start - per-world furniture/custom block instance storage
             furniture_manager,
             custom_block_manager,
+            physics_manager,
             // EMBER end
         }
     }
@@ -924,6 +932,7 @@ impl World {
         self.flush_lighting_updates().await; // EMBER
         self.update_active_chunks();
         self.tick_environment().await;
+        self.physics_manager.tick(self); // EMBER - native rigid-body physics
 
         let world_for_chunks = self.clone();
         let chunk_future = async move {
@@ -4371,6 +4380,8 @@ impl World {
         if replaced_block_state_id == block_state_id {
             return block_state_id;
         }
+
+        self.physics_manager.mark_block_dirty(*position); // EMBER
 
         self.unsent_block_changes
             .lock()

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "ember-physics",
     "pumpkin-api-macros",
     "pumpkin-config",
     "pumpkin-util",
@@ -150,6 +151,7 @@ p384 = { version = "0.14.0", default-features = false, features = ["std", "arith
 phf = { version = "0.14.0", default-features = false, features = ["std"] }
 proc-macro2 = { version = "1.0", default-features = false, features = ["proc-macro"] }
 pumpkin-codecs = { path = "pumpkin-codecs", default-features = false }
+ember-physics = { path = "ember-physics", default-features = false }
 pumpkin-config = { path = "pumpkin-config", default-features = false }
 pumpkin-data = { path = "pumpkin-data", default-features = false }
 pumpkin-inventory = { path = "pumpkin-inventory", default-features = false }

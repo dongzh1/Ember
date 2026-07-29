@@ -60,6 +60,9 @@ mod connection_cache;
 // EMBER start - built-in economy system
 pub mod economy;
 // EMBER end
+// EMBER start - native rigid-body physics
+pub mod physics;
+// EMBER end
 // EMBER start - offline-mode login verification
 pub mod auth;
 // EMBER end
@@ -216,6 +219,10 @@ pub struct Server {
     /// Multi-currency, `MySQL`-backed economy system. Off (all operations
     /// return `EconomyError::Disabled`) unless `[economy] enabled = true`.
     pub economy_manager: Arc<economy::EconomyManager>,
+    // EMBER end
+    // EMBER start - native rigid-body physics
+    /// Shared immutable physics configuration and preset registry.
+    pub physics_registry: Arc<physics::PhysicsRegistry>,
     // EMBER end
     // EMBER start - packet-only NPC manager
     /// Packet-only NPCs (`npc/npcs.json`): never real world entities, spawned
@@ -499,6 +506,9 @@ impl Server {
         // EMBER start - built-in economy system
         let economy_manager = Arc::new(economy::EconomyManager::new());
         // EMBER end
+        // EMBER start - native rigid-body physics
+        let physics_registry = physics::PhysicsRegistry::load();
+        // EMBER end
         // EMBER start - packet-only NPC manager
         let npc_manager = Arc::new(npc::NpcManager::new());
         // EMBER end
@@ -597,6 +607,7 @@ impl Server {
             gen_pool: gen_pool.clone(),
             gen_budget: gen_budget.clone(), // EMBER
             economy_manager,                // EMBER
+            physics_registry,               // EMBER
             npc_manager,                    // EMBER
             login_manager,                  // EMBER
             home_manager,                   // EMBER

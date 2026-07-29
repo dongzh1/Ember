@@ -33,6 +33,13 @@ pub use performance::PerformanceConfig;
 // EMBER start - built-in economy system
 pub use economy::EconomyConfig;
 // EMBER end
+// EMBER start - native rigid-body physics
+pub use physics::{
+    PhysicsCompoundPartConfig, PhysicsMaterialConfig, PhysicsMaterialListConfig,
+    PhysicsPartShapeConfig, PhysicsPresetConfig, PhysicsPresetListConfig, PhysicsShapeConfig,
+    PhysicsSystemConfig, PhysicsTerrainConfig,
+};
+// EMBER end
 // EMBER start - offline-mode login verification
 pub use auth::LoginConfig;
 // EMBER end
@@ -83,6 +90,9 @@ mod performance;
 // EMBER end
 // EMBER start - built-in economy system
 mod economy;
+// EMBER end
+// EMBER start - native rigid-body physics
+mod physics;
 // EMBER end
 // EMBER start - offline-mode login verification
 mod auth;

@@ -1,0 +1,24 @@
+{
+  "feature": "physics",
+  "summary": "Ember内置的原生刚体物理系统,用Rapier在服务端按世界独立模拟刚体、复合碰撞体、关节、浮力和地形碰撞。默认关闭,需要在physics/physics.toml里设置enabled=true并重启服务端。",
+  "commands": [
+    {
+      "usage": "/physics status",
+      "description": "查看物理系统总开关、已加载的材质和预设数量,以及各世界当前的刚体/碰撞体数量。",
+      "permission": "OP 2级 (ember:command.physics)"
+    }
+  ],
+  "config_files": [
+    "physics/physics.toml - 总开关、模拟频率、重力、每世界刚体上限、sleeping/CCD默认值和地形碰撞缓存限制",
+    "physics/materials.toml - 命名材质的摩擦、弹性、密度和阻尼参数",
+    "physics/presets.toml - 可通过ID生成的箱体、球体、胶囊、圆柱或复合刚体预设"
+  ],
+  "notes": [
+    "三个配置文件会在首次启动时自动创建;enabled默认是false,升级或同步上游后不会自动改变原版实体行为。",
+    "玩法代码可调用world.physics_manager.spawn_preset(id, position)生成刚体,再通过with_world闭包施加冲量、力、力偶,创建固定关节或执行射线检测。",
+    "每个World持有独立的PhysicsManager,物理步进跟随世界tick、冻结和卸载生命周期,不会建立跨世界的共享求解场景。",
+    "地形碰撞只为活跃的已加载区块section构建;完整方块会贪心合并成较少的AABB,台阶、楼梯和栅栏等非完整方块复用Pumpkin生成的碰撞盒。",
+    "方块变化只会令所在section的缓存失效;尚未加载完成的活跃section会延后重试,避免同步读取或强制加载区块。",
+    "该系统提供物理求解和地形碰撞,不会替换Pumpkin的原版玩家/实体移动。载具、骰子等玩法需要自行把BodyHandle与真实实体或仅发包的展示实体关联并同步姿态。"
+  ]
+}

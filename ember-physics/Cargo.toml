@@ -1,0 +1,13 @@
+[package]
+name = "ember-physics"
+version.workspace = true
+description = "Low-overhead rigid-body physics primitives for Ember."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rapier3d = { version = "0.34.0", default-features = false, features = ["dim3", "f32", "std", "simd-stable"] }
+
+[lints]
+workspace = true

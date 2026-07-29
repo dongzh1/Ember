@@ -84,6 +84,9 @@ mod world;
 // EMBER start - built-in economy system
 mod economy;
 // EMBER end
+// EMBER start - native rigid-body physics
+mod physics;
+// EMBER end
 // EMBER start - packet-only NPC manager
 mod npc;
 // EMBER end
@@ -238,6 +241,9 @@ pub async fn default_dispatcher(
     // EMBER end
     // EMBER start - built-in economy system
     economy::register(&mut dispatcher, registry);
+    // EMBER end
+    // EMBER start - native rigid-body physics
+    physics::register(&mut dispatcher, registry);
     // EMBER end
     // EMBER start - packet-only NPC manager
     npc::register(&mut dispatcher, registry);

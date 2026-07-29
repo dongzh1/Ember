@@ -1,5 +1,5 @@
 ﻿# Ember 代码检查脚本
-# 快速模式(默认): cargo fmt --check + clippy (Ember 常改的三个 crate)
+# 快速模式(默认): cargo fmt --check + clippy (Ember 常改的四个 crate)
 # 完整模式(-Full): clippy 全 workspace + 全部测试
 #
 # 用法:
@@ -39,9 +39,9 @@ if ($Full) {
     Step "Clippy (全 workspace)" "cargo clippy --workspace --all-targets -- -D warnings"
     Step "测试 (全部)" "cargo test --workspace"
 } else {
-    # Ember 自有改动集中在这三个 crate,与 easyworld-ci.yml 保持一致
-    Step "Clippy (pumpkin-config / pumpkin-world / pumpkin)" `
-        "cargo clippy -p pumpkin-config -p pumpkin-world -p pumpkin --all-targets -- -D warnings"
+    # Ember 自有改动集中在这四个 crate,与 easyworld-ci.yml 保持一致
+    Step "Clippy (ember-physics / pumpkin-config / pumpkin-world / pumpkin)" `
+        "cargo clippy -p ember-physics -p pumpkin-config -p pumpkin-world -p pumpkin --all-targets -- -D warnings"
 }
 
 Write-Host ""

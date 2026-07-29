@@ -171,6 +171,15 @@ url = "mysql://user:pass@localhost:3306/ember"
 Withdrawals are atomic (`UPDATE ... WHERE balance >= ?`, never a read-then-write race), so
 concurrent spends on the same account can't overdraw it.
 
+### Native physics
+
+Rapier-based rigid bodies, compound colliders, joints, ray queries, buoyancy, and active-chunk
+terrain collision. Disabled by default. On first startup Ember creates `physics/physics.toml`,
+`physics/materials.toml`, and `physics/presets.toml`; set `enabled = true` in the first file and
+restart. `/physics status` reports per-world body/collider counts. Built-in systems use
+`world.physics_manager.spawn_preset(...)` and `with_world(...)`; vanilla entity movement is not
+replaced.
+
 ### Packet-only NPCs
 
 NPCs that render entirely via packets — never a real world entity, so zero save-file footprint
@@ -531,6 +540,14 @@ url = "mysql://user:pass@localhost:3306/ember"
 ```
 
 扣款是原子操作（`UPDATE ... WHERE balance >= ?`，不是先读后写），同一账户并发扣款不会透支。
+
+### 原生物理引擎
+
+基于 Rapier，支持刚体、复合碰撞体、关节、射线查询、浮力和活跃区块地形碰撞，默认关闭。
+首次启动自动生成 `physics/physics.toml`、`physics/materials.toml` 和
+`physics/presets.toml`；在第一份文件中设置 `enabled = true` 后重启。`/physics status`
+显示各世界的刚体/碰撞体数量。内置功能通过 `world.physics_manager.spawn_preset(...)` 和
+`with_world(...)` 调用，不替换原版实体移动。
 
 ### 发包 NPC
 

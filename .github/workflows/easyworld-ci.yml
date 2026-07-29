@@ -240,5 +240,8 @@ jobs:
       - name: Clippy pumpkin-config
         run: cargo clippy -p pumpkin-config --all-targets -- -D warnings 2>&1 | tail -30
 
+      - name: Clippy ember-physics
+        run: cargo clippy -p ember-physics --all-targets -- -D warnings 2>&1 | tail -30
+
       - name: Clippy pumpkin (main crate)
         run: cargo clippy -p pumpkin --all-targets -- -D warnings 2>&1 | tail -30
