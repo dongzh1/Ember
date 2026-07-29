@@ -17,7 +17,7 @@
 // with a synthesized chunk; `Loaded`/`Error` results pass through untouched.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
 use pumpkin_config::ember_world::GenerateMode;
 use pumpkin_data::Block;
@@ -75,6 +75,7 @@ fn base_chunk(pos: Vector2<i32>, min_y: i32, height: i32) -> ChunkData {
         light_populated: AtomicBool::new(true),
         status: ChunkStatus::Full,
         blending_data: None,
+        inhabited_time: AtomicU64::new(0),
         dirty: AtomicBool::new(false),
     }
 }

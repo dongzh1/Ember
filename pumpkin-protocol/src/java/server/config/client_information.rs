@@ -1,15 +1,19 @@
 use pumpkin_data::packet::serverbound::CONFIG_CLIENT_INFORMATION;
 use pumpkin_macros::java_packet;
-use serde::Serialize;
 
 use crate::VarInt;
 
+use crate::{
+    ServerPacket,
+    ser::{NetworkReadExt, NetworkReadSliceExt, ReadingError},
+};
+use pumpkin_util::version::JavaMinecraftVersion;
+
 /// Sent by the client to inform the server about its local settings
-#[derive(serde::Deserialize, Serialize)]
 #[java_packet(CONFIG_CLIENT_INFORMATION)]
-pub struct SClientInformationConfig {
+pub struct SClientInformationConfig<'a> {
     /// The language code used by the client (e.g., "`en_us`")
-    pub locale: String,
+    pub locale: &'a str,
     /// The maximum number of chunks the client renders
     pub view_distance: i8,
     /// Visibility of chat messages (0: Enabled, 1: Commands Only, 2: Hidden)
@@ -24,4 +28,40 @@ pub struct SClientInformationConfig {
     pub text_filtering: bool,
     /// Whether the player should appear in the server's online player list
     pub server_listing: bool,
+}
+
+impl<'a> ServerPacket<'a> for SClientInformationConfig<'a> {
+    fn read(bytebuf: &mut &'a [u8], version: &JavaMinecraftVersion) -> Result<Self, ReadingError> {
+        let locale = bytebuf.get_str_borrowed()?;
+        let view_distance = bytebuf.get_i8()?;
+        let chat_mode = bytebuf.get_var_int()?;
+        let chat_colors = bytebuf.get_bool()?;
+        let skin_parts = bytebuf.get_u8()?;
+        let main_hand = if version >= &JavaMinecraftVersion::V_1_9 {
+            bytebuf.get_var_int()?
+        } else {
+            VarInt(1)
+        };
+        let text_filtering = if version >= &JavaMinecraftVersion::V_1_17 {
+            bytebuf.get_bool()?
+        } else {
+            false
+        };
+        let server_listing = if version >= &JavaMinecraftVersion::V_1_18 {
+            bytebuf.get_bool()?
+        } else {
+            true
+        };
+
+        Ok(Self {
+            locale,
+            view_distance,
+            chat_mode,
+            chat_colors,
+            skin_parts,
+            main_hand,
+            text_filtering,
+            server_listing,
+        })
+    }
 }

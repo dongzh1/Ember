@@ -1,26 +1,34 @@
 use pumpkin_data::packet::serverbound::PLAY_RESOURCE_PACK;
 use pumpkin_macros::java_packet;
-use serde::Serialize;
+use pumpkin_util::version::JavaMinecraftVersion;
 
-use crate::VarInt;
 use crate::java::server::config::ResourcePackResponseResult;
+use crate::{
+    ServerPacket, VarInt,
+    ser::{NetworkReadExt, ReadingError},
+};
 
 // EMBER: play-state counterpart of `SConfigResourcePack` - same wire shape,
 // but this crate previously had no struct/handler for it at all (only the
 // configuration-state one existed), so any resource pack response a client
 // sends while already in the Play state (e.g. re-confirming a pack after
 // being moved between worlds) fell through to the generic "unhandled
-// packet id" warning. Field types are plain `Uuid`/`VarInt`, not
-// `Box<[u8]>`, so `#[derive(Deserialize)]` is fine here (unlike
-// `SCustomClickAction`, which needed a manual `read`).
-#[derive(serde::Deserialize, Serialize)]
+// packet id" warning.
 #[java_packet(PLAY_RESOURCE_PACK)]
 pub struct SPlayResourcePack {
     /// The unique identifier of the resource pack this response refers to.
-    #[serde(with = "uuid::serde::compact")]
     pub uuid: uuid::Uuid,
     /// The status code of the operation, mapped to [`ResourcePackResponseResult`].
     pub result: VarInt,
+}
+
+impl<'a> ServerPacket<'a> for SPlayResourcePack {
+    fn read(bytebuf: &mut &'a [u8], _version: &JavaMinecraftVersion) -> Result<Self, ReadingError> {
+        Ok(Self {
+            uuid: bytebuf.get_uuid()?,
+            result: bytebuf.get_var_int()?,
+        })
+    }
 }
 
 impl SPlayResourcePack {

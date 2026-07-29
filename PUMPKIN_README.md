@@ -13,6 +13,7 @@
 > 下面是上游原文，随每次上游同步自动更新。Ember 自己的说明请看 [README.md](README.md)。
 
 ---
+
 <div align="center">
 
 # Pumpkin
@@ -27,7 +28,7 @@
 and customizable experience. It prioritizes performance and player enjoyment while adhering to the core mechanics of the game.
 <div align="center">
 
-![Pumpkin Chunk Loading](./assets/pumpkin_chunk_loading.webp)
+![Pumpkin Chunk Loading](./assets/pumpkin-chunk-loading.webp)
 
 </div>
 
@@ -127,4 +128,4 @@ Consider joining [our Discord server](https://discord.gg/wT8XjrjKkf) to stay up-
 
 ## Funding
 
-If you want to fund me and help the project, check out my [GitHub sponsors](https://github.com/sponsors/Pumpkin-MC).
+If you want to fund me and help the project, check out the [Donation Page](https://pumpkinmc.org/donate/).

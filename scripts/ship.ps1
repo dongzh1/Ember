@@ -79,6 +79,15 @@ if ($branch -eq "master") {
 }
 Write-Host "分支: $branch"
 
+# Fail fast before running cargo checks when a previous upstream merge still
+# needs attention. The sync script owns the detailed conflict report.
+if (Test-Path (Join-Path $repo ".git\MERGE_HEAD")) {
+    Write-Host ""
+    Write-Host "[中止] 检测到未完成的上游合并，先解决冲突并提交后再运行 Ship。" -ForegroundColor Red
+    & $psExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here "sync-upstream.ps1")
+    exit 1
+}
+
 # 1. 检查代码 (fmt + clippy; -Full 再加全 workspace + 测试)
 if (-not $SkipCheck) {
     $a = @()

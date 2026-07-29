@@ -118,6 +118,20 @@ if ($LASTEXITCODE -ne 0) { Fail "推送 master 镜像到 origin/upstream-mirror 
 
 if ($newCount -eq 0) {
     git checkout -q main
+    if ($LASTEXITCODE -ne 0) { Fail "切换 main 失败。" }
+
+    # A previous run may already have advanced master and then stopped on a
+    # main merge conflict. In that recovery path newCount is zero, but the
+    # generated upstream README mirror still needs to catch up.
+    Update-UpstreamMirror
+    git add PUMPKIN_README.md
+    git diff --cached --quiet
+    if ($LASTEXITCODE -ne 0) {
+        git commit -q -m "[EMBER] docs: refresh upstream Pumpkin README mirror"
+        if ($LASTEXITCODE -ne 0) { Fail "提交上游 README 镜像失败。" }
+        Write-Host "已刷新上游 README 镜像: PUMPKIN_README.md" -ForegroundColor Green
+    }
+
     Write-Host ""
     Write-Host "上游没有新提交。同步 main 到云端..." -ForegroundColor Green
     git push -u origin main

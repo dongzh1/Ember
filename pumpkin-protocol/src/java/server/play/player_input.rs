@@ -1,8 +1,11 @@
+use crate::{
+    ServerPacket,
+    ser::{NetworkReadExt, ReadingError},
+};
 use pumpkin_data::packet::serverbound::PLAY_PLAYER_INPUT;
 use pumpkin_macros::java_packet;
-use serde::{Deserialize, Serialize};
+use pumpkin_util::version::JavaMinecraftVersion;
 
-#[derive(Deserialize, Serialize)]
 #[java_packet(PLAY_PLAYER_INPUT)]
 pub struct SPlayerInput {
     // Yep, exactly how it looks like
@@ -17,4 +20,39 @@ impl SPlayerInput {
     pub const JUMP: i8 = 16;
     pub const SNEAK: i8 = 32;
     pub const SPRINT: i8 = 64;
+}
+
+impl<'a> ServerPacket<'a> for SPlayerInput {
+    fn read(bytebuf: &mut &'a [u8], version: &JavaMinecraftVersion) -> Result<Self, ReadingError> {
+        if version >= &JavaMinecraftVersion::V_1_21_2 {
+            Ok(Self {
+                input: bytebuf.get_i8()?,
+            })
+        } else {
+            let sideways = bytebuf.get_f32_be()?;
+            let forward = bytebuf.get_f32_be()?;
+            let jumping = bytebuf.get_bool()?;
+            let sneaking = bytebuf.get_bool()?;
+
+            let mut input: i8 = 0;
+            if forward > 0.0 {
+                input |= Self::FORWARD;
+            } else if forward < 0.0 {
+                input |= Self::BACKWARD;
+            }
+            if sideways > 0.0 {
+                input |= Self::LEFT;
+            } else if sideways < 0.0 {
+                input |= Self::RIGHT;
+            }
+            if jumping {
+                input |= Self::JUMP;
+            }
+            if sneaking {
+                input |= Self::SNEAK;
+            }
+
+            Ok(Self { input })
+        }
+    }
 }

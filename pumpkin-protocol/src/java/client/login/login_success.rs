@@ -1,6 +1,5 @@
 use pumpkin_data::packet::clientbound::{LOGIN_GAME_PROFILE, LOGIN_LOGIN_FINISHED};
 use pumpkin_util::version::JavaMinecraftVersion;
-use serde::Serialize;
 
 use crate::{ClientPacket, Property, packet::MultiVersionJavaPacket, ser::NetworkWriteExt};
 
@@ -58,15 +57,19 @@ impl ClientPacket for CLoginSuccess<'_> {
         mut write: impl std::io::Write,
         version: &JavaMinecraftVersion,
     ) -> Result<(), crate::ser::WritingError> {
-        write.write_uuid(self.uuid)?;
+        if version < &JavaMinecraftVersion::V_1_16 {
+            write.write_string(&self.uuid.to_string())?;
+        } else {
+            write.write_uuid(self.uuid)?;
+        }
         write.write_string(self.username)?;
-        write.write_list(self.properties, |write, property| {
-            let mut serializer = crate::ser::serializer::Serializer::new(write);
-            property.serialize(&mut serializer)
-        })?;
-        if version < &JavaMinecraftVersion::V_1_21_2 {
+        if version >= &JavaMinecraftVersion::V_1_19 {
+            write.write_list(self.properties, |write, property| property.write(write))?;
+        }
+        if version >= &JavaMinecraftVersion::V_1_20_2 && version < &JavaMinecraftVersion::V_1_21_2 {
             write.write_bool(self.strict_error_handling)?;
-        } else if version >= &JavaMinecraftVersion::V_26_2 {
+        }
+        if version >= &JavaMinecraftVersion::V_26_2 {
             write.write_uuid(&self.session_id)?;
         }
         Ok(())

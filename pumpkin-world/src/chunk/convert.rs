@@ -498,13 +498,13 @@ mod tests {
 
     #[test]
     fn scan_ignores_bak_and_tmp() {
-        let dir = temp_dir::TempDir::new().unwrap();
-        std::fs::write(dir.child("r.0.0.pump"), b"x").unwrap();
-        std::fs::write(dir.child("r.1.-2.pump"), b"x").unwrap();
-        std::fs::write(dir.child("r.0.0.pump.bak"), b"x").unwrap();
-        std::fs::write(dir.child("r.0.0.easy.tmp"), b"x").unwrap();
-        std::fs::write(dir.child("r.3.3.easy"), b"x").unwrap();
-        std::fs::write(dir.child("level.dat"), b"x").unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("r.0.0.pump"), b"x").unwrap();
+        std::fs::write(dir.path().join("r.1.-2.pump"), b"x").unwrap();
+        std::fs::write(dir.path().join("r.0.0.pump.bak"), b"x").unwrap();
+        std::fs::write(dir.path().join("r.0.0.easy.tmp"), b"x").unwrap();
+        std::fs::write(dir.path().join("r.3.3.easy"), b"x").unwrap();
+        std::fs::write(dir.path().join("level.dat"), b"x").unwrap();
         assert_eq!(scan_regions(dir.path(), "pump"), vec![(0, 0), (1, -2)]);
         assert_eq!(scan_regions(dir.path(), "easy"), vec![(3, 3)]);
     }
@@ -522,35 +522,35 @@ mod tests {
 
     #[test]
     fn source_detection_excludes_target() {
-        let dir = temp_dir::TempDir::new().unwrap();
-        std::fs::write(dir.child("r.0.0.pump"), b"x").unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("r.0.0.pump"), b"x").unwrap();
         // Partial target output must never be mistaken for the source.
-        std::fs::write(dir.child("r.0.0.easy"), b"x").unwrap();
+        std::fs::write(dir.path().join("r.0.0.easy"), b"x").unwrap();
         let src = detect_source_for_conversion(dir.path(), &easy_file()).unwrap();
         assert!(matches!(src, ChunkConfig::Pump));
 
         // Only target-format files present -> nothing to convert.
-        let dir2 = temp_dir::TempDir::new().unwrap();
-        std::fs::write(dir2.child("r.0.0.easy"), b"x").unwrap();
+        let dir2 = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir2.path().join("r.0.0.easy"), b"x").unwrap();
         assert!(detect_source_for_conversion(dir2.path(), &easy_file()).is_none());
     }
 
     #[test]
     fn detection_honors_disk_over_config() {
-        let dir = temp_dir::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
         // Fresh world: config wins.
         assert!(matches!(
             detect_on_disk_config(&easy_file(), dir.path()),
             ChunkConfig::Easy(_)
         ));
         // Disk stores pump, config says easy -> pump wins.
-        std::fs::write(dir.child("r.0.0.pump"), b"x").unwrap();
+        std::fs::write(dir.path().join("r.0.0.pump"), b"x").unwrap();
         assert!(matches!(
             detect_on_disk_config(&easy_file(), dir.path()),
             ChunkConfig::Pump
         ));
         // Config format present on disk -> config wins even with strays.
-        std::fs::write(dir.child("r.0.0.easy"), b"x").unwrap();
+        std::fs::write(dir.path().join("r.0.0.easy"), b"x").unwrap();
         assert!(matches!(
             detect_on_disk_config(&easy_file(), dir.path()),
             ChunkConfig::Easy(c) if c.backend == EasyBackend::File

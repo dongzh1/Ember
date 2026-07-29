@@ -74,11 +74,10 @@ jobs:
         os:
           [
             ubuntu-latest,
-            ubuntu-24.04-arm,
+            ubuntu-26.04-arm,
             windows-latest,
             windows-11-arm,
             macos-latest,
-            macos-15-intel,
           ]
         toolchain:
           - stable
@@ -109,7 +108,6 @@ jobs:
             windows-latest,
             windows-11-arm,
             macos-latest,
-            macos-15-intel,
           ]
         toolchain:
           - stable

@@ -485,7 +485,7 @@ mod easy_world_file_tests {
     use bytes::Bytes;
     use pumpkin_util::math::vector2::Vector2;
     use serde::{Deserialize, Serialize};
-    use temp_dir::TempDir;
+    use tempfile::TempDir;
 
     use super::EasyWorldFile;
     use crate::chunk::format::anvil::SingleChunkDataSerializer;
@@ -586,7 +586,7 @@ mod easy_world_file_tests {
     #[tokio::test]
     async fn write_then_read_roundtrips_all_chunks() {
         let dir = TempDir::new().unwrap();
-        let path = dir.child("r.0.0.easy");
+        let path = dir.path().join("r.0.0.easy");
 
         let mut file = EasyWorldFile::<MockChunk>::default();
         for i in 0..10i32 {
@@ -619,7 +619,7 @@ mod easy_world_file_tests {
     #[tokio::test]
     async fn clean_region_skips_write() {
         let dir = TempDir::new().unwrap();
-        let path = dir.child("r.0.0.easy");
+        let path = dir.path().join("r.0.0.easy");
         let file = EasyWorldFile::<MockChunk>::default(); // never mutated -> not dirty
         file.write(&path).await.unwrap();
         assert!(!path.exists(), "write() must be a no-op on a clean region");

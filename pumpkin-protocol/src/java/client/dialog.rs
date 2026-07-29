@@ -1,6 +1,9 @@
 use pumpkin_util::text::TextComponent;
 use serde::Serialize;
 
+use crate::ser::NetworkWriteExt;
+use pumpkin_util::version::JavaMinecraftVersion;
+
 #[derive(Serialize)]
 pub struct DialogNBT<'a>(pub DialogNBTSource<'a>);
 
@@ -13,6 +16,25 @@ impl<'a> DialogNBT<'a> {
     #[must_use]
     pub const fn from_nbt(compound: &'a pumpkin_nbt::compound::NbtCompound) -> Self {
         Self(DialogNBTSource::Nbt(compound))
+    }
+
+    pub fn write_packet_data(
+        &self,
+        mut write: impl std::io::Write,
+        _version: &JavaMinecraftVersion,
+    ) -> Result<(), crate::ser::WritingError> {
+        match &self.0 {
+            DialogNBTSource::Struct(dialog) => {
+                pumpkin_nbt::to_bytes_unnamed(*dialog, &mut write)
+                    .map_err(|error| crate::ser::WritingError::Message(error.to_string()))?;
+                Ok(())
+            }
+            DialogNBTSource::Nbt(nbt) => {
+                let tag = pumpkin_nbt::tag::NbtTag::Compound((*nbt).clone());
+                write.write_nbt(tag)?;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -158,13 +180,11 @@ pub enum DialogBody {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DialogInput {
-    #[serde(rename = "minecraft:boolean")]
     Boolean {
         key: String,
         label: TextComponent,
         default_value: bool,
     },
-    #[serde(rename = "minecraft:text")]
     Text {
         key: String,
         label: TextComponent,
@@ -172,7 +192,6 @@ pub enum DialogInput {
         #[serde(skip_serializing_if = "Option::is_none")]
         max_length: Option<u32>,
     },
-    #[serde(rename = "minecraft:number_range")]
     NumberRange {
         key: String,
         label: TextComponent,
@@ -180,10 +199,8 @@ pub enum DialogInput {
         max: f32,
         initial: f32,
         step: f32,
-        #[serde(skip_serializing_if = "Option::is_none")]
         label_format: Option<String>,
     },
-    #[serde(rename = "minecraft:single_option")]
     SingleOption {
         key: String,
         label: TextComponent,
@@ -273,7 +290,6 @@ pub fn decode_dialog_submission(
 }
 // EMBER end
 
-#[derive(Serialize)]
 pub struct DialogLink {
     pub label: crate::Label,
     pub url: String,
