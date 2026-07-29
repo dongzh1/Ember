@@ -109,3 +109,9 @@ pub use set_test_block::*;
 // EMBER: play-state resource pack response - see the type's own doc comment.
 mod resource_pack_response;
 pub use resource_pack_response::*;
+
+mod debug_subscription_request;
+pub use debug_subscription_request::*;
+
+mod debug_sample_subscription;
+pub use debug_sample_subscription::*;
