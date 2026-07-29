@@ -482,7 +482,7 @@ impl ResolvableProfile {
         write.write_option(&self.body, |w, value| w.write_string(value))?;
         write.write_option(&self.cape, |w, value| w.write_string(value))?;
         write.write_option(&self.elytra, |w, value| w.write_string(value))?;
-        write.write_option(&self.model, |w, value| w.write_var_int(value))?;
+        write.write_option(&self.model, ser::NetworkWriteExt::write_var_int)?;
         Ok(())
     }
 }
