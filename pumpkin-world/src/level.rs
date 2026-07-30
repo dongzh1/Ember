@@ -253,10 +253,15 @@ impl Level {
         let entities_folder = dim_folder.join("entities");
         let poi_folder = dim_folder.join("poi");
 
-        // EMBER start - RAM-backed read-only clones create no folders
-        let ephemeral = level_config.ember.mode == pumpkin_config::chunk::EasyWorldMode::ReadOnly
-            && level_config.ember.source.is_some();
-        if !ephemeral {
+        // EMBER start - RAM-backed and MySQL worlds create no folders
+        let mysql = matches!(
+            &level_config.chunk,
+            ChunkConfig::Easy(config) if config.backend == EasyBackend::Mysql
+        );
+        let ephemeral = mysql
+            || (level_config.ember.mode == pumpkin_config::chunk::EasyWorldMode::ReadOnly
+                && level_config.ember.source.is_some());
+        if !ephemeral && !mysql {
             std::fs::create_dir_all(&region_folder).expect("Failed to create Region folder");
             std::fs::create_dir_all(&entities_folder).expect("Failed to create Entities folder");
             std::fs::create_dir_all(&poi_folder).expect("Failed to create POI folder");
@@ -275,7 +280,9 @@ impl Level {
         // If the region folder already stores a different format than the
         // config asks for, honor the disk (loudly) so a format switch can
         // never make existing terrain unreadable.
-        let detected_config = {
+        let detected_config = if mysql {
+            level_config.clone()
+        } else {
             let mut resolved = level_config.clone();
             resolved.chunk = crate::chunk::convert::detect_on_disk_config(
                 &resolved.chunk,
@@ -307,7 +314,8 @@ impl Level {
         let mut flat_layers = Vec::new();
         let mut flat_biome = "minecraft:plains".to_string();
 
-        if let Some(wgs) = crate::world_info::data_files::read_world_gen_settings(&main_folder)
+        if !mysql
+            && let Some(wgs) = crate::world_info::data_files::read_world_gen_settings(&main_folder)
             && let Some(dim_settings) = wgs.dimensions.get(dimension.minecraft_name)
             && dim_settings.generator.generator_type == "minecraft:flat"
         {
@@ -374,9 +382,12 @@ impl Level {
                 AnvilChunkFile<ChunkEntityData>,
             >::new(config.clone())),
             ChunkConfig::Pump => Arc::new(ChunkFileManager::<PumpFile<ChunkEntityData>>::new(())),
-            ChunkConfig::Easy(_) => {
-                if ember.mode == pumpkin_config::chunk::EasyWorldMode::ReadOnly {
+            ChunkConfig::Easy(config) => {
+                if config.backend == EasyBackend::Mysql
+                    || ember.mode == pumpkin_config::chunk::EasyWorldMode::ReadOnly
+                {
                     // Read-only worlds (clones/replicas) persist no entities.
+                    // Folderless MySQL worlds intentionally persist chunks only.
                     Arc::new(DiscardEntityIO)
                 } else {
                     // Entity data always uses file-based .easy storage.

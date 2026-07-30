@@ -5,7 +5,7 @@
 //
 // Table (auto-created; MEDIUMBLOB tables from older versions are upgraded):
 //   CREATE TABLE easyworld_regions (
-//       world_key  VARCHAR(512) NOT NULL,
+//       world_key  VARCHAR(191) NOT NULL,
 //       region_x   INT NOT NULL,
 //       region_z   INT NOT NULL,
 //       data       LONGBLOB NOT NULL,
@@ -45,13 +45,28 @@ use super::io::{FileIO, LoadedData};
 /// SQL statements.
 const CREATE_TABLE: &str = concat!(
     "CREATE TABLE IF NOT EXISTS easyworld_regions (",
-    "world_key VARCHAR(512) NOT NULL,",
+    "world_key VARCHAR(191) NOT NULL,",
     "region_x INT NOT NULL,",
     "region_z INT NOT NULL,",
     "data LONGBLOB NOT NULL,",
     "PRIMARY KEY (world_key, region_x, region_z)",
     ")"
 );
+
+// EMBER start - folderless world catalog
+const CREATE_WORLD_TABLE: &str = concat!(
+    "CREATE TABLE IF NOT EXISTS easyworld_worlds (",
+    "world_key VARCHAR(191) NOT NULL,",
+    "dimension VARCHAR(128) NOT NULL,",
+    "seed BIGINT NOT NULL,",
+    "PRIMARY KEY (world_key)",
+    ")"
+);
+const UPSERT_WORLD: &str = concat!(
+    "INSERT INTO easyworld_worlds (world_key, dimension, seed) VALUES (?, ?, ?) ",
+    "ON DUPLICATE KEY UPDATE dimension = VALUES(dimension), seed = VALUES(seed)"
+);
+// EMBER end
 
 const SELECT_REGION: &str =
     "SELECT data FROM easyworld_regions WHERE world_key = ? AND region_x = ? AND region_z = ?";
@@ -85,7 +100,7 @@ const REGION_LOCK_PRUNE_THRESHOLD: usize = 1024;
 
 const CREATE_LOCK_TABLE: &str = concat!(
     "CREATE TABLE IF NOT EXISTS easyworld_locks (",
-    "world_key VARCHAR(512) NOT NULL,",
+    "world_key VARCHAR(191) NOT NULL,",
     "owner VARCHAR(128) NOT NULL,",
     "heartbeat BIGINT NOT NULL,",
     "PRIMARY KEY (world_key)",
@@ -162,6 +177,10 @@ impl MysqlPool {
             .await
             .map_err(read_err)?;
         sqlx::query(CREATE_LOCK_TABLE)
+            .execute(&self.pool)
+            .await
+            .map_err(read_err)?;
+        sqlx::query(CREATE_WORLD_TABLE)
             .execute(&self.pool)
             .await
             .map_err(read_err)?;
@@ -328,6 +347,56 @@ pub fn world_key_for(config: &EasyMysqlConfig, folder_path: &std::path::Path) ->
     }
 }
 
+// EMBER start - folderless world catalog
+/// Registers a logical world independently of whether it has generated any
+/// chunks yet. This replaces directory existence as the authoritative world
+/// catalog for forced `MySQL` servers.
+pub async fn register_world(
+    config: &EasyMysqlConfig,
+    logical_root: &std::path::Path,
+    dimension: &str,
+    seed: i64,
+) -> Result<(), String> {
+    let pool = MysqlPool::new(&config.url)
+        .await
+        .map_err(|e| e.to_string())?;
+    pool.ensure_table().await.map_err(|e| e.to_string())?;
+    sqlx::query(UPSERT_WORLD)
+        .bind(world_key_for(config, logical_root))
+        .bind(dimension)
+        .bind(seed)
+        .execute(&pool.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    pool.pool.close().await;
+    Ok(())
+}
+
+/// Lists logical top-level world names from the `MySQL` catalog.
+pub async fn list_world_names(config: &EasyMysqlConfig) -> Result<Vec<String>, String> {
+    let pool = MysqlPool::new(&config.url)
+        .await
+        .map_err(|e| e.to_string())?;
+    pool.ensure_table().await.map_err(|e| e.to_string())?;
+    let keys: Vec<(String,)> =
+        sqlx::query_as("SELECT world_key FROM easyworld_worlds ORDER BY world_key")
+            .fetch_all(&pool.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    pool.pool.close().await;
+    let prefix = config.key_prefix.trim_matches('/');
+    let prefix = (!prefix.is_empty()).then(|| format!("{prefix}/"));
+    Ok(keys
+        .into_iter()
+        .filter_map(|(key,)| match &prefix {
+            Some(prefix) => key.strip_prefix(prefix).map(str::to_string),
+            None => Some(key),
+        })
+        .filter(|name| !name.is_empty() && !name.contains('/'))
+        .collect())
+}
+// EMBER end
+
 /// Clone all stored region data of `src_folder` to `dst_folder`
 /// (SlimeWorld-style world clone). Returns the number of copied regions.
 ///
@@ -371,6 +440,15 @@ pub async fn clone_world_data(
         .execute(&pool)
         .await
         .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "INSERT INTO easyworld_worlds (world_key, dimension, seed) \
+         SELECT ?, dimension, seed FROM easyworld_worlds WHERE world_key = ?",
+    )
+    .bind(&dst_key)
+    .bind(&src_key)
+    .execute(&pool)
+    .await
+    .map_err(|e| e.to_string())?;
     pool.close().await;
 
     info!(
@@ -418,6 +496,10 @@ pub async fn delete_world_data(
     .bind(&key)
     .execute(&pool)
     .await;
+    let _ = sqlx::query("DELETE FROM easyworld_worlds WHERE world_key = ?")
+        .bind(&key)
+        .execute(&pool)
+        .await;
     pool.close().await;
     info!(
         "EasyWorld: deleted {} regions of '{key}' from the database",

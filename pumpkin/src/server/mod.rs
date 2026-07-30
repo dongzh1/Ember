@@ -37,14 +37,10 @@ use pumpkin_protocol::{ClientPacket, java::client::config::CPluginMessage};
 use pumpkin_util::Difficulty;
 use pumpkin_util::GameMode;
 use pumpkin_util::text::TextComponent;
-use pumpkin_world::world_info::anvil::{
-    AnvilLevelInfo, LEVEL_DAT_BACKUP_FILE_NAME, LEVEL_DAT_FILE_NAME,
-};
-use pumpkin_world::world_info::{LevelData, WorldInfoError, WorldInfoReader, WorldInfoWriter};
+use pumpkin_world::world_info::LevelData;
 use rand::seq::{IndexedRandom, SliceRandom};
 use rsa::RsaPublicKey;
 use std::collections::HashSet;
-use std::fs;
 use std::net::IpAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -182,6 +178,11 @@ pub struct Server {
     pub item_registry: Arc<ItemRegistry>,
     /// Manages multiple worlds within the server.
     pub worlds: ArcSwap<Vec<Arc<World>>>,
+    // EMBER start - folderless MySQL world catalog
+    /// Logical world names persisted in `easyworld_worlds`. This replaces
+    /// filesystem discovery for commands and home-world existence checks.
+    known_worlds: std::sync::RwLock<std::collections::BTreeSet<String>>,
+    // EMBER end
     // EMBER start - dynamic world unload
     /// Names of worlds whose background save+stop is still running after
     /// removal from the tick loop; reloading such a name must wait, or two
@@ -331,7 +332,6 @@ pub struct Server {
 
     // world stuff which maybe should be put into a struct
     pub level_info: Arc<ArcSwap<LevelData>>,
-    world_info_writer: Arc<dyn WorldInfoWriter>,
 }
 
 // EMBER start - world creation/clone race guard
@@ -398,38 +398,26 @@ impl Server {
 
         let world_path = basic_config.get_world_path();
 
+        // EMBER start - forced folderless MySQL worlds
+        let mysql_config = match &advanced_config.world.chunk {
+            pumpkin_config::chunk::ChunkConfig::Easy(config)
+                if config.backend == pumpkin_config::chunk::EasyBackend::Mysql
+                    && !config.url.trim().is_empty() =>
+            {
+                config.clone()
+            }
+            _ => panic!(
+                "Ember requires [world.chunk] type = \"easy\", backend = \"mysql\", and a non-empty url"
+            ),
+        };
+        // EMBER end
+
         let block_registry = super::block::registry::default_registry();
 
-        let level_info = AnvilLevelInfo.read_world_info(&world_path);
-        if let Err(error) = &level_info {
-            match error {
-                // If it doesn't exist, just make a new one
-                WorldInfoError::InfoNotFound => (),
-                WorldInfoError::UnsupportedDataVersion(_version)
-                | WorldInfoError::UnsupportedLevelVersion(_version) => {
-                    error!("Failed to load world info!");
-                    error!("{error}");
-                    panic!("Unsupported world version! See the logs for more info.");
-                }
-                e => {
-                    panic!("World Error {e}");
-                }
-            }
-        } else {
-            let dat_path = world_path.join(LEVEL_DAT_FILE_NAME);
-            if dat_path.exists() {
-                let backup_path = world_path.join(LEVEL_DAT_BACKUP_FILE_NAME);
-                fs::copy(dat_path, backup_path).unwrap();
-            }
-        }
-        let level_info = level_info.unwrap_or_else(|err| {
-            warn!("Failed to get level_info, using default instead: {err}");
-            let default_data = LevelData::default(basic_config.seed);
-            if let Err(err) = AnvilLevelInfo.write_world_info(&default_data, &world_path) {
-                error!("Failed to save level.dat: {err}");
-            }
-            default_data
-        });
+        // EMBER: world metadata is deliberately session-local. The database
+        // stores only the logical catalog and chunk regions; no level.dat is
+        // read, created, backed up, or written.
+        let level_info = LevelData::default(basic_config.seed);
 
         let seed = level_info.world_gen_settings.seed;
         let level_info = Arc::new(ArcSwap::new(Arc::new(level_info)));
@@ -446,11 +434,11 @@ impl Server {
         let player_data_storage = ServerPlayerData::new(
             players_dir.join("data"),
             Duration::from_secs(advanced_config.player_data.save_player_cron_interval),
-            advanced_config.player_data.save_player_data,
+            false, // EMBER - folderless worlds intentionally persist no player NBT
         );
         let advancement_manager = Arc::new(AdvancementManager::new(
             players_dir.clone(),
-            advanced_config.advancement.save_advancements,
+            false, // EMBER - folderless worlds intentionally persist no advancements
         ));
         let white_list = AtomicBool::new(basic_config.white_list);
 
@@ -488,6 +476,30 @@ impl Server {
                 .map(|d| d.minecraft_name)
                 .collect::<Vec<_>>()
         );
+
+        // EMBER start - MySQL is the authoritative world catalog
+        let mysql = mysql_config.mysql(pumpkin_config::chunk::EasyWorldMode::ReadWrite);
+        let mut known_worlds = pumpkin_world::chunk::easy_mysql::list_world_names(&mysql)
+            .await
+            .unwrap_or_else(|error| panic!("Failed to load MySQL world catalog: {error}"))
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        for dimension in &dimensions {
+            let logical_root =
+                pumpkin_world::dimension::mysql_dimension_root(world_path.clone(), dimension);
+            pumpkin_world::chunk::easy_mysql::register_world(
+                &mysql,
+                &logical_root,
+                dimension.minecraft_name,
+                seed,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("Failed to register MySQL world: {error}"));
+            if let Some(name) = logical_root.file_name().and_then(|name| name.to_str()) {
+                known_worlds.insert(name.to_string());
+            }
+        }
+        // EMBER end
 
         // EMBER: moved up from after `Arc::new(server)` below so the pool can
         // be stored on the struct itself (see `gen_pool` field) instead of
@@ -572,6 +584,7 @@ impl Server {
             recipe_manager: Arc::new(recipe::RecipeManager::new()),
             map_id: level_info.load().map_id.into(),
             worlds: ArcSwap::from_pointee(vec![]),
+            known_worlds: std::sync::RwLock::new(known_worlds), // EMBER
             // EMBER start - dynamic world unload
             pending_world_unloads: std::sync::Mutex::new(std::collections::HashSet::new()),
             // EMBER end
@@ -602,7 +615,6 @@ impl Server {
             server_guid: rand::random(),
             player_idle_timeout: AtomicI32::new(0),
             mojang_public_keys: ArcSwap::from_pointee(Vec::new()),
-            world_info_writer: Arc::new(AnvilLevelInfo),
             level_info,
             gen_pool: gen_pool.clone(),
             gen_budget: gen_budget.clone(), // EMBER
@@ -634,9 +646,9 @@ impl Server {
         });
 
         let world_loader = |dim: Dimension| {
+            let server = server.clone();
             let path = world_path.clone();
             let registry = block_registry.clone();
-            let l_info = server.level_info.clone(); // Access from struct
             let weak = Arc::downgrade(&server);
             let config = Arc::new(server.advanced_config.world.clone());
             let pool = server.gen_pool.clone();
@@ -649,6 +661,11 @@ impl Server {
                         .color_named(NamedColor::DarkGreen)
                         .to_pretty_console()
                 );
+                let l_info = if dim.minecraft_name == Dimension::OVERWORLD.minecraft_name {
+                    server.level_info.clone()
+                } else {
+                    memory_world_level_info(server.basic_config.seed)
+                };
                 let (level, _chunk_config) =
                     into_level(dim.clone(), &config, path, seed, Some(pool), Some(budget));
                 let world = Arc::new(World::load(level.clone(), l_info, dim, registry, weak));
@@ -677,12 +694,7 @@ impl Server {
             server.mojang_public_keys.store(Arc::new(k));
         }
 
-        // EMBER start - sidecar residency prewarm + worldborder for startup worlds
-        // `create_world_with` applies a sidecar's `border` to worlds it
-        // creates at runtime; startup worlds (the default world's own
-        // dimensions) never went through that path, so without this their
-        // configured border was silently storage/generation-only — enforced
-        // against players in none of them, however-configured.
+        // EMBER start - finish runtime construction for startup worlds
         for world in server.worlds.load().iter() {
             // EMBER: finishes constructing this world's furniture - scans
             // this world's chunks for placed furniture and resolves each
@@ -692,26 +704,6 @@ impl Server {
                 .furniture_manager
                 .load_runtime(world, &server.custom_item_manager)
                 .await;
-
-            let root = world.level.level_folder.root_folder.clone();
-            if let Some(sidecar) = pumpkin_config::ember_world::EmberWorldConfig::load(&root) {
-                let cap = sidecar.resident_region_cap();
-                if cap > 0 {
-                    let level = world.level.clone();
-                    tokio::spawn(async move {
-                        level.prewarm_storage(cap).await;
-                    });
-                }
-                if let Some(border) = sidecar.border
-                    && border > 0
-                {
-                    let spawn = world.level_info.load();
-                    let (cx, cz) = (f64::from(spawn.spawn_x), f64::from(spawn.spawn_z));
-                    let mut wb = world.worldborder.lock().await;
-                    wb.set_center(world, cx, cz);
-                    wb.set_diameter(world, f64::from(border), None);
-                }
-            }
         }
         // EMBER end
 
@@ -863,37 +855,36 @@ impl Server {
     // EMBER end
 
     // EMBER start - create_world_with: explicit per-world LevelConfig
-    /// Like [`Self::create_world`], but an explicit [`LevelConfig`] replaces
-    /// the global configuration for this world — used by ephemeral dungeon
-    /// instances. After creation, a world with an `ember-world.toml`
-    /// sidecar is prewarmed in the background per its residency policy.
+    /// Like [`Self::create_world`], but accepts explicit runtime settings.
+    /// Chunk storage remains forced to the server's `MySQL` backend.
+    #[allow(clippy::too_many_lines)] // EMBER: registration + runtime construction
     pub async fn create_world_with(
         self: &Arc<Self>,
         name: String,
         dimension: Dimension,
         level_config: Option<pumpkin_config::world::LevelConfig>,
     ) -> Arc<World> {
-        // Border/residency come from the explicit config (dungeon instances
-        // have no on-disk sidecar) or the world's sidecar file.
-        let world_path = self.basic_config.get_world_path().join(&name);
-        let runtime = level_config.as_ref().map_or_else(
-            || {
-                pumpkin_config::ember_world::EmberWorldConfig::load(&world_path)
-                    .map(|s| (s.border, s.resident_region_cap()))
-            },
-            |lc| {
-                let border = lc.ember.border;
-                let small = border.is_some_and(|b| {
-                    b > 0 && b <= pumpkin_config::ember_world::SMALL_MAP_MAX_BORDER
-                });
-                let cap = if small {
-                    pumpkin_config::ember_world::SMALL_MAP_REGIONS
-                } else {
-                    0
-                };
-                Some((border, cap))
-            },
+        let logical_root = pumpkin_world::dimension::mysql_dimension_root(
+            std::path::PathBuf::from(&name),
+            &dimension,
         );
+        let name = logical_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&name)
+            .to_string();
+        // Border/residency are runtime-only settings supplied by the caller.
+        let runtime = level_config.as_ref().map(|lc| {
+            let border = lc.ember.border;
+            let small = border
+                .is_some_and(|b| b > 0 && b <= pumpkin_config::ember_world::SMALL_MAP_MAX_BORDER);
+            let cap = if small {
+                pumpkin_config::ember_world::SMALL_MAP_REGIONS
+            } else {
+                0
+            };
+            (border, cap)
+        });
         let _claim = match self.claim_world_name(&name, &dimension).await {
             Err(existing) => return existing,
             Ok(claim) => claim,
@@ -901,7 +892,7 @@ impl Server {
 
         // A world of this name may still be flushing after an unload: it has
         // already left `worlds` (so the dedup above misses it) but its old
-        // Level keeps writing the same folder/DB rows for up to seconds. Wait
+        // Level keeps writing the same DB rows for up to seconds. Wait
         // for that flush to finish before opening a second Level on the same
         // path, or the two writers would corrupt each other's data. The unload
         // task clears the name once shutdown() completes, so this terminates.
@@ -909,33 +900,36 @@ impl Server {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
+        let mut resolved_config =
+            level_config.unwrap_or_else(|| self.advanced_config.world.clone());
+        resolved_config.chunk = self.advanced_config.world.chunk.clone();
+        let pumpkin_config::chunk::ChunkConfig::Easy(mysql_config) = &resolved_config.chunk else {
+            panic!("Server::new must enforce easy+mysql")
+        };
+        let mysql = mysql_config.mysql(resolved_config.ember.mode);
+        pumpkin_world::chunk::easy_mysql::register_world(
+            &mysql,
+            &logical_root,
+            dimension.minecraft_name,
+            self.basic_config.seed.0 as i64,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("Failed to register MySQL world '{name}': {error}"));
+        if let Some(logical_name) = logical_root.file_name().and_then(|name| name.to_str())
+            && let Ok(mut known) = self.known_worlds.write()
+        {
+            known.insert(logical_name.to_string());
+        }
+
         let server = self.clone();
         let name_clone = name.clone();
         let world = tokio::task::spawn_blocking(move || {
-            let world_path = server.basic_config.get_world_path().join(name_clone);
-            // EMBER: a brand-new world has no folder yet, but
-            // load_world_level_info below writes level.dat straight into it
-            // with no such fallback - File::create then fails NotFound,
-            // logged as a confusing "Info not found!" (WorldInfoError's
-            // From<io::Error> maps that io::ErrorKind to InfoNotFound). Log
-            // and keep going rather than abort world creation over it, same
-            // as that function's own non-panicking philosophy.
-            if let Err(e) = std::fs::create_dir_all(&world_path) {
-                error!(
-                    "Failed to create world directory {}: {e}",
-                    world_path.display()
-                );
-            }
+            let world_path = std::path::PathBuf::from(name_clone);
             let registry = server.block_registry.clone();
-            // EMBER: each world loads its own level.dat instead of reusing
-            // the default world's `level_info` — otherwise every world
-            // created here (dungeon instances, `/world load`, clones) would
-            // inherit the default world's spawn point/seed/game rules
-            // regardless of what its own level.dat (if any) actually says.
-            let l_info = load_world_level_info(&world_path, server.basic_config.seed);
+            // Each logical world gets independent session-local metadata.
+            let l_info = memory_world_level_info(server.basic_config.seed);
             let weak = Arc::downgrade(&server);
-            let config =
-                Arc::new(level_config.unwrap_or_else(|| server.advanced_config.world.clone()));
+            let config = Arc::new(resolved_config);
             let seed = l_info.load().world_gen_settings.seed;
 
             let (level, _chunk_config) = pumpkin_world::dimension::into_level(
@@ -995,7 +989,7 @@ impl Server {
     }
     // EMBER end
 
-    // EMBER start - dynamic world management (unload/clone/clone_readonly/delete/list_world_folders)
+    // EMBER start - dynamic MySQL world management
     /// Unloads a world at runtime: evacuates its players to `fallback`,
     /// removes it from the tick loop, then saves and stops it.
     ///
@@ -1130,8 +1124,8 @@ impl Server {
             .is_ok_and(|pending| pending.contains(name))
     }
 
-    /// SlimeWorld-style clone: copies a loaded world's on-disk data (and its
-    /// `easy_mysql` database rows, if any) under a new name, then loads it.
+    /// Copies a loaded world's `MySQL` region rows under a new logical name,
+    /// then loads the clone.
     ///
     /// This is the reusable primitive behind `/world clone` and the plugin
     /// API. Business policy (permissions, quotas) belongs to the caller.
@@ -1153,47 +1147,36 @@ impl Server {
             .find(|w| w.get_world_name() == src_name)
             .cloned()
             .ok_or_else(|| format!("world '{src_name}' is not loaded"))?;
+        let dst_root = pumpkin_world::dimension::mysql_dimension_root(
+            std::path::PathBuf::from(dst_name),
+            &src_world.dimension,
+        );
+        let dst_name = dst_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "invalid destination world name".to_string())?
+            .to_string();
 
-        // Claimed for the entire copy+db-clone sequence below, not just the
+        // Claimed for the entire database clone sequence below, not just the
         // final `create_world` call - otherwise two concurrent clones to
         // the same not-yet-existing `dst_name` could both pass this check
-        // and both start `copy_dir_recursive` into the same destination.
+        // and both start writing the same destination rows.
         // See `claim_world_name`'s doc comment.
-        let claim = match self.claim_world_name(dst_name, &src_world.dimension).await {
+        let claim = match self.claim_world_name(&dst_name, &src_world.dimension).await {
             Err(_existing) => return Err(format!("world '{dst_name}' is already loaded")),
             Ok(claim) => claim,
         };
-        if self.is_world_unloading(dst_name) {
+        if self.is_world_unloading(&dst_name) {
             return Err(format!("world '{dst_name}' is still unloading"));
         }
 
         let src_dir = src_world.level.level_folder.root_folder.clone();
-        let dst_dir = self.basic_config.get_world_path().join(dst_name);
-        if dst_dir.exists() {
-            return Err(format!("folder '{}' already exists", dst_dir.display()));
-        }
+        let dst_dir = dst_root;
 
-        // Copy on-disk data and clone DB rows. Both steps can create/populate
-        // dst_dir, so on ANY failure we best-effort remove dst_dir before
-        // returning — a failed clone must never leave a half-built world behind.
         let cloned = async {
-            // Copy any on-disk data (region files, level.dat, entities).
-            if src_dir.exists() {
-                let (src_copy, dst_copy) = (src_dir.clone(), dst_dir.clone());
-                tokio::task::spawn_blocking(move || copy_dir_recursive(&src_copy, &dst_copy))
-                    .await
-                    .map_err(|e| format!("file copy panicked: {e}"))?
-                    .map_err(|e| format!("file copy failed: {e}"))?;
-            }
-
-            // easy_mysql keeps region data in the database — clone those rows to
-            // the new key too (in-database, no data transfer). Resolve the
-            // SOURCE world's effective config; its sidecar may pick a different
-            // backend than the global one.
-            let src_config = pumpkin_config::ember_world::resolve_level_config(
-                &self.advanced_config.world,
-                &src_dir,
-            );
+            // Clone region rows in-database without transferring them through
+            // the server process.
+            let src_config = self.advanced_config.world.clone();
             if let pumpkin_config::chunk::ChunkConfig::Easy(cfg) = &src_config.chunk
                 && cfg.backend == pumpkin_config::chunk::EasyBackend::Mysql
             {
@@ -1206,10 +1189,6 @@ impl Server {
         }
         .await;
 
-        if cloned.is_err() {
-            let cleanup = dst_dir.clone();
-            let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&cleanup)).await;
-        }
         cloned?;
 
         // Release the claim before handing off to `create_world`, which
@@ -1218,7 +1197,7 @@ impl Server {
         // claim only we hold.
         drop(claim);
         Ok(self
-            .create_world(dst_name.to_string(), src_world.dimension.clone())
+            .create_world(dst_name, src_world.dimension.clone())
             .await)
     }
 
@@ -1248,8 +1227,7 @@ impl Server {
         }
 
         let global = &self.advanced_config.world;
-        let src_root = self.basic_config.get_world_path().join(src_name);
-        let src = pumpkin_config::ember_world::resolve_level_config(global, &src_root);
+        let src = global.clone();
         let level_config = pumpkin_config::world::LevelConfig {
             chunk: src.chunk,
             lighting: global.lighting,
@@ -1270,9 +1248,8 @@ impl Server {
             .await)
     }
 
-    /// Permanently deletes a world's data (folder on disk, plus its rows in
-    /// the database for a `mysql`-backed world). The world must not be
-    /// loaded, unloading, or the default world.
+    /// Permanently deletes a logical world's `MySQL` rows. The world must not
+    /// be loaded, unloading, or the default world.
     ///
     /// # Errors
     /// Fails when the world is loaded/unloading/default, or deletion fails.
@@ -1300,55 +1277,29 @@ impl Server {
             return Err("cannot delete the default world".to_string());
         }
 
-        let root = self.basic_config.get_world_path().join(name);
-
-        // Delete database rows for a mysql-backed world before the folder,
-        // so the sidecar (which selects the backend) is still readable.
-        let config =
-            pumpkin_config::ember_world::resolve_level_config(&self.advanced_config.world, &root);
-        if let pumpkin_config::chunk::ChunkConfig::Easy(cfg) = &config.chunk
-            && cfg.backend == pumpkin_config::chunk::EasyBackend::Mysql
-        {
-            let mysql = cfg.mysql(config.ember.mode);
-            pumpkin_world::chunk::easy_mysql::delete_world_data(&mysql, &root)
-                .await
-                .map_err(|e| format!("database delete failed: {e}"))?;
-        }
-
-        if root.exists() {
-            let root_copy = root.clone();
-            tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&root_copy))
-                .await
-                .map_err(|e| format!("delete panicked: {e}"))?
-                .map_err(|e| format!("delete failed: {e}"))?;
+        let root = std::path::PathBuf::from(name);
+        let pumpkin_config::chunk::ChunkConfig::Easy(cfg) = &self.advanced_config.world.chunk
+        else {
+            panic!("Server::new must enforce easy+mysql")
+        };
+        let mysql = cfg.mysql(pumpkin_config::chunk::EasyWorldMode::ReadWrite);
+        pumpkin_world::chunk::easy_mysql::delete_world_data(&mysql, &root)
+            .await
+            .map_err(|e| format!("database delete failed: {e}"))?;
+        if let Ok(mut known) = self.known_worlds.write() {
+            known.remove(name);
         }
         info!("Deleted world '{name}'");
         Ok(())
     }
 
-    /// Lists world folders present on disk (each subfolder of the worlds
-    /// directory that holds a `level.dat` or a `dimensions/` tree). Used by
-    /// tooling to show worlds that exist but are not loaded.
+    /// Lists logical worlds registered in the `MySQL` catalog, including worlds
+    /// that are not currently loaded.
     #[must_use]
     pub fn list_world_folders(&self) -> Vec<String> {
-        let base = self.basic_config.get_world_path();
-        let mut out = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&base) else {
-            return out;
-        };
-        for entry in entries.flatten() {
-            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-                continue;
-            }
-            let path = entry.path();
-            let looks_like_world =
-                path.join("level.dat").exists() || path.join("dimensions").is_dir();
-            if looks_like_world && let Some(name) = entry.file_name().to_str() {
-                out.push(name.to_string());
-            }
-        }
-        out.sort();
-        out
+        self.known_worlds
+            .read()
+            .map_or_else(|_| Vec::new(), |worlds| worlds.iter().cloned().collect())
     }
     // EMBER end
 
@@ -1558,15 +1509,7 @@ impl Server {
             Self::wait_for_tick_to_finish(world).await; // EMBER
             world.shutdown().await;
         }
-        let level_data = self.level_info.load();
-        // then lets save the world info
-
-        if let Err(err) = self
-            .world_info_writer
-            .write_world_info(&level_data, &self.basic_config.get_world_path())
-        {
-            error!("Failed to save level.dat: {err}");
-        }
+        // EMBER: folderless MySQL worlds intentionally do not write level.dat.
         info!("Completed worlds");
     }
 
@@ -2237,44 +2180,11 @@ impl Server {
     }
 }
 
-// EMBER start - per-world level.dat load (create_world_with, startup border)
-/// Loads (or creates a fresh default for) the `level.dat` at `world_path`,
-/// independently of any other world's `level_info`. `Server::new` loads this
-/// once, for the default world's own dimensions to share (they're one save);
-/// every *other* world — dungeon instances, `/world load`, clones — needs its
-/// own, or they'd all inherit the default world's spawn point/seed/game rules.
-///
-/// Unlike `Server::new`, a read failure here never panics the whole server
-/// over one world: a missing file gets a fresh default (written to disk, same
-/// as at startup); any other error (corrupt/unsupported file) logs and falls
-/// back to an in-memory default for this session only, leaving the file on
-/// disk untouched rather than risk overwriting something possibly recoverable.
-fn load_world_level_info(
-    world_path: &std::path::Path,
-    seed: pumpkin_util::world_seed::Seed,
-) -> Arc<ArcSwap<LevelData>> {
-    let info = match AnvilLevelInfo.read_world_info(world_path) {
-        Ok(info) => info,
-        Err(WorldInfoError::InfoNotFound) => {
-            let default_data = LevelData::default(seed);
-            if let Err(err) = AnvilLevelInfo.write_world_info(&default_data, world_path) {
-                error!(
-                    "Failed to save new level.dat at {}: {err}",
-                    world_path.display()
-                );
-            }
-            default_data
-        }
-        Err(err) => {
-            error!(
-                "Failed to load level.dat at {}: {err}. Using in-memory defaults for this \
-                 session without touching the file on disk.",
-                world_path.display()
-            );
-            LevelData::default(seed)
-        }
-    };
-    Arc::new(ArcSwap::new(Arc::new(info)))
+// EMBER start - session-local world metadata
+/// Creates metadata for one logical world. Folderless `MySQL` worlds do not
+/// read or write `level.dat`, so this state intentionally resets on restart.
+fn memory_world_level_info(seed: pumpkin_util::world_seed::Seed) -> Arc<ArcSwap<LevelData>> {
+    Arc::new(ArcSwap::new(Arc::new(LevelData::default(seed))))
 }
 // EMBER end
 
@@ -2310,23 +2220,5 @@ pub(crate) fn validate_world_name(name: &str) -> Result<(), String> {
             "invalid world name '{name}': must be a single folder name (no '/', '\\', '.', '..', or empty)"
         ))
     }
-}
-// EMBER end
-
-// EMBER start - world clone helper (shared by Server::clone_world)
-/// Recursively copies a directory tree (a world folder: region files,
-/// level.dat, entities, ...).
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let target = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), &target)?;
-        }
-    }
-    Ok(())
 }
 // EMBER end

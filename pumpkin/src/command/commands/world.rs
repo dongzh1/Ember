@@ -12,8 +12,7 @@
 //                                copies it under a new name; `readonly` loads
 //                                an in-memory instance that discards changes
 //   /world prewarm <name>      - load a world's stored regions into memory
-//   /world convert <name> <fmt> - migrate an UNLOADED world's storage format
-//                                (anvil|linear|pump|easy)
+//   /world convert ...          - rejected while forced MySQL mode is active
 
 use std::sync::Arc;
 
@@ -357,8 +356,25 @@ fn crop_note(border: Option<i32>, cropped_regions: usize) -> String {
 }
 
 impl CommandExecutor for WorldConvertExecutor {
+    #[allow(clippy::too_many_lines)] // EMBER: retained file-conversion compatibility path
     fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
         Box::pin(async move {
+            let forced_mysql = matches!(
+                &context.server().advanced_config.world.chunk,
+                ChunkConfig::Easy(config)
+                    if config.backend == pumpkin_config::chunk::EasyBackend::Mysql
+            );
+            if forced_mysql {
+                feedback(
+                    context,
+                    err_text(
+                        "World storage is forced to MySQL; file-format conversion is disabled.",
+                    ),
+                )
+                .await;
+                return Ok(0);
+            }
+
             let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
             let format = StringArgumentType::get(context, ARG_FORMAT)?.to_string();
             let border = self

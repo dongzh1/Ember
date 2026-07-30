@@ -19,7 +19,8 @@ impl AdvancementManager {
     /// Creates a new instance of `AdvancementManager` using the player data path.
     pub fn new(player_data_path: impl Into<PathBuf>, save_enabled: bool) -> Self {
         let path = player_data_path.into().join("advancements");
-        if !path.exists()
+        if save_enabled
+            && !path.exists()
             && let Err(e) = create_dir_all(&path)
         {
             error!(

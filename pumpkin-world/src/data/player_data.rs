@@ -28,7 +28,8 @@ impl PlayerDataStorage {
     /// Creates a new `PlayerDataStorage` with the specified data path and cache expiration time.
     pub fn new(data_path: impl Into<PathBuf>, enabled: bool) -> Self {
         let path = data_path.into();
-        if !path.exists()
+        if enabled
+            && !path.exists()
             && let Err(e) = create_dir_all(&path)
         {
             error!(

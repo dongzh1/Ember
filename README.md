@@ -83,49 +83,20 @@ also has a small `docs/features/<name>.json` cheat sheet (e.g. `docs/features/np
 
 ### EasyWorld formats
 
-`easy` is Ember's **default** chunk format (best compression, empty-chunk pruning, atomic
-writes). Worlds stored in another format keep loading unchanged — on startup Ember detects the
-on-disk format and honors it (with a loud log) instead of regenerating terrain. Migrate
-deliberately with `/world convert <name> <format>` while the world is unloaded; old files are
-kept as `*.bak` and the new format is pinned in the world's `ember-world.toml`.
-
-> Note: `easy` prunes all-air chunks, so a chunk mined out to pure air regenerates on reload
-> in generator-backed worlds. For void/skyblock-style maps use a `generate = "void"` sidecar
-> or a non-pruning format (`anvil`/`pump`).
-
-One format, two backends. The loading strategy is chosen automatically by map size — you only
-pick the backend. Full guide: [`docs/easyworld.md`](docs/easyworld.md).
+Ember forces EasyWorld + MySQL storage. Worlds are database-managed logical names and no world
+folders are created. Full guide: [`docs/easyworld.md`](docs/easyworld.md).
 
 ```toml
-# On-disk .easy files (default)
-[world.chunk]
-type = "easy"
-backend = "file"
-```
-
-```toml
-# Shared MySQL storage (one writer, many read-only replicas)
+# Required MySQL storage (one writer, many read-only replicas)
 [world.chunk]
 type = "easy"
 backend = "mysql"
 url = "mysql://root:password@localhost:3306/ember"
 ```
 
-### Per-world configuration (`ember-world.toml`)
-
-Drop an `ember-world.toml` into a world's folder to override the global `[world]` settings for
-that world only:
-
-```toml
-border   = 512            # max size in blocks; <=512 is loaded whole into RAM (small map)
-generate = "seed"         # seed (default) | void | ocean
-mode     = "read_write"   # read_write (default) | read_only (never persists)
-source   = "arena"        # read-only clone: read another world's data
-```
-
-A world with a border ≤ 512×512 is prewarmed entirely into memory and clones instantly; larger
-or borderless worlds load region by region. `generate = void`/`ocean` fills ungenerated chunks
-without the terrain generator.
+The startup dimensions are independent logical worlds named `world`, `world_nether`, and
+`world_end`. Chunks, custom blocks, and furniture embedded in chunks persist. Entities, POI,
+player NBT, advancements, and `level.dat` metadata intentionally do not persist.
 
 ### Dynamic worlds
 
@@ -136,14 +107,12 @@ without the terrain generator.
 /world tp <name>                   # teleport yourself to a world's spawn
 /world clone <source> <dest> [save|readonly]  # save copy, or read-only in-memory instance
 /world prewarm <name>              # load a world's stored regions into memory
-/world convert <name> <format>     # migrate an unloaded world's storage format
-/world delete <name>               # delete an unloaded world (folder + DB rows + locks)
+/world delete <name>               # delete an unloaded world's database records
 ```
 
 Permission: `ember:command.world` (OP level 3 by default). Loading/unloading and cloning never
-stall the tick loop — saves run in the background. Every world-name/format/border argument
-above tab-completes (loaded worlds, on-disk-but-unloaded worlds, or both, depending on what
-each subcommand requires).
+stall the tick loop — saves run in the background. `/world convert` is disabled in forced MySQL
+mode.
 
 ### Plugin permissions
 
@@ -474,31 +443,17 @@ cargo build --release
 
 ### EasyWorld 世界格式
 
-一种格式，两个后端；加载方式按地图大小**自动**决定，你只选后端。完整说明见 [`docs/easyworld.md`](docs/easyworld.md)。
+Ember 强制使用 EasyWorld + MySQL。世界按逻辑名称保存在数据库中，不创建世界文件夹。完整说明见 [`docs/easyworld.md`](docs/easyworld.md)。
 
 ```toml
-# 磁盘 .easy 文件（默认）
-[world.chunk]
-type = "easy"
-backend = "file"
-```
-
-```toml
-# 共享 MySQL（一台读写，多台只读副本）
+# 强制 MySQL（一台读写，多台只读副本）
 [world.chunk]
 type = "easy"
 backend = "mysql"
 url = "mysql://root:password@localhost:3306/ember"
 ```
 
-**按世界覆盖**：世界文件夹放 `ember-world.toml`：
-
-```toml
-border   = 512           # 最大边界（格），≤512 = 小地图（整世界内存驻留、秒克隆）
-generate = "seed"        # seed 按种子 | void 虚空 | ocean 海洋底
-mode     = "read_write"  # read_write（默认）| read_only（不落盘）
-source   = "arena"       # 只读克隆：读另一个世界的数据
-```
+主世界、下界、末地分别注册为 `world`、`world_nether`、`world_end`。区块、自定义方块和家具随区块保存；实体、POI、玩家 NBT、进度和 `level.dat` 元数据按设计不持久化。
 
 ### 动态世界
 
@@ -509,13 +464,11 @@ source   = "arena"       # 只读克隆：读另一个世界的数据
 /world tp <名字>                         # 把自己传送到该世界出生点
 /world clone <源> <目标> [save|readonly] # 保存克隆 / 只读内存克隆
 /world prewarm <名字>                    # 把世界区域预热进内存
-/world convert <名字> <格式>             # 迁移未加载世界的存储格式
-/world delete <名字>                     # 删除未加载世界(文件夹+数据库行+锁)
+/world delete <名字>                     # 删除未加载世界的数据库记录
 ```
 
 权限：`ember:command.world`（默认 OP 3 级）。加载/卸载/克隆都不会卡服 —— 存盘在后台进行。
-以上每个世界名/格式/border 参数都支持 tab 补全（已加载世界、磁盘上未加载的世界，或两者都算，
-取决于各子命令的要求）。
+`/world convert` 在强制 MySQL 模式下禁用。
 
 ### 插件权限
 
