@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::sync::LazyLock;
 
 use libloading::Library;
 
@@ -35,15 +36,13 @@ impl PluginLoader for NativePluginLoader {
             }
 
             // 2. Extract Metadata (METADATA)
-            // `pumpkin-api-macros::plugin_impl` exports `METADATA` as a
-            // `LazyLock<PluginMetadata>` (see pumpkin-api-macros/src/lib.rs), not a raw
-            // `*const PluginMetadata`. Reading it as the latter reinterprets the
-            // LazyLock's internal state as a pointer, which silently yields a bogus
-            // PluginMetadata (empty name/version/etc.) instead of crashing outright.
+            // `#[plugin_impl]` exports this as a `LazyLock`, since `PluginMetadata`
+            // owns its strings and can't be built in a const.
             let metadata = unsafe {
-                &**library
-                    .get::<std::sync::LazyLock<PluginMetadata>>(b"METADATA")
-                    .map_err(|_| LoaderError::MetadataMissing)?
+                let metadata = library
+                    .get::<*const LazyLock<PluginMetadata>>(b"METADATA")
+                    .map_err(|_| LoaderError::MetadataMissing)?;
+                (**metadata).clone()
             };
 
             // 3. Extract Plugin Factory (plugin)
@@ -55,7 +54,7 @@ impl PluginLoader for NativePluginLoader {
 
             Ok((
                 plugin_factory(),
-                metadata.clone(),
+                metadata,
                 Box::new(library) as Box<dyn Any + Send + Sync>,
             ))
         })
