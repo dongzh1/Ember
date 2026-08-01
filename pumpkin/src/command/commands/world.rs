@@ -325,6 +325,23 @@ impl CommandExecutor for WorldCreateVoidExecutor {
                 return Ok(0);
             }
 
+            // Clean up any existing MySQL data for this world name so the
+            // void config takes effect. Without this, chunks and entities
+            // stored from a previous (seed-generated) session would be
+            // returned as Loaded by the inner FileIO, bypassing GenFillIO's
+            // void synthesis entirely.
+            let existed = server.list_world_folders().contains(&name);
+            if existed {
+                if let Err(e) = server.delete_world(&name).await {
+                    feedback(
+                        context,
+                        err_text(format!("Cannot clean up existing world data: {e}")),
+                    )
+                    .await;
+                    return Ok(0);
+                }
+            }
+
             let mut level_config = LevelConfig::default();
             level_config.ember.generate = GenerateMode::Void;
 
@@ -335,12 +352,18 @@ impl CommandExecutor for WorldCreateVoidExecutor {
                     Some(level_config),
                 )
                 .await;
+            let hint = if existed {
+                " (existing data cleared)"
+            } else {
+                ""
+            };
             feedback(
                 context,
                 TextComponent::text(format!(
-                    "Void world '{}' created and loaded ({}).",
+                    "Void world '{}' created and loaded ({}){}.",
                     world.get_world_name(),
                     world.dimension.minecraft_name,
+                    hint,
                 ))
                 .color_named(NamedColor::Green),
             )
