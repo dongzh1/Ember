@@ -2582,7 +2582,7 @@ impl Player {
                                 VarInt(self.get_entity().portal_cooldown.load(Ordering::Relaxed) as i32),
                                 new_world.sea_level.into(),
                             ),
-                            CRespawn::KEEP_ALL_DATA,
+                            CRespawn::KEEP_ATTRIBUTE_MODIFIERS,
                         )).await;
                     }
                     ClientPlatform::Bedrock(bedrock) => {
