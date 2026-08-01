@@ -457,6 +457,12 @@ impl ProtoChunk {
     #[inline]
     #[must_use]
     pub fn get_block_state_raw(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+        // EMBER: guard against out-of-bounds y (carver/nether edge case).
+        // Without this, canyon carving in the nether can compute local_y
+        // values that overflow the flat block map.
+        if y < 0 || y as u32 >= u32::from(self.height()) {
+            return Block::VOID_AIR.default_state.id;
+        }
         let index = self.local_pos_to_block_index(x, y, z);
         self.flat_block_map[index]
     }

@@ -2631,6 +2631,13 @@ impl Player {
                     }
                 }
 
+                // Force-despawn all NPCs from this player so packet-only
+                // entities don't linger across world changes.
+                server
+                    .npc_manager
+                    .force_despawn_for(&server, self.gameprofile.id)
+                    .await;
+
                 self.send_permission_lvl_update();
 
                 player.clone().request_teleport(position, yaw, pitch).await;
