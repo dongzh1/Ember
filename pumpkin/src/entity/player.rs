@@ -66,12 +66,12 @@ use pumpkin_protocol::java::client::play::{
     Animation, CActionBar, CAwardStats, CChangeDifficulty, CCloseContainer, CCombatDeath,
     CCustomPayload, CDisguisedChatMessage, CEntityAnimation, CEntityPositionSync, CGameEvent,
     CItemCooldown, CMapItemData, COpenScreen, CParticle, CPlayerAbilities, CPlayerInfoUpdate,
-    CPlayerPosition, CPlayerSpawnPosition, CRespawn, CSetCamera, CSetContainerContent,
-    CSetContainerProperty, CSetContainerSlot, CSetCursorItem, CSetEquipment, CSetExperience,
-    CSetHealth, CSetPlayerInventory, CSetSelectedSlot, CSoundEffect, CStopSound, CSubtitle,
-    CSystemChatMessage, CTabList, CTitleAnimation, CTitleText, CUnloadChunk, CUpdateMobEffect,
-    CUpdateTime, GameEvent, MapIcon, MapPatch, Metadata, PlayerAction, PlayerInfoFlags,
-    PlayerSpawnData, PreviousMessage, Statistic,
+    CPlayerPosition, CPlayerSpawnPosition, CRemoveEntities, CRespawn, CSetCamera,
+    CSetContainerContent, CSetContainerProperty, CSetContainerSlot, CSetCursorItem,
+    CSetEquipment, CSetExperience, CSetHealth, CSetPlayerInventory, CSetSelectedSlot,
+    CSoundEffect, CStopSound, CSubtitle, CSystemChatMessage, CTabList, CTitleAnimation,
+    CTitleText, CUnloadChunk, CUpdateMobEffect, CUpdateTime, GameEvent, MapIcon, MapPatch,
+    Metadata, PlayerAction, PlayerInfoFlags, PlayerSpawnData, PreviousMessage, Statistic,
 };
 use pumpkin_protocol::java::server::play::{
     SClickSlot, SContainerButtonClick, SRenameItem, SlotActionType,
@@ -2540,6 +2540,19 @@ impl Player {
                 let new_world = event.new_world;
 
                 self.set_client_loaded(false);
+
+                // Collect entity IDs from the old world BEFORE removing the
+                // player, so we can explicitly clear them from the client
+                // after Respawn. data_kept=0 in the Respawn packet should do
+                // this, but same-dimension teleports (overworld→overworld)
+                // can cause the client to retain stale entity tracking.
+                let old_entity_ids: Vec<VarInt> = current_world
+                    .entities
+                    .load()
+                    .iter()
+                    .map(|e| VarInt(e.get_entity().entity_id as i32))
+                    .collect();
+
                 let player = current_world.remove_player(self, false).await.unwrap();
                new_world.players.rcu(|current_list| {
                     let mut new_list = (**current_list).clone();
@@ -2589,6 +2602,14 @@ impl Player {
                             // (health, abilities, held item, position, etc.).
                             0,
                         )).await;
+
+                        // Explicitly remove all entities from the old world
+                        // on the client, guarding against same-dimension
+                        // teleport edge cases where Respawn alone is not
+                        // enough to flush entity tracking.
+                        if !old_entity_ids.is_empty() {
+                            java.send_packet_now(&CRemoveEntities::new(&old_entity_ids)).await;
+                        }
                     }
                     ClientPlatform::Bedrock(bedrock) => {
                         let bedrock_dimension = if new_world.dimension == Dimension::OVERWORLD {

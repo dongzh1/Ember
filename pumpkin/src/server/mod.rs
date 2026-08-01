@@ -485,19 +485,35 @@ impl Server {
             .unwrap_or_else(|error| panic!("Failed to load MySQL world catalog: {error}"))
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
-        for dimension in &dimensions {
-            let logical_root =
-                pumpkin_world::dimension::mysql_dimension_root(world_path.clone(), dimension);
-            pumpkin_world::chunk::easy_mysql::register_world(
-                &mysql,
-                &logical_root,
-                dimension.minecraft_name,
-                seed,
-            )
-            .await
-            .unwrap_or_else(|error| panic!("Failed to register MySQL world: {error}"));
-            if let Some(name) = logical_root.file_name().and_then(|name| name.to_str()) {
-                known_worlds.insert(name.to_string());
+        // EMBER start - parallel MySQL world registration
+        let mut reg_tasks = JoinSet::new();
+        for dimension in dimensions.clone() {
+            let mysql = mysql.clone();
+            let world_path = world_path.clone();
+            reg_tasks.spawn(async move {
+                let logical_root =
+                    pumpkin_world::dimension::mysql_dimension_root(world_path, &dimension);
+                pumpkin_world::chunk::easy_mysql::register_world(
+                    &mysql,
+                    &logical_root,
+                    dimension.minecraft_name,
+                    seed,
+                )
+                .await
+                .map(|()| {
+                    logical_root
+                        .file_name()
+                        .and_then(|n| n.to_str().map(String::from))
+                })
+            });
+        }
+        while let Some(result) = reg_tasks.join_next().await {
+            match result.unwrap() {
+                Ok(Some(name)) => {
+                    known_worlds.insert(name);
+                }
+                Ok(None) => {}
+                Err(e) => panic!("Failed to register MySQL world: {e}"),
             }
         }
         // EMBER end
