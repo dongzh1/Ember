@@ -716,6 +716,9 @@ impl NpcManager {
     /// Despawns every NPC from a single player immediately — used when a
     /// player changes worlds so stale NPCs don't linger on their client.
     pub async fn force_despawn_for(&self, server: &Arc<Server>, player_id: Uuid) {
+        let Some(player) = server.get_player_by_uuid(player_id) else {
+            return;
+        };
         let config = self.config.read().await;
         let mut runtime = self.runtime.write().await;
         for (name, state) in runtime.iter_mut() {
@@ -726,21 +729,8 @@ impl NpcManager {
                 continue;
             };
             let is_player = is_player_kind(resolve_entity_type(entry));
-            // Search all worlds for this player's client.
-            for world in server.worlds.load().iter() {
-                for player in world.players.load().iter() {
-                    if player.gameprofile.id == player_id {
-                        if let ClientPlatform::Java(client) = player.client.as_ref() {
-                            send_despawn_packets(
-                                client,
-                                state.entity_id,
-                                state.fake_uuid,
-                                is_player,
-                            );
-                        }
-                        return;
-                    }
-                }
+            if let ClientPlatform::Java(client) = player.client.as_ref() {
+                send_despawn_packets(client, state.entity_id, state.fake_uuid, is_player);
             }
         }
     }
