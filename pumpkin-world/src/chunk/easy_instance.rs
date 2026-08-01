@@ -214,7 +214,14 @@ fn empty_chunk(pos: Vector2<i32>, min_y: i32, height: i32) -> ChunkData {
             ),
             min_y,
         },
-        heightmap: std::sync::Mutex::new(ChunkHeightmaps::default()),
+        heightmap: std::sync::Mutex::new({
+            let h: Box<[i64]> = vec![i64::from(min_y) - 1; 256].into_boxed_slice();
+            ChunkHeightmaps {
+                world_surface: Some(h.clone()),
+                motion_blocking: Some(h.clone()),
+                motion_blocking_no_leaves: Some(h),
+            }
+        }),
         x: pos.x,
         z: pos.y,
         block_ticks: ChunkTickScheduler::default(),
