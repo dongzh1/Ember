@@ -2582,7 +2582,12 @@ impl Player {
                                 VarInt(self.get_entity().portal_cooldown.load(Ordering::Relaxed) as i32),
                                 new_world.sea_level.into(),
                             ),
-                            CRespawn::KEEP_ATTRIBUTE_MODIFIERS,
+                            // Clear all cached client state on cross-world
+                            // teleport: attributes, entity tracking, particles,
+                            // falling blocks. The server resends every needed
+                            // piece of state immediately after this packet
+                            // (health, abilities, held item, position, etc.).
+                            0,
                         )).await;
                     }
                     ClientPlatform::Bedrock(bedrock) => {
