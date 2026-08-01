@@ -355,14 +355,26 @@ impl CommandExecutor for WorldCreateVoidExecutor {
 
             // Persist the void config so restart + /world load picks it up.
             let world_root = server.basic_config.get_world_path().join(&name);
-            let _ = std::fs::create_dir_all(&world_root);
-            let _ = write_sidecar(
+            if let Err(e) = std::fs::create_dir_all(&world_root) {
+                feedback(
+                    context,
+                    err_text(format!("Cannot create world directory: {e}")),
+                )
+                .await;
+                // World is already loaded — keep it, but warn.
+            } else if let Err(e) = write_sidecar(
                 &world_root,
                 &EmberWorldConfig {
                     generate: GenerateMode::Void,
                     ..Default::default()
                 },
-            );
+            ) {
+                feedback(
+                    context,
+                    err_text(format!("Void world loaded but config persist failed: {e}")),
+                )
+                .await;
+            }
 
             let hint = if existed {
                 " (existing data cleared)"
