@@ -17,7 +17,8 @@
 use std::sync::Arc;
 
 use pumpkin_config::chunk::ChunkConfig;
-use pumpkin_config::ember_world::SMALL_MAP_MAX_BORDER;
+use pumpkin_config::ember_world::{GenerateMode, SMALL_MAP_MAX_BORDER};
+use pumpkin_config::world::LevelConfig;
 use pumpkin_data::dimension::Dimension;
 use pumpkin_util::PermissionLvl;
 use pumpkin_util::math::vector3::Vector3;
@@ -286,6 +287,60 @@ impl CommandExecutor for WorldPrewarmExecutor {
                 context,
                 TextComponent::text(format!(
                     "Prewarming world '{name}' in the background (up to {cap} regions)."
+                ))
+                .color_named(NamedColor::Green),
+            )
+            .await;
+            Ok(1)
+        })
+    }
+}
+
+struct WorldCreateVoidExecutor;
+
+impl CommandExecutor for WorldCreateVoidExecutor {
+    fn execute<'a>(&'a self, context: &'a CommandContext) -> CommandExecutorResult<'a> {
+        Box::pin(async move {
+            let name = StringArgumentType::get(context, ARG_NAME)?.to_string();
+            let server = context.server().clone();
+
+            if let Err(e) = crate::server::validate_world_name(&name) {
+                feedback(context, err_text(e)).await;
+                return Ok(0);
+            }
+            if find_world(&server, &name).is_some() {
+                feedback(
+                    context,
+                    err_text(format!("World '{name}' is already loaded.")),
+                )
+                .await;
+                return Ok(0);
+            }
+            if server.is_world_unloading(&name) {
+                feedback(
+                    context,
+                    err_text(format!("World '{name}' is still unloading, retry shortly.")),
+                )
+                .await;
+                return Ok(0);
+            }
+
+            let mut level_config = LevelConfig::default();
+            level_config.ember.generate = GenerateMode::Void;
+
+            let world = server
+                .create_world_with(
+                    name.clone(),
+                    dimension_for_world_name(&name),
+                    Some(level_config),
+                )
+                .await;
+            feedback(
+                context,
+                TextComponent::text(format!(
+                    "Void world '{}' created and loaded ({}).",
+                    world.get_world_name(),
+                    world.dimension.minecraft_name,
                 ))
                 .color_named(NamedColor::Green),
             )
@@ -648,6 +703,13 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &mut PermissionReg
                     argument(ARG_NAME, StringArgumentType::SingleWord)
                         .suggests(UnloadedWorldSuggestionProvider)
                         .executes(WorldLoadExecutor),
+                ),
+            )
+            .then(
+                literal("create-void").then(
+                    argument(ARG_NAME, StringArgumentType::SingleWord)
+                        .suggests(UnloadedWorldSuggestionProvider)
+                        .executes(WorldCreateVoidExecutor),
                 ),
             )
             .then(
