@@ -59,10 +59,12 @@ fn base_chunk(pos: Vector2<i32>, min_y: i32, height: i32) -> ChunkData {
             min_y,
         },
         // EMBER start - void/ocean chunks need explicit heightmaps so the
-        // client can render sky lighting correctly. An all-air column has
-        // no non-air block, so every column's height is min_y - 1.
+        // client can render sky lighting correctly. Heightmaps use a
+        // packed 9-bit-per-column format (7 columns per i64), so 256
+        // columns need 37 longs. All zeros encodes "no non-air block"
+        // (height = min_y - 1) for every column.
         heightmap: std::sync::Mutex::new({
-            let h: Box<[i64]> = vec![i64::from(min_y) - 1; 256].into_boxed_slice();
+            let h: Box<[i64]> = vec![0i64; 37].into_boxed_slice();
             ChunkHeightmaps {
                 world_surface: Some(h.clone()),
                 motion_blocking: Some(h.clone()),
