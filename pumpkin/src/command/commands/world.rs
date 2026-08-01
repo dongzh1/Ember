@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use pumpkin_config::chunk::ChunkConfig;
-use pumpkin_config::ember_world::{GenerateMode, SMALL_MAP_MAX_BORDER};
+use pumpkin_config::ember_world::{EmberWorldConfig, GenerateMode, SMALL_MAP_MAX_BORDER, write_sidecar};
 use pumpkin_config::world::LevelConfig;
 use pumpkin_data::dimension::Dimension;
 use pumpkin_util::PermissionLvl;
@@ -352,6 +352,18 @@ impl CommandExecutor for WorldCreateVoidExecutor {
                     Some(level_config),
                 )
                 .await;
+
+            // Persist the void config so restart + /world load picks it up.
+            let world_root = server.basic_config.get_world_path().join(&name);
+            let _ = std::fs::create_dir_all(&world_root);
+            let _ = write_sidecar(
+                &world_root,
+                &EmberWorldConfig {
+                    generate: GenerateMode::Void,
+                    ..Default::default()
+                },
+            );
+
             let hint = if existed {
                 " (existing data cleared)"
             } else {

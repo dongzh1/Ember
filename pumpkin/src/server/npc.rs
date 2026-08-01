@@ -734,7 +734,7 @@ impl NpcManager {
 
     fn despawn_from_viewers(
         server: &Arc<Server>,
-        world_name: &str,
+        _world_name: &str,
         entity_id: i32,
         fake_uuid: Uuid,
         viewers: &HashSet<Uuid>,
@@ -743,21 +743,18 @@ impl NpcManager {
         if viewers.is_empty() {
             return;
         }
-        let Some(world) = server
-            .worlds
-            .load()
-            .iter()
-            .find(|w| w.get_world_name() == world_name)
-            .cloned()
-        else {
-            return;
-        };
-        for player in world.players.load().iter() {
-            if !viewers.contains(&player.gameprofile.id) {
-                continue;
-            }
-            if let ClientPlatform::Java(client) = player.client.as_ref() {
-                send_despawn_packets(client, entity_id, fake_uuid, is_player);
+        // Search ALL worlds — the target player may have teleported to a
+        // different world since the NPC was spawned. If we only search the
+        // NPC's assigned world we'd never find them and the client would
+        // keep rendering the NPC indefinitely.
+        for world in server.worlds.load().iter() {
+            for player in world.players.load().iter() {
+                if !viewers.contains(&player.gameprofile.id) {
+                    continue;
+                }
+                if let ClientPlatform::Java(client) = player.client.as_ref() {
+                    send_despawn_packets(client, entity_id, fake_uuid, is_player);
+                }
             }
         }
     }

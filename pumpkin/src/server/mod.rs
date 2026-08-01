@@ -902,8 +902,12 @@ impl Server {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
-        let mut resolved_config =
-            level_config.unwrap_or_else(|| self.advanced_config.world.clone());
+        let mut resolved_config = level_config.unwrap_or_else(|| {
+            pumpkin_config::ember_world::resolve_level_config(
+                &self.advanced_config.world,
+                &self.basic_config.get_world_path().join(&name),
+            )
+        });
         resolved_config.chunk = self.advanced_config.world.chunk.clone();
         let pumpkin_config::chunk::ChunkConfig::Easy(mysql_config) = &resolved_config.chunk else {
             panic!("Server::new must enforce easy+mysql")
