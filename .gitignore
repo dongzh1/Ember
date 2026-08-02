@@ -125,6 +125,9 @@ node_modules
 
 run/
 
+# Local Reasonix chat attachments (screenshots/video pasted into the assistant UI)
+.reasonix/attachments/
+
 # Benchmarking
 *perf.data*
 *flamegraph.svg

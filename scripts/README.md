@@ -28,6 +28,7 @@
 | `push.bat` | `push.ps1` | 提交 + 推送到 GitHub(origin/main),推送前自动做格式检查,禁止在 master 提交 |
 | `sync-upstream.bat` | `sync-upstream.ps1` | 拉取上游 Pumpkin → 更新 master 镜像 → 合并进 main → 推送;有冲突时输出冲突报告 |
 | — | `verify-easyworld.ps1/.sh/.bat` | EasyWorld 存储功能验证(文件模式 + MySQL 模式) |
+| — | `sync-feature-guides.ps1` | 从 `docs/features/*.json` 给服务端每个 Ember 功能目录生成详细 `README.md` |
 
 ## 打包说明
 
@@ -50,7 +51,11 @@
 .\scripts\build-remote.ps1 [-Ref main]
 .\scripts\push.ps1 [-Message "[EMBER] feat: xxx"] [-NoCheck]
 .\scripts\sync-upstream.ps1
+.\scripts\sync-feature-guides.ps1 -ServerRoot D:\ember
 ```
+
+`sync-feature-guides.ps1` 只会创建功能目录并覆盖其中的 `README.md`，不会修改 TOML、JSON
+配置或玩家数据。功能说明有变化时先更新 `docs/features/*.json`，再运行该脚本同步到服务端。
 
 ## 约定
 

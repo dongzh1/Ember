@@ -67,11 +67,11 @@ use pumpkin_protocol::java::client::play::{
     CCustomPayload, CDisguisedChatMessage, CEntityAnimation, CEntityPositionSync, CGameEvent,
     CItemCooldown, CMapItemData, COpenScreen, CParticle, CPlayerAbilities, CPlayerInfoUpdate,
     CPlayerPosition, CPlayerSpawnPosition, CRemoveEntities, CRespawn, CSetCamera,
-    CSetContainerContent, CSetContainerProperty, CSetContainerSlot, CSetCursorItem,
-    CSetEquipment, CSetExperience, CSetHealth, CSetPlayerInventory, CSetSelectedSlot,
-    CSoundEffect, CStopSound, CSubtitle, CSystemChatMessage, CTabList, CTitleAnimation,
-    CTitleText, CUnloadChunk, CUpdateMobEffect, CUpdateTime, GameEvent, MapIcon, MapPatch,
-    Metadata, PlayerAction, PlayerInfoFlags, PlayerSpawnData, PreviousMessage, Statistic,
+    CSetContainerContent, CSetContainerProperty, CSetContainerSlot, CSetCursorItem, CSetEquipment,
+    CSetExperience, CSetHealth, CSetPlayerInventory, CSetSelectedSlot, CSoundEffect, CStopSound,
+    CSubtitle, CSystemChatMessage, CTabList, CTitleAnimation, CTitleText, CUnloadChunk,
+    CUpdateMobEffect, CUpdateTime, GameEvent, MapIcon, MapPatch, Metadata, PlayerAction,
+    PlayerInfoFlags, PlayerSpawnData, PreviousMessage, Statistic,
 };
 use pumpkin_protocol::java::server::play::{
     SClickSlot, SContainerButtonClick, SRenameItem, SlotActionType,
@@ -2507,6 +2507,9 @@ impl Player {
     }
 
     /// Teleports the player to a different world or dimension with an optional position, yaw, and pitch.
+    // Keep the complete cross-edition world transition in one place so packet ordering stays
+    // explicit. Splitting this flow makes subtle Java/Bedrock state-ordering regressions easier.
+    #[allow(clippy::too_many_lines)]
     pub async fn teleport_world(
         self: &Arc<Self>,
         new_world: Arc<World>,
@@ -2550,7 +2553,7 @@ impl Player {
                     .entities
                     .load()
                     .iter()
-                    .map(|e| VarInt(e.get_entity().entity_id as i32))
+                    .map(|e| VarInt(e.get_entity().entity_id))
                     .collect();
 
                 let player = current_world.remove_player(self, false).await.unwrap();

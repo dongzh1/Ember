@@ -17,7 +17,9 @@
 use std::sync::Arc;
 
 use pumpkin_config::chunk::ChunkConfig;
-use pumpkin_config::ember_world::{EmberWorldConfig, GenerateMode, SMALL_MAP_MAX_BORDER, write_sidecar};
+use pumpkin_config::ember_world::{
+    EmberWorldConfig, GenerateMode, SMALL_MAP_MAX_BORDER, write_sidecar,
+};
 use pumpkin_config::world::LevelConfig;
 use pumpkin_data::dimension::Dimension;
 use pumpkin_util::PermissionLvl;
@@ -331,15 +333,13 @@ impl CommandExecutor for WorldCreateVoidExecutor {
             // returned as Loaded by the inner FileIO, bypassing GenFillIO's
             // void synthesis entirely.
             let existed = server.list_world_folders().contains(&name);
-            if existed {
-                if let Err(e) = server.delete_world(&name).await {
-                    feedback(
-                        context,
-                        err_text(format!("Cannot clean up existing world data: {e}")),
-                    )
-                    .await;
-                    return Ok(0);
-                }
+            if existed && let Err(e) = server.delete_world(&name).await {
+                feedback(
+                    context,
+                    err_text(format!("Cannot clean up existing world data: {e}")),
+                )
+                .await;
+                return Ok(0);
             }
 
             let mut level_config = LevelConfig::default();
