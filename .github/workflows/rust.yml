@@ -144,7 +144,7 @@ jobs:
         # supplied: organization-id" on every push. Skip instead of failing the build.
         if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
         # EMBER end
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '${{ secrets.SIGNPATH_ORGANIZATION_ID }}'
